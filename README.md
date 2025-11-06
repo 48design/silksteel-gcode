@@ -71,7 +71,7 @@ Prevents nozzle collisions during travel moves:
 ### Setup
 ```bash
 # Clone or download this repository
-git clone https://github.com/yourusername/silksteel-gcode.git
+git clone https://github.com/48design/silksteel-gcode.git
 cd silksteel-gcode
 
 # Install dependencies
@@ -106,8 +106,8 @@ python SilkSteel.py input.gcode -o output.gcode -enableBricklayers -bricklayersE
 
 ### In-Place Mode (For Slicer Integration)
 ```bash
-# Modifies the input file directly (required for slicer post-processing scripts)
-python SilkSteel.py -full
+# Modifies the input file directly (required for slicer post-processing scripts, gcode automagically 🧙 added by slider)
+"{fielpath-to-your-python.exe}" "{path-to-silksteel}\SilkSteel.py" -full
 ```
 
 ---
