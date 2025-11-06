@@ -1,3 +1,5 @@
+![SilkSteel](assets/silksteel-hero.jpg)
+
 # SilkSteel G-Code Post-Processor
 
 **SilkSteel** — *Smooth on the outside, strong on the inside.*
