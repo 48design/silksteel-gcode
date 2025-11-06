@@ -19,6 +19,7 @@ SilkSteel is an advanced G-code post-processing tool that applies multiple optim
 
 The result? Prints with **silk-smooth exteriors** and **steel-strong interiors**.
 
+![SilkSteel](assets/silksteel_gcode-view00.jpg)
 ![SilkSteel](assets/silksteel_gcode-view01.jpg)
 
 ---
