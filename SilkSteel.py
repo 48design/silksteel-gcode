@@ -1172,13 +1172,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         old_z = current_z
                         current_z = float(z_marker_match.group(1))
                         logging.info(f"\nLayer {current_layer} Z marker: updated current_z from {old_z:.3f} to {current_z:.3f}")
-                        print(f"[DEBUG] Layer {current_layer}: Updated current_z from {old_z:.3f} to {current_z:.3f} (from ;Z: marker)")
+                        if debug:
+                            print(f"[DEBUG] Layer {current_layer}: Updated current_z from {old_z:.3f} to {current_z:.3f} (from ;Z: marker)")
                 if ";HEIGHT:" in lines[j]:
                     height_match = re.search(r';HEIGHT:([\d.]+)', lines[j])
                     if height_match:
                         current_layer_height = float(height_match.group(1))
                         logging.info(f"Layer {current_layer} HEIGHT marker: layer_height={current_layer_height:.3f}")
-                        print(f"[DEBUG] Layer {current_layer}: current_layer_height={current_layer_height:.3f}, current_z={current_z:.3f}")
+                        if debug:
+                            print(f"[DEBUG] Layer {current_layer}: current_layer_height={current_layer_height:.3f}, current_z={current_z:.3f}")
                         break
             modified_lines.append(line)
             i += 1
