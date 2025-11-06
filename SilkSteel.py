@@ -56,8 +56,8 @@ logging.info(f"Command line args: {sys.argv}")
 logging.info("=" * 70)
 
 # Non-planar infill constants
-DEFAULT_AMPLITUDE = 2  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
-DEFAULT_FREQUENCY = 6  # Default frequency of the sine wave (reduced for longer waves)
+DEFAULT_AMPLITUDE = 3  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
+DEFAULT_FREQUENCY = 8  # Default frequency of the sine wave (reduced for longer waves)
 SEGMENT_LENGTH = 0.2  # Split infill lines into segments of this length (mm) - smaller for smoother curves
 
 # Safe Z-hop constants
@@ -96,16 +96,142 @@ def segment_line(x1, y1, x2, y2, segment_length):
     
     return segments
 
-def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max, 
-                          resolution=1.0, frequency_x=0.5, frequency_y=0.5, frequency_z=0.5):
+def generate_perlin_noise_3d(shape, res, seed=None):
     """
-    Generate a 3D lookup table for noise/modulation values.
-    Uses 3D sine waves for smooth, predictable patterns.
+    Generate 3D Perlin noise using numpy - simplified robust version.
+    Based on: https://pvigier.github.io/2018/11/02/3d-perlin-noise-numpy.html
+    
+    Args:
+        shape: Tuple of (width, height, depth) for output array
+        res: Tuple of (res_x, res_y, res_z) - resolution of grid
+        seed: Random seed for reproducibility
+    
+    Returns:
+        3D numpy array with Perlin noise values in range [-1, 1]
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    def f(t):
+        """Smoothstep function"""
+        return 6*t**5 - 15*t**4 + 10*t**3
+    
+    # Generate coordinate grid
+    delta = (res[0] / shape[0], res[1] / shape[1], res[2] / shape[2])
+    d = (shape[0] // res[0], shape[1] // res[1], shape[2] // res[2])
+    grid = np.mgrid[0:res[0]:delta[0], 0:res[1]:delta[1], 0:res[2]:delta[2]]
+    grid = grid.transpose(1, 2, 3, 0) % 1
+    
+    # The grid might be slightly larger or smaller than expected due to rounding
+    # Trim or pad to exact shape
+    actual_grid = np.zeros(shape + (3,))
+    min_x = min(grid.shape[0], shape[0])
+    min_y = min(grid.shape[1], shape[1])
+    min_z = min(grid.shape[2], shape[2])
+    actual_grid[:min_x, :min_y, :min_z, :] = grid[:min_x, :min_y, :min_z, :]
+    grid = actual_grid
+    
+    # Generate random gradients
+    theta = 2*np.pi*np.random.rand(res[0]+1, res[1]+1, res[2]+1)
+    phi = 2*np.pi*np.random.rand(res[0]+1, res[1]+1, res[2]+1)
+    gradients = np.stack((np.sin(phi)*np.cos(theta), np.sin(phi)*np.sin(theta), np.cos(phi)), axis=3)
+    
+    # Make tileable
+    gradients[-1] = gradients[0]
+    
+    # Create gradient arrays by repeating, then trim/pad to exact shape
+    def resize_gradient(g_slice):
+        g_repeated = g_slice.repeat(d[0], 0).repeat(d[1], 1).repeat(d[2], 2)
+        g_out = np.zeros(shape + (3,))
+        min_x = min(g_repeated.shape[0], shape[0])
+        min_y = min(g_repeated.shape[1], shape[1])
+        min_z = min(g_repeated.shape[2], shape[2])
+        g_out[:min_x, :min_y, :min_z, :] = g_repeated[:min_x, :min_y, :min_z, :]
+        return g_out
+    
+    g000 = resize_gradient(gradients[0:-1, 0:-1, 0:-1])
+    g100 = resize_gradient(gradients[1:  , 0:-1, 0:-1])
+    g010 = resize_gradient(gradients[0:-1, 1:  , 0:-1])
+    g110 = resize_gradient(gradients[1:  , 1:  , 0:-1])
+    g001 = resize_gradient(gradients[0:-1, 0:-1, 1:  ])
+    g101 = resize_gradient(gradients[1:  , 0:-1, 1:  ])
+    g011 = resize_gradient(gradients[0:-1, 1:  , 1:  ])
+    g111 = resize_gradient(gradients[1:  , 1:  , 1:  ])
+    
+    # Calculate dot products
+    n000 = np.sum(np.stack((grid[:,:,:,0]  , grid[:,:,:,1]  , grid[:,:,:,2]  ), axis=3) * g000, 3)
+    n100 = np.sum(np.stack((grid[:,:,:,0]-1, grid[:,:,:,1]  , grid[:,:,:,2]  ), axis=3) * g100, 3)
+    n010 = np.sum(np.stack((grid[:,:,:,0]  , grid[:,:,:,1]-1, grid[:,:,:,2]  ), axis=3) * g010, 3)
+    n110 = np.sum(np.stack((grid[:,:,:,0]-1, grid[:,:,:,1]-1, grid[:,:,:,2]  ), axis=3) * g110, 3)
+    n001 = np.sum(np.stack((grid[:,:,:,0]  , grid[:,:,:,1]  , grid[:,:,:,2]-1), axis=3) * g001, 3)
+    n101 = np.sum(np.stack((grid[:,:,:,0]-1, grid[:,:,:,1]  , grid[:,:,:,2]-1), axis=3) * g101, 3)
+    n011 = np.sum(np.stack((grid[:,:,:,0]  , grid[:,:,:,1]-1, grid[:,:,:,2]-1), axis=3) * g011, 3)
+    n111 = np.sum(np.stack((grid[:,:,:,0]-1, grid[:,:,:,1]-1, grid[:,:,:,2]-1), axis=3) * g111, 3)
+    
+    # Interpolate
+    t = f(grid)
+    n00 = n000*(1-t[:,:,:,0]) + t[:,:,:,0]*n100
+    n10 = n010*(1-t[:,:,:,0]) + t[:,:,:,0]*n110
+    n01 = n001*(1-t[:,:,:,0]) + t[:,:,:,0]*n101
+    n11 = n011*(1-t[:,:,:,0]) + t[:,:,:,0]*n111
+    n0 = (1-t[:,:,:,1])*n00 + t[:,:,:,1]*n10
+    n1 = (1-t[:,:,:,1])*n01 + t[:,:,:,1]*n11
+    
+    return (1-t[:,:,:,2])*n0 + t[:,:,:,2]*n1
+
+def generate_fractal_noise_3d(shape, res, octaves=1, persistence=0.5, seed=None):
+    """
+    Generate 3D fractal Perlin noise with multiple octaves.
+    
+    Args:
+        shape: Tuple of (width, height, depth) for output array
+        res: Tuple of (res_x, res_y, res_z) - base resolution
+        octaves: Number of octaves (layers of detail)
+        persistence: How much each octave contributes (0-1)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        3D numpy array with fractal noise values
+    """
+    noise = np.zeros(shape)
+    frequency = 1
+    amplitude = 1
+    max_amplitude = 0
+    
+    for octave in range(octaves):
+        # Generate Perlin noise at this octave's frequency
+        octave_noise = generate_perlin_noise_3d(
+            shape, 
+            (frequency*res[0], frequency*res[1], frequency*res[2]),
+            seed=(seed + octave) if seed is not None else None
+        )
+        
+        # Ensure the octave noise matches our target shape (trim if needed)
+        if octave_noise.shape != shape:
+            # Trim to match target shape
+            octave_noise = octave_noise[:shape[0], :shape[1], :shape[2]]
+        
+        noise += amplitude * octave_noise
+        max_amplitude += amplitude
+        frequency *= 2
+        amplitude *= persistence
+    
+    # Normalize to [-1, 1]
+    return noise / max_amplitude
+
+def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max, 
+                          resolution=1.0, frequency_x=0.5, frequency_y=0.5, frequency_z=0.5,
+                          octaves=3, persistence=0.5, seed=42):
+    """
+    Generate a 3D lookup table for noise/modulation values using Perlin noise.
     
     Args:
         x_min, x_max, y_min, y_max, z_min, z_max: Bounds of the print volume
         resolution: Grid spacing in mm (smaller = more detailed but more memory)
-        frequency_x, frequency_y, frequency_z: Frequencies for each axis
+        frequency_x, frequency_y, frequency_z: Base frequencies for each axis
+        octaves: Number of noise octaves for fractal detail
+        persistence: How much each octave contributes (0-1)
+        seed: Random seed for reproducibility
     
     Returns:
         Dictionary with grid parameters and the 3D array of values
@@ -115,19 +241,20 @@ def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max,
     y_steps = int((y_max - y_min) / resolution) + 1
     z_steps = int((z_max - z_min) / resolution) + 1
     
-    # Generate coordinates
-    x_coords = np.linspace(x_min, x_max, x_steps)
-    y_coords = np.linspace(y_min, y_max, y_steps)
-    z_coords = np.linspace(z_min, z_max, z_steps)
+    # Shape for the noise array
+    shape = (x_steps, y_steps, z_steps)
     
-    # Create 3D meshgrid
-    X, Y, Z = np.meshgrid(x_coords, y_coords, z_coords, indexing='ij')
+    # Convert frequency to Perlin resolution
+    # Higher frequency = more waves = higher resolution grid
+    # Frequency of 1.0 should give roughly 10 grid cells (one full wave per 10mm at resolution=1.0)
+    res_x = max(2, int((x_max - x_min) / 10.0 * frequency_x))
+    res_y = max(2, int((y_max - y_min) / 10.0 * frequency_y))
+    res_z = max(2, int((z_max - z_min) / 10.0 * frequency_z))
     
-    # Generate 3D sine wave pattern (can be replaced with Perlin noise later)
-    # Combine multiple sine waves for more organic look
-    noise = (np.sin(frequency_x * X) * np.cos(frequency_y * Y) * np.sin(frequency_z * Z) + 
-             np.sin(frequency_x * X * 1.3) * np.sin(frequency_y * Y * 0.7) +
-             np.cos(frequency_x * X * 0.8) * np.cos(frequency_y * Y * 1.2)) / 3.0
+    logging.info(f"  Perlin resolution: {res_x} x {res_y} x {res_z} grid cells")
+    
+    # Generate fractal Perlin noise
+    noise = generate_fractal_noise_3d(shape, (res_x, res_y, res_z), octaves, persistence, seed)
     
     lut = {
         'x_min': x_min, 'x_max': x_max,
@@ -140,7 +267,7 @@ def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max,
         'data': noise
     }
     
-    logging.info(f"Generated 3D noise LUT: {x_steps}x{y_steps}x{z_steps} grid, resolution={resolution}mm")
+    logging.info(f"Generated 3D Perlin noise LUT: {x_steps}x{y_steps}x{z_steps} grid, resolution={resolution}mm, octaves={octaves}")
     return lut
 
 def generate_3d_sine_lut(x_min, x_max, y_min, y_max, z_min, z_max, 
