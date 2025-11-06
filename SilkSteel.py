@@ -1,3 +1,4 @@
+
 # SilkSteel - Advanced G-code Post-Processor
 # "Smooth on the outside, strong on the inside"
 # 
@@ -288,6 +289,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         print(f"  Output: [IN-PLACE] {os.path.basename(output_file)}")
     else:
         print(f"  Output: {os.path.basename(output_file)}")
+    
+    # Show enabled features (settings will be shown after we read the G-code)
     print(f"  Features: ", end="")
     features = []
     if enable_smoothificator:
@@ -298,7 +301,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         features.append("Non-planar Infill")
     if enable_safe_z_hop:
         features.append("Safe Z-hop")
-    print(", ".join(features))
+    print(", ".join(features) if features else "(None)")
     print("=" * 70)
     
     # Read the input G-code
@@ -338,6 +341,18 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     if enable_nonplanar:
         logging.info(f"Non-planar infill - Deform type: {deform_type}, Amplitude: {amplitude}mm, Frequency: {frequency}")
+    
+    # Print feature settings summary to console
+    print("\nFeature Settings:")
+    if enable_smoothificator:
+        print(f"  • Smoothificator: target layer height = {outer_layer_height:.3f}mm")
+    if enable_bricklayers:
+        print(f"  • Bricklayers: extrusion multiplier = {bricklayers_extrusion_multiplier:.2f}x")
+    if enable_nonplanar:
+        print(f"  • Non-planar Infill: amplitude = {amplitude:.2f}mm, frequency = {frequency:.2f}, type = {deform_type}")
+    if enable_safe_z_hop:
+        print(f"  • Safe Z-hop: margin = {safe_z_hop_margin:.2f}mm")
+    print()
     
     # Validate outer layer height
     if outer_layer_height <= 0:
