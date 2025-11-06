@@ -36,11 +36,23 @@ import numpy as np  # For 3D noise lookup table
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Configure logging - console only for performance
+# Configure logging to both console and file
+log_file = os.path.join(script_dir, "SilkSteel_log.txt")
 logging.basicConfig(
-    level=logging.WARNING,  # Only show warnings and errors
-    format="%(message)s"
+    level=logging.WARNING,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(log_file, mode='w'),  # Overwrite log each time
+        logging.StreamHandler(sys.stdout)          # Also print to console
+    ]
 )
+
+logging.info("=" * 70)
+logging.info("SilkSteel started")
+logging.info(f"Script directory: {script_dir}")
+logging.info(f"Log file: {log_file}")
+logging.info(f"Command line args: {sys.argv}")
+logging.info("=" * 70)
 
 # Non-planar infill constants
 DEFAULT_AMPLITUDE = 2  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
@@ -97,8 +109,6 @@ def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max,
     Returns:
         Dictionary with grid parameters and the 3D array of values
     """
-    import numpy as np
-    
     # Create grid
     x_steps = int((x_max - x_min) / resolution) + 1
     y_steps = int((y_max - y_min) / resolution) + 1
@@ -146,8 +156,6 @@ def generate_3d_sine_lut(x_min, x_max, y_min, y_max, z_min, z_max,
     Returns:
         Dictionary with grid parameters and the 3D array of values
     """
-    import numpy as np
-    
     # Create grid
     x_steps = int((x_max - x_min) / resolution) + 1
     y_steps = int((y_max - y_min) / resolution) + 1
@@ -404,11 +412,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         y_min, y_max = min(y_coords), max(y_coords)
         total_layers = max(z_layer_map.keys()) if z_layer_map else 0
         logging.info(f"  Print: X[{x_min:.1f}, {x_max:.1f}], Y[{y_min:.1f}, {y_max:.1f}], {total_layers} layers")
+        logging.info(f"  Found {len(z_layer_map)} unique Z heights")
         if debug:
             print(f"[DEBUG] Found {total_layers} layers")
         
         # Second pass: Mark which grid cells have solid infill at each layer
         logging.info("\nScanning solid infill to build occupancy grid...")
+        logging.info(f"  Processing {len(lines)} lines...")
         temp_z = 0.0
         prev_layer_z = 0.0
         current_layer_height = base_layer_height  # Default
@@ -511,6 +521,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     last_solid_pos = (gx, gy)
         
         logging.info(f"Total solid infill layers: {len(solid_infill_heights)}")
+        logging.info(f"Grid cells marked with solid: {len(solid_at_grid)}")
         if debug:
             print(f"[DEBUG] Marked {len(solid_at_grid)} grid cells with solid infill")
             print(f"[DEBUG] Processed {debug_line_count} line segments, avg {debug_cells_marked/max(1,debug_line_count):.1f} cells per line")
@@ -520,6 +531,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # z_min = Z of last solid layer seen at this cell (bottom of safe range)
         # z_max = Z of next solid layer seen at this cell (top of safe range)
         logging.info("\nCalculating safe Z ranges per grid cell...")
+        logging.info(f"  Processing {len(set((gx, gy) for gx, gy, _ in solid_at_grid.keys()))} unique grid positions...")
         grid_cell_safe_z = {}  # (gx, gy) -> list of (layer_num, z_min, z_max) tuples
         
         # Get all unique grid positions
@@ -557,6 +569,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Store all safe ranges for this grid cell
             if safe_ranges:
                 grid_cell_safe_z[(gx, gy)] = safe_ranges
+        
+        logging.info(f"  Calculated safe Z ranges for {len(all_grid_positions)} unique grid cells")
+        total_safe_ranges = sum(len(ranges) for ranges in grid_cell_safe_z.values())
+        logging.info(f"  Total safe range entries: {total_safe_ranges}")
         
         if debug:
             print(f"[DEBUG] Calculated safe Z ranges for {len(all_grid_positions)} unique grid cells")
@@ -877,7 +893,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     # Count significant angle changes (> 10 degrees)
                     direction_changes = 0
                     if len(candidate_path) >= 3:
-                        import math
                         for k in range(1, len(candidate_path) - 1):
                             p1 = candidate_path[k-1]
                             p2 = candidate_path[k]
@@ -953,6 +968,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             logging.info(f"  Example: Layer 0 max Z = {layer_max_z.get(0, 0):.3f}mm")
     
     print("Processing layers...")
+    logging.info(f"\nStarting main processing loop with {len(lines)} lines...")
+    logging.info(f"  Max layer detected: {max(z_layer_map.keys()) if z_layer_map else 0}")
     
     # Calculate max layer number for bricklayers
     max_layer = max(z_layer_map.keys()) if z_layer_map else 0
@@ -960,9 +977,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     modified_lines = []
     i = 0
     last_type_seen = None  # Track the last TYPE: marker we encountered
+    line_count_processed = 0
     
     while i < len(lines):
         line = lines[i]
+        line_count_processed += 1
+        
+        # Progress logging every 10,000 lines
+        if line_count_processed % 10000 == 0:
+            logging.info(f"  Processed {line_count_processed}/{len(lines)} lines ({100*line_count_processed/len(lines):.1f}%)")
         
         # Detect layer changes and get adaptive layer height
         if ";LAYER_CHANGE" in line:
@@ -1567,7 +1590,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     taper_factor = 1.0
                                 else:
                                     # Transition zone - smooth interpolation
-                                    import math
                                     # Linear interpolation between start and full distances
                                     t = (min_dist_to_solid - taper_distance_start) / (taper_distance_full - taper_distance_start)
                                     # Smooth using cosine for gentler transition
@@ -1749,9 +1771,28 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
+    # Log all received arguments for debugging
+    logging.info("=" * 70)
+    logging.info("Command-line arguments received:")
+    logging.info(f"  Raw sys.argv: {sys.argv}")
+    logging.info(f"  Parsed input_file: {args.input_file}")
+    logging.info(f"  Parsed output_file: {args.output_file}")
+    logging.info(f"  Enable all: {args.enable_all}")
+    logging.info(f"  Enable bricklayers: {args.enable_bricklayers}")
+    logging.info(f"  Enable non-planar: {args.enable_non_planar}")
+    logging.info("=" * 70)
+    
+    # Validate that we have an input file
+    if not args.input_file:
+        logging.error("ERROR: No input file provided!")
+        sys.exit(1)
+    
+    logging.info(f"Starting processing of: {args.input_file}")
+    
     # Handle -full flag: enable all optional features
     # Individual feature flags specified after -full can still override
     if args.enable_all:
+        logging.info("Full mode enabled - activating all features")
         if not args.enable_bricklayers:
             args.enable_bricklayers = True
         if not args.enable_non_planar:
@@ -1759,6 +1800,7 @@ if __name__ == "__main__":
         # Smoothificator and Safe Z-hop are already enabled by default
     
     try:
+        logging.info("Calling process_gcode()...")
         process_gcode(
             input_file=args.input_file,
             output_file=args.output_file,
