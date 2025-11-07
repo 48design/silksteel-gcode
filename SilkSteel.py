@@ -58,7 +58,8 @@ logging.info("=" * 70)
 # Non-planar infill constants
 DEFAULT_AMPLITUDE = 2  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
 DEFAULT_FREQUENCY = 8  # Default frequency of the sine wave (reduced for longer waves)
-SEGMENT_LENGTH = 0.2  # Split infill lines into segments of this length (mm) - smaller for smoother curves
+DEFAULT_SEGMENT_LENGTH = 0.64  # Split infill lines into segments of this length (mm) - LARGER = fewer segments, smoother motion
+DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 2.0  # Boost feedrate by this factor for non-planar 3D moves (2.0 = double speed)
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
@@ -379,7 +380,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  enable_smoothificator=True,
                  enable_bricklayers=False, bricklayers_extrusion_multiplier=1.0,
                  enable_nonplanar=False, deform_type='sine',
-                 segment_length=SEGMENT_LENGTH, amplitude=DEFAULT_AMPLITUDE, frequency=DEFAULT_FREQUENCY,
+                 segment_length=DEFAULT_SEGMENT_LENGTH, amplitude=DEFAULT_AMPLITUDE, frequency=DEFAULT_FREQUENCY,
+                 nonplanar_feedrate_multiplier=DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER,
                  enable_safe_z_hop=DEFAULT_ENABLE_SAFE_Z_HOP, safe_z_hop_margin=DEFAULT_SAFE_Z_HOP_MARGIN,
                  debug=False):
     
@@ -467,7 +469,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info(f"Bricklayers extrusion multiplier: {bricklayers_extrusion_multiplier}")
     
     if enable_nonplanar:
-        logging.info(f"Non-planar infill - Deform type: {deform_type}, Amplitude: {amplitude}mm, Frequency: {frequency}")
+        logging.info(f"Non-planar infill - Deform type: {deform_type}, Amplitude: {amplitude}mm, Frequency: {frequency}, Segment length: {segment_length}mm, Feedrate multiplier: {nonplanar_feedrate_multiplier}x")
     
     # Print feature settings summary to console
     print("\nFeature Settings:")
@@ -477,6 +479,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         print(f"  • Bricklayers: extrusion multiplier = {bricklayers_extrusion_multiplier:.2f}x")
     if enable_nonplanar:
         print(f"  • Non-planar Infill: amplitude = {amplitude:.2f}mm, frequency = {frequency:.2f}, type = {deform_type}")
+        print(f"                       segment length = {segment_length:.2f}mm, feedrate boost = {nonplanar_feedrate_multiplier:.1f}x")
     if enable_safe_z_hop:
         print(f"  • Safe Z-hop: margin = {safe_z_hop_margin:.2f}mm")
     print()
@@ -1621,10 +1624,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Save the current layer Z before applying non-planar modulation
             layer_z = current_z
             last_infill_z = layer_z  # Track last Z used in infill
-            
-            # Z bounds are now in the grid maps (grid_z_min_map, grid_z_max_map)
-            # No need to calculate per-layer bounds
-            
+
             # Process infill lines
             while i < len(lines):
                 current_line = lines[i]
@@ -1662,6 +1662,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     match = re.search(r'X([-+]?\d*\.?\d+)\s*Y([-+]?\d*\.?\d+)\s*E([-+]?\d*\.?\d+)', current_line)
                     if match:
                         x1, y1, e_end = map(float, match.groups())
+                        
+                        # Extract feedrate from current line if present
+                        feedrate = None
+                        f_match = re.search(r'F(\d+\.?\d*)', current_line)
+                        if f_match:
+                            feedrate = float(f_match.group(1)) * nonplanar_feedrate_multiplier
                         
                         # Get the next X,Y from the NEXT line with X,Y,E (extrusion move)
                         # Skip over M117 commands that might be in between
@@ -1793,13 +1799,30 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 last_infill_z = z_mod
                                 
-                                # Output with Z modulation (X and Y unchanged!)
-                                modified_lines.append(
-                                    f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f}\n"
-                                )
+                                # Output with Z modulation and boosted feedrate
+                                if feedrate is not None:
+                                    modified_lines.append(
+                                        f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(feedrate)}\n"
+                                    )
+                                else:
+                                    modified_lines.append(
+                                        f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f}\n"
+                                    )
                             i += 1
                             continue
                 
+                # Boost feedrate for standalone F commands (e.g., "G1 F3600")
+                if current_line.startswith('G1') and 'F' in current_line and 'X' not in current_line and 'Y' not in current_line and 'E' not in current_line:
+                    f_match = re.search(r'F(\d+\.?\d*)', current_line)
+                    if f_match:
+                        original_feedrate = float(f_match.group(1))
+                        boosted_feedrate = int(original_feedrate * nonplanar_feedrate_multiplier)
+                        boosted_line = re.sub(r'F\d+\.?\d*', f'F{boosted_feedrate}', current_line)
+                        modified_lines.append(boosted_line)
+                        i += 1
+                        continue
+                
+                # If we get here, the line wasn't processed - append as-is
                 modified_lines.append(current_line)
                 i += 1
             
@@ -1901,8 +1924,10 @@ if __name__ == "__main__":
                        help='Enable non-planar infill modulation (default: disabled)')
     parser.add_argument('-deformType', '--deform-type', type=str, default='sine', choices=['sine', 'noise'],
                        help='Type of deformation pattern: sine (smooth waves) or noise (Perlin noise) (default: sine)')
-    parser.add_argument('-segmentLength', '--segment-length', type=float, default=SEGMENT_LENGTH,
-                       help=f'Length of subdivided segments for non-planar infill in mm (default: {SEGMENT_LENGTH})')
+    parser.add_argument('-segmentLength', '--segment-length', type=float, default=DEFAULT_SEGMENT_LENGTH,
+                       help=f'Length of subdivided segments for non-planar infill in mm (default: {DEFAULT_SEGMENT_LENGTH})')
+    parser.add_argument('-nonplanarFeedrateMultiplier', '--nonplanar-feedrate-multiplier', type=float, default=DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER,
+                       help=f'Feedrate multiplier for non-planar infill to compensate for 3D motion planning overhead (default: {DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER})')
     parser.add_argument('-amplitude', '--amplitude', type=float, default=DEFAULT_AMPLITUDE,
                        help=f'Amplitude of Z modulation for non-planar infill in mm when float, layers when integer (default: {DEFAULT_AMPLITUDE})')
     parser.add_argument('-frequency', '--frequency', type=float, default=DEFAULT_FREQUENCY,
@@ -1958,6 +1983,7 @@ if __name__ == "__main__":
             enable_nonplanar=args.enable_non_planar,
             deform_type=args.deform_type,
             segment_length=args.segment_length,
+            nonplanar_feedrate_multiplier=args.nonplanar_feedrate_multiplier,
             amplitude=args.amplitude,
             frequency=args.frequency,
             enable_safe_z_hop=args.enable_safe_z_hop,
