@@ -1,6 +1,6 @@
 ![SilkSteel](assets/silksteel-hero.jpg)
 
-# SilkSteel G-Code Post-Processor
+# SilkSteel G-Code Post-Processor [![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/donate/?hosted_button_id=VT4P4AT8FTYDL)
 
 **SilkSteel** — *Smooth on the outside, strong on the inside.*
 
@@ -339,5 +339,9 @@ Contributions are welcome! Please feel free to submit pull requests or open issu
 ---
 
 **Made with ❤️ and 🧠 and 🤖 for the 3D printing community**
+If this project helps you creating even more awesome 3D prints and if you want to help us improve this and other tools, you can sponsor us a cup of :coffee: - or two! :)
+[donate](https://www.48design.com/donate/)
+
+---
 
 ![SilkSteel](assets/experimental.jpg)
