@@ -24,6 +24,20 @@ The result? Prints with **silk-smooth exteriors** and **steel-strong interiors**
 
 ---
 
+![SilkSteel](assets/experimental02.jpg)
+> [!WARNING]
+> **⚠️ EXPERIMENTAL SOFTWARE ⚠️**
+> 
+> This tool is currently in an experimental state and has **not been extensively tested** across all printer configurations, slicers, and G-code variations. While it has shown promising results, you should:
+> - **Always preview** the processed G-code in a viewer before printing
+> - **Start with small test prints** to validate behavior on your specific setup
+> - **Monitor your first prints** closely for any unexpected behavior
+> - **Use at your own risk** - we are not responsible for failed prints or hardware damage
+> 
+> Please report any issues or unexpected behavior on our [GitHub Issues](https://github.com/48design/silksteel-gcode/issues) page to help improve the tool!
+
+---
+
 ## ✨ Features
 
 ### 🧵 Smoothificator (Enabled by Default)
@@ -325,3 +339,5 @@ Contributions are welcome! Please feel free to submit pull requests or open issu
 ---
 
 **Made with ❤️ and 🧠 and 🤖 for the 3D printing community**
+
+![SilkSteel](assets/experimental.jpg)
