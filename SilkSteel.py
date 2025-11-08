@@ -64,6 +64,7 @@ DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 2.0  # Boost feedrate by this factor for
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
 DEFAULT_SAFE_Z_HOP_MARGIN = 0.5  # mm - safety margin above max Z in layer
+DEFAULT_Z_HOP_RETRACTION = 1.0  # mm - retraction distance during Z-hop to prevent stringing
 
 def get_layer_height(gcode_lines):
     """Extract layer height from G-code header comments"""
@@ -383,6 +384,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  segment_length=DEFAULT_SEGMENT_LENGTH, amplitude=DEFAULT_AMPLITUDE, frequency=DEFAULT_FREQUENCY,
                  nonplanar_feedrate_multiplier=DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER,
                  enable_safe_z_hop=DEFAULT_ENABLE_SAFE_Z_HOP, safe_z_hop_margin=DEFAULT_SAFE_Z_HOP_MARGIN,
+                 z_hop_retraction=DEFAULT_Z_HOP_RETRACTION,
                  debug=False):
     
     # Determine output filename
@@ -481,7 +483,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         print(f"  • Non-planar Infill: amplitude = {amplitude:.2f}mm, frequency = {frequency:.2f}, type = {deform_type}")
         print(f"                       segment length = {segment_length:.2f}mm, feedrate boost = {nonplanar_feedrate_multiplier:.1f}x")
     if enable_safe_z_hop:
-        print(f"  • Safe Z-hop: margin = {safe_z_hop_margin:.2f}mm")
+        print(f"  • Safe Z-hop: margin = {safe_z_hop_margin:.2f}mm, retraction = {z_hop_retraction:.2f}mm")
     print()
     
     # Validate outer layer height
@@ -497,9 +499,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     old_z = 0.0
     
     # Safe Z-hop tracking
-    layer_max_z = {}  # layer_num -> maximum Z value seen in that layer
+    layer_max_z = {}  # layer_num -> maximum Z value seen in that layer (pre-calculated from original)
+    actual_layer_max_z = {}  # layer_num -> actual maximum Z written to output (updated during processing)
     current_travel_z = 0.0  # Track current Z during travel moves
+    working_z = 0.0  # Track the Z where extrusion should happen (before any hop)
+    is_hopped = False  # Track if we're currently hopped up above working Z
     seen_first_layer = False  # Don't apply Z-hop until we've started printing
+    current_e = 0.0  # Track current E position for retraction/unretraction
+    use_relative_e = False  # Track if using relative E mode (G91)
     
     # Bricklayers variables
     perimeter_block_count = 0
@@ -1166,6 +1173,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             perimeter_block_count = 0  # Reset block counter for new layer
             move_history = []  # Clear move history for new layer
             last_type_seen = None  # Reset TYPE tracking for new layer
+            is_hopped = False  # Reset hop state for new layer
             
             # Look ahead for HEIGHT and Z markers to update current_z
             for j in range(i + 1, min(i + 10, len(lines))):
@@ -1189,6 +1197,27 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             i += 1
             continue
 
+        # Track G90/G91 (absolute/relative positioning mode)
+        if line.startswith("G91"):
+            use_relative_e = True
+            modified_lines.append(line)
+            i += 1
+            continue
+        elif line.startswith("G90"):
+            use_relative_e = False
+            modified_lines.append(line)
+            i += 1
+            continue
+        
+        # Track G92 E (extruder reset)
+        if line.startswith("G92") and "E" in line:
+            e_reset_match = re.search(r'E([-\d.]+)', line)
+            if e_reset_match:
+                current_e = float(e_reset_match.group(1))
+            modified_lines.append(line)
+            i += 1
+            continue
+
         # Get current Z position (for tracking only, don't recalculate layer height)
         # Match G1 commands that contain Z (with or without X/Y)
         # IMPORTANT: Don't track Z during non-planar infill (to avoid tracking modulated Z values)
@@ -1199,6 +1228,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 old_z = current_z
                 current_z = float(z_match.group(1))
                 # DON'T calculate layer height from Z - use the HEIGHT marker instead!
+                
+                # Update working_z for Z-hop (this is the layer's base Z where extrusion happens)
+                working_z = current_z
+                current_travel_z = current_z
+                is_hopped = False  # Explicit Z move means we're at working height, not hopped
+                
+                # Update actual_layer_max_z for safe Z-hop calculations
+                if current_layer not in actual_layer_max_z or current_z > actual_layer_max_z[current_layer]:
+                    actual_layer_max_z[current_layer] = current_z
             
             # Check if next lines contain external perimeter - if so, don't output Z yet
             # Smoothificator will handle Z for each pass
@@ -1334,11 +1372,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 else:
                     pass_z = current_z - ((passes_needed - pass_num - 1) * height_per_pass)
                 
+                # Track actual max Z for this layer (for safe Z-hop)
+                if current_layer not in actual_layer_max_z or pass_z > actual_layer_max_z[current_layer]:
+                    actual_layer_max_z[current_layer] = pass_z
+                
                 if pass_num == 0:
                     modified_lines.append(f"; ====== SMOOTHIFICATOR START: {passes_needed} passes at {height_per_pass:.4f}mm each ======\n")
                 
                 # Output Z move
-                modified_lines.append(f"G1 Z{pass_z:.3f} ; Pass {pass_num + 1} of {passes_needed}\n")
+                modified_lines.append(f"G0 Z{pass_z:.3f} ; Pass {pass_num + 1} of {passes_needed}\n")
                 
                 # For pass 2+, travel back to TRUE start position (where we were before the block)
                 if pass_num > 0 and start_pos:
@@ -1486,7 +1528,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             adjusted_z = current_z + z_shift
                             extrusion_factor = 0.5 if is_last_layer else 1.0
                             
-                            modified_lines.append(f"G1 Z{adjusted_z:.3f} ; Bricklayers shifted block #{perimeter_block_count}\n")
+                            # Track actual max Z for this layer (for safe Z-hop)
+                            if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
+                                actual_layer_max_z[current_layer] = adjusted_z
+                            
+                            modified_lines.append(f"G0 Z{adjusted_z:.3f} ; Bricklayers shifted block #{perimeter_block_count}\n")
                             logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Shifted at Z={adjusted_z:.3f} (extrusion: {extrusion_factor}x)")
                             
                             # Adjust extrusion based on whether it's the last layer
@@ -1593,7 +1639,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 adjusted_z = current_z + z_shift
                                 extrusion_factor = 0.5 if is_last_layer else 1.0
                                 
-                                modified_lines.append(f"G1 Z{adjusted_z:.3f} ; Bricklayers base block #{perimeter_block_count}\n")
+                                # Track actual max Z for this layer (for safe Z-hop)
+                                if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
+                                    actual_layer_max_z[current_layer] = adjusted_z
+                                
+                                modified_lines.append(f"G0 Z{adjusted_z:.3f} ; Bricklayers base block #{perimeter_block_count}\n")
                                 logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base at Z={adjusted_z:.3f} (extrusion: {extrusion_factor}x)")
                                 
                                 for loop_line in loop_lines:
@@ -1799,6 +1849,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 last_infill_z = z_mod
                                 
+                                # Track actual max Z for this layer (for safe Z-hop)
+                                if current_layer not in actual_layer_max_z or z_mod > actual_layer_max_z[current_layer]:
+                                    actual_layer_max_z[current_layer] = z_mod
+                                
                                 # Output with Z modulation and boosted feedrate
                                 if feedrate is not None:
                                     modified_lines.append(
@@ -1830,26 +1884,100 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         # ========== SAFE Z-HOP: Apply Z-hop to travel moves ==========
         elif enable_safe_z_hop and seen_first_layer and line.startswith("G1"):
-            # Update current Z if this line has Z
+            # Track current E position for retraction management
+            e_match = re.search(r'E([-\d.]+)', line)
+            if e_match and not use_relative_e:
+                current_e = float(e_match.group(1))
+            
+            # Track current Z if this line has Z (but don't update working_z - only layer Z changes do that)
             z_match = re.search(r'Z([-\d.]+)', line)
             if z_match:
-                current_travel_z = float(z_match.group(1))
+                new_z = float(z_match.group(1))
+                current_travel_z = new_z
+                # Don't update working_z here - it's only updated by explicit layer Z changes
+                # If this is a non-planar Z, we don't want to use it as working_z
+            
+            # Check if this is an extrusion move (has E parameter)
+            is_extrusion = 'E' in line
+            
+            # If we're hopped up and about to extrude, drop back down first AND unretract if needed
+            if is_hopped and is_extrusion:
+                # Look ahead to see if slicer will add unretraction after drop-down
+                slicer_will_unretract = False
+                for j in range(i, min(i + 5, len(lines))):  # Look ahead a few lines
+                    check_line = lines[j]
+                    # Check for positive E move (unretraction) coming up
+                    if check_line.startswith("G1") and "E" in check_line and "X" not in check_line and "Y" not in check_line and "Z" not in check_line:
+                        e_check = re.search(r'E([-\d.]+)', check_line)
+                        if e_check:
+                            e_val = float(e_check.group(1))
+                            if e_val >= 0:  # Positive E = unretraction
+                                slicer_will_unretract = True
+                                break
+                    # Stop if we hit actual extrusion with X/Y
+                    if check_line.startswith("G1") and ("X" in check_line or "Y" in check_line) and "E" in check_line:
+                        break
+                
+                if not slicer_will_unretract:
+                    # Detect retraction feedrate from recent retractions
+                    retract_feedrate = 3900  # Default from slicer
+                    for j in range(max(0, i - 20), i):
+                        check_line = lines[j]
+                        if "G1" in check_line and "E-" in check_line and "F" in check_line:
+                            f_match = re.search(r'F(\d+)', check_line)
+                            if f_match:
+                                retract_feedrate = int(f_match.group(1))
+                                break
+                    
+                    modified_lines.append(f"G1 E{current_e:.5f} F{retract_feedrate} ; Unretract after Z-hop\n")
+                
+                modified_lines.append(f"G0 Z{working_z:.3f} F8400 ; Drop back to working Z\n")
+                current_travel_z = working_z
+                is_hopped = False
             
             # Detect travel moves: G1 with X/Y, F (feedrate), but no E (extrusion)
-            if ('X' in line or 'Y' in line) and 'F' in line and 'E' not in line:
+            if ('X' in line or 'Y' in line) and 'F' in line and not is_extrusion:
                 # This is a travel move - apply Z-hop if needed
-                if current_layer in layer_max_z:
-                    safe_z = layer_max_z[current_layer] + safe_z_hop_margin
+                # CRITICAL: Use CUMULATIVE maximum Z across ALL previous layers
+                # Because Bricklayers/Non-planar on layer 5 might stick up into layer 10's airspace!
+                cumulative_max_z = 0.0
+                for layer_num in range(0, current_layer + 1):
+                    if layer_num in actual_layer_max_z:
+                        cumulative_max_z = max(cumulative_max_z, actual_layer_max_z[layer_num])
+                
+                if cumulative_max_z > 0:
+                    safe_z = cumulative_max_z + safe_z_hop_margin
                     
                     # Only hop if we're not already above safe_z
                     if current_travel_z < safe_z:
-                        # Lift to safe Z before travel
-                        modified_lines.append(f"G1 Z{safe_z:.3f} F8400 ; Safe Z-hop\n")
+                        # Check if slicer already retracted right before this travel
+                        slicer_already_retracted = False
+                        retract_feedrate = 3900  # Default from slicer
+                        
+                        for j in range(max(0, i - 5), i):  # Look back a few lines
+                            check_line = lines[j]
+                            # Check for retraction (negative E move)
+                            if check_line.startswith("G1") and "E-" in check_line:
+                                slicer_already_retracted = True
+                                # Extract the feedrate the slicer used
+                                f_match = re.search(r'F(\d+)', check_line)
+                                if f_match:
+                                    retract_feedrate = int(f_match.group(1))
+                                break
+                        
+                        # Only add retraction if slicer didn't already do it
+                        if not slicer_already_retracted:
+                            retracted_e = current_e - z_hop_retraction
+                            modified_lines.append(f"G1 E{retracted_e:.5f} F{retract_feedrate} ; Retract before Z-hop\n")
+                            current_e = retracted_e  # Update E position after retraction
+                        
+                        modified_lines.append(f"G0 Z{safe_z:.3f} F8400 ; Safe Z-hop\n")
                         # Do the travel move (without Z since we just set it)
                         # Remove Z from the travel line if it exists
                         travel_line = re.sub(r'Z[-\d.]+\s*', '', line)
                         modified_lines.append(travel_line)
                         current_travel_z = safe_z
+                        is_hopped = True  # Mark that we're hopped up
                         i += 1
                         continue
             
