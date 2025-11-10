@@ -63,7 +63,7 @@ DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 2.0  # Boost feedrate by this factor for
 DEFAULT_ENABLE_ADAPTIVE_EXTRUSION = True  # Enable adaptive extrusion multiplier for Z-lift (adds material to droop down and bond)
 
 # Grid resolution for solid occupancy detection
-GRID_RESOLUTION = 0.5  # Grid cell size in mm (smaller = finer detail, larger = faster processing)
+GRID_RESOLUTION = 1.0  # Grid cell size in mm (smaller = finer detail, larger = faster processing)
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
@@ -490,6 +490,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         print(f"                       adaptive extrusion = {'ON' if enable_adaptive_extrusion else 'OFF'}")
     if enable_safe_z_hop:
         print(f"  • Safe Z-hop: margin = {safe_z_hop_margin:.2f}mm, retraction = {z_hop_retraction:.2f}mm")
+    print()
+    print("⏳ Processing G-code... This might take a while. Time for coffee? ☕")
+    print("   (Or tea, if that's your thing. We don't judge.)")
     print()
     
     # Validate outer layer height
@@ -1300,11 +1303,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     modified_lines = []
     i = 0
     last_type_seen = None  # Track the last TYPE: marker we encountered
+    current_type = None  # Track current TYPE for Z-hop exclusion logic
     line_count_processed = 0
     
     while i < len(lines):
         line = lines[i]
         line_count_processed += 1
+        
+        # Track TYPE markers for Z-hop exclusion logic
+        if ";TYPE:" in line:
+            current_type = line.strip()
         
         # Progress logging every 10,000 lines
         if line_count_processed % 10000 == 0:
@@ -1949,8 +1957,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             for idx, (sx, sy) in enumerate(segments):
                                 # Calculate distance to nearest perimeter/solid to taper modulation
                                 # Check surrounding grid cells for solid material at current layer
-                                gx = int(round(sx / grid_resolution))
-                                gy = int(round(sy / grid_resolution))
+                                # Use floor division to match grid building method
+                                gx = int(sx / grid_resolution)
+                                gy = int(sy / grid_resolution)
                                 
                                 # Find minimum distance to any solid cell at this layer
                                 min_dist_to_solid = float('inf')
@@ -2004,9 +2013,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         if region_end < current_layer:
                                             # This solid is below - use its top as our floor
                                             local_z_min = max(local_z_min, z_top)
-                                        # Check if this solid region is ABOVE our current layer
-                                        elif region_start > current_layer:
-                                            # This solid is above - use its bottom as our ceiling
+                                        # Check if this solid region is ON or ABOVE our current layer
+                                        elif region_start >= current_layer:
+                                            # This solid is on same layer or above - use its bottom minus layer height as ceiling
+                                            # (infill must stay in the layer BELOW the solid)
                                             if local_z_max == 999:  # Take the LOWEST ceiling
                                                 local_z_max = z_bottom - base_layer_height
                                             else:
@@ -2100,8 +2110,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             continue
         
-        # ========== SAFE Z-HOP: Apply Z-hop to travel moves ==========
-        elif enable_safe_z_hop and seen_first_layer and line.startswith("G1"):
+        # ========== SAFE Z-HOP: Apply Z-hop to TRAVEL MOVES in sparse infill/support ==========
+        # CRITICAL: Only in areas where non-planar infill from below might poke through
+        # EXCLUDE solid blocking layers (bridge infill, top solid, perimeters)
+        elif enable_safe_z_hop and seen_first_layer and line.startswith("G1") and \
+             current_type not in [";TYPE:Bridge infill", ";TYPE:Internal bridge infill", 
+                                   ";TYPE:Top solid infill", ";TYPE:Solid infill",
+                                   ";TYPE:External perimeter", ";TYPE:Internal perimeter", 
+                                   ";TYPE:Perimeter", ";TYPE:Overhang perimeter"]:
+            
             # Track current E position for retraction management
             e_match = re.search(r'E([-\d.]+)', line)
             if e_match and not use_relative_e:
