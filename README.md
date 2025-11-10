@@ -179,8 +179,16 @@ input_file              Input G-code file (required)
 
 ### Debug Options
 ```
---debug                            Enable visualization: draws grid showing
-                                   detected solid infill and safe Z ranges
+-debug                             Enable basic debug mode: console output only
+-debug-full                        Enable full debug mode: console output + 
+                                   visualization files (3D grid G-code + PNG images)
+                                   
+                                   Generates:
+                                   - grid_visualization.gcode: 3D wireframe showing
+                                     detected solid cells and cross-sections
+                                   - layer_XXX_zYY.YY.png: Per-layer images showing
+                                     solid occupancy grid (white = solid, black = air)
+                                   - SilkSteel_log.txt: Detailed processing log
 ```
 
 ---
@@ -257,12 +265,36 @@ python SilkSteel.py model.gcode -o output.gcode -full
 5. Reduces extrusion to 0.5x on shifted blocks of the last layer (to end flat)
 
 ### How Non-planar Infill Works
-1. **Pass 1**: Builds 3D occupancy grid by scanning all solid layers
-2. **Pass 2**: Calculates safe Z ranges per grid cell (between solid layers)
-3. **Pass 3**: Processes infill, subdividing lines and modulating Z
-4. Applies sine wave or Perlin noise pattern
-5. Clamps Z values to safe range to prevent collisions
-6. Updates E values proportionally to actual line length in 3D space
+1. **Pass 1: Build 3D Occupancy Grid**
+   - Scans entire G-code to detect all solid layers (perimeters, solid infill, bridges)
+   - Tracks extrusion moves (G1 with E parameter) within solid TYPE sections
+   - Detects retractions (E < 0.01) to break continuity across travel moves
+   - Uses DDA algorithm to mark all grid cells (default: 0.5mm resolution) along extrusion paths
+   - Creates accurate 3D map of where solid material exists
+
+2. **Pass 2: Calculate Safe Z Ranges**
+   - For each XY grid cell, analyzes solid layers above and below
+   - Calculates safe Z ranges (gaps between solid layers)
+   - Stores min/max safe Z per grid cell to prevent collisions
+
+3. **Pass 3: Process Infill with Z Modulation**
+   - Subdivides infill lines into small segments
+   - Applies sine wave or Perlin noise pattern to calculate target Z
+   - Clamps Z values to safe range for each grid cell
+   - Updates E values proportionally to actual 3D line length
+   - Boosts feedrate for non-planar moves
+
+4. **Collision Avoidance**
+   - Constantly checks grid to ensure nozzle stays in safe Z range
+   - Prevents crashes into already-printed perimeters or solid layers
+   - Handles variable layer heights and complex geometries
+
+### Grid Resolution & Accuracy
+- Default: **0.5mm** grid cells (configurable via `GRID_RESOLUTION` constant)
+- Finer grid = more accurate collision detection, slower processing
+- Coarser grid = faster processing, less precise safe zones
+- Uses floor division for consistent cell assignment
+- DDA line-drawing algorithm ensures no cells are skipped
 
 ### How Safe Z-hop Works
 1. Pre-calculates maximum Z per layer during first scan pass
@@ -281,7 +313,13 @@ python SilkSteel.py model.gcode -o output.gcode -full
 **Solution**: Increase bricklayers_extrusion multiplier to 1.05-1.1
 
 ### Issue: Non-planar infill colliding with walls
-**Solution**: Reduce amplitude or check that solid layers are detected (use --debug)
+**Solution**: Reduce amplitude or check grid detection with `-debug-full` flag to visualize solid occupancy
+
+### Issue: Grid shows solid where there shouldn't be any
+**Solution**: This was fixed - script now detects retractions (E < 0.01) and breaks tracking across travel moves
+
+### Issue: Want to see what the grid looks like
+**Solution**: Use `-debug-full` to generate PNG images and 3D grid visualization G-code
 
 ### Issue: Stringing or blobs on travels
 **Solution**: Safe Z-hop should prevent this - check that it's enabled
