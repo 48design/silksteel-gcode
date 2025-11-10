@@ -68,7 +68,7 @@ GRID_RESOLUTION = 1.0  # Grid cell size in mm (smaller = finer detail, larger = 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
 DEFAULT_SAFE_Z_HOP_MARGIN = 0.5  # mm - safety margin above max Z in layer
-DEFAULT_Z_HOP_RETRACTION = 1.0  # mm - retraction distance during Z-hop to prevent stringing
+DEFAULT_Z_HOP_RETRACTION = 1.75  # mm - retraction distance during Z-hop to prevent stringing
 
 def get_layer_height(gcode_lines):
     """Extract layer height from G-code header comments"""
