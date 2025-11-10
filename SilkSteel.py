@@ -56,10 +56,14 @@ logging.info(f"Command line args: {sys.argv}")
 logging.info("=" * 70)
 
 # Non-planar infill constants
-DEFAULT_AMPLITUDE = 2  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
+DEFAULT_AMPLITUDE = 8  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
 DEFAULT_FREQUENCY = 8  # Default frequency of the sine wave (reduced for longer waves)
 DEFAULT_SEGMENT_LENGTH = 0.64  # Split infill lines into segments of this length (mm) - LARGER = fewer segments, smoother motion
 DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 2.0  # Boost feedrate by this factor for non-planar 3D moves (2.0 = double speed)
+DEFAULT_ENABLE_ADAPTIVE_EXTRUSION = True  # Enable adaptive extrusion multiplier for Z-lift (adds material to droop down and bond)
+
+# Grid resolution for solid occupancy detection
+GRID_RESOLUTION = 0.5  # Grid cell size in mm (smaller = finer detail, larger = faster processing)
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
@@ -383,6 +387,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  enable_nonplanar=False, deform_type='sine',
                  segment_length=DEFAULT_SEGMENT_LENGTH, amplitude=DEFAULT_AMPLITUDE, frequency=DEFAULT_FREQUENCY,
                  nonplanar_feedrate_multiplier=DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER,
+                 enable_adaptive_extrusion=DEFAULT_ENABLE_ADAPTIVE_EXTRUSION,
                  enable_safe_z_hop=DEFAULT_ENABLE_SAFE_Z_HOP, safe_z_hop_margin=DEFAULT_SAFE_Z_HOP_MARGIN,
                  z_hop_retraction=DEFAULT_Z_HOP_RETRACTION,
                  debug=False):
@@ -471,7 +476,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info(f"Bricklayers extrusion multiplier: {bricklayers_extrusion_multiplier}")
     
     if enable_nonplanar:
-        logging.info(f"Non-planar infill - Deform type: {deform_type}, Amplitude: {amplitude}mm, Frequency: {frequency}, Segment length: {segment_length}mm, Feedrate multiplier: {nonplanar_feedrate_multiplier}x")
+        logging.info(f"Non-planar infill - Deform type: {deform_type}, Amplitude: {amplitude}mm, Frequency: {frequency}, Segment length: {segment_length}mm, Feedrate multiplier: {nonplanar_feedrate_multiplier}x, Adaptive extrusion: {enable_adaptive_extrusion}")
     
     # Print feature settings summary to console
     print("\nFeature Settings:")
@@ -482,6 +487,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     if enable_nonplanar:
         print(f"  • Non-planar Infill: amplitude = {amplitude:.2f}mm, frequency = {frequency:.2f}, type = {deform_type}")
         print(f"                       segment length = {segment_length:.2f}mm, feedrate boost = {nonplanar_feedrate_multiplier:.1f}x")
+        print(f"                       adaptive extrusion = {'ON' if enable_adaptive_extrusion else 'OFF'}")
     if enable_safe_z_hop:
         print(f"  • Safe Z-hop: margin = {safe_z_hop_margin:.2f}mm, retraction = {z_hop_retraction:.2f}mm")
     print()
@@ -522,7 +528,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     # First pass: Build 3D grid showing which Z layers have solid at each XY position
     # Then for each layer, determine the safe Z range (space between solid layers)
-    grid_resolution = 1.0  # 1mm grid spacing
+    grid_resolution = GRID_RESOLUTION
     solid_at_grid = {}  # (grid_x, grid_y, layer_num) -> True if solid exists
     z_layer_map = {}    # layer_num -> Z height
     layer_z_map = {}    # Z height -> layer_num
@@ -565,7 +571,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         total_layers = max(z_layer_map.keys()) if z_layer_map else 0
         logging.info(f"  Print: X[{x_min:.1f}, {x_max:.1f}], Y[{y_min:.1f}, {y_max:.1f}], {total_layers} layers")
         logging.info(f"  Found {len(z_layer_map)} unique Z heights")
-        if debug:
+        if debug >= 1:
             print(f"[DEBUG] Found {total_layers} layers")
         
         # Second pass: Mark which grid cells have solid infill at each layer
@@ -577,15 +583,21 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         current_layer_num = -1  # Will be set from ;LAYER: marker
         in_solid_infill = False
         last_solid_pos = None  # Track last position to mark all cells along line
+        last_solid_coords = None  # Track actual X,Y coordinates for DDA
         debug_line_count = 0
         debug_cells_marked = 0
+        type_markers_seen = set()  # Track all TYPE markers we encounter
+        prev_line = ""  # Track previous line for debugging
+        line_number = 0  # Track line number for debugging
         
         for line in lines:
+            line_number += 1
             if ';LAYER:' in line:
                 layer_match = re.search(r';LAYER:(\d+)', line)
                 if layer_match:
                     current_layer_num = int(layer_match.group(1))
                     last_solid_pos = None  # Reset on layer change
+                    last_solid_coords = None
                     # Calculate layer height for this layer
                     if current_layer_num in z_layer_map:
                         current_z = z_layer_map[current_layer_num]
@@ -597,6 +609,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             elif ';LAYER_CHANGE' in line:
                 current_layer_num += 1  # Fallback for non-standard markers
                 last_solid_pos = None  # Reset on layer change
+                last_solid_coords = None
                 # Calculate layer height for this layer
                 if current_layer_num in z_layer_map:
                     current_z = z_layer_map[current_layer_num]
@@ -612,71 +625,126 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Detect solid infill AND perimeters (both block infill from below)
             if ';TYPE:Solid infill' in line or ';TYPE:Top solid infill' in line or ';TYPE:Bridge infill' in line or \
-               ';TYPE:Internal bridge infill' in line or \
-               ';TYPE:External perimeter' in line or ';TYPE:Internal perimeter' in line or ';TYPE:Perimeter' in line or \
-               ';TYPE:Overhang perimeter' in line:
+               ';TYPE:Internal bridge infill' in line or ';TYPE:Overhang perimeter' in line or \
+               ';TYPE:External perimeter' in line or ';TYPE:Internal perimeter' in line or ';TYPE:Perimeter' in line:
+
                 in_solid_infill = True
                 last_solid_pos = None  # Reset when entering solid infill or perimeter
+                last_solid_coords = None
                 if temp_z not in solid_infill_heights:
                     solid_infill_heights.append(temp_z)
-            elif in_solid_infill and ';TYPE:' in line:
+            elif ';TYPE:' in line:
+                # Track all TYPE markers for debugging
+                type_match = re.search(r';TYPE:([^\n]+)', line)
+                if type_match:
+                    type_markers_seen.add(type_match.group(1))
                 in_solid_infill = False
                 last_solid_pos = None  # Reset when exiting solid infill or perimeter
+                last_solid_coords = None
             
             # Track position during solid infill (both G0 and G1 moves)
-            if in_solid_infill and (line.startswith('G1') or line.startswith('G0')):
-                xy_match = re.search(r'X([-+]?\d*\.?\d+)\s*Y([-+]?\d*\.?\d+)', line)
-                if xy_match:
-                    x, y = map(float, xy_match.groups())
-                    gx = int(round(x / grid_resolution))
-                    gy = int(round(y / grid_resolution))
-                    
-                    # Only mark grid cells for G1 moves WITH extrusion (has E value)
-                    has_extrusion = line.startswith('G1') and 'E' in line
-                    if has_extrusion:
-                        # Mark all grid cells from last position to current position
-                        if last_solid_pos is not None:
-                            last_gx, last_gy = last_solid_pos
-                            # Use Bresenham-like algorithm to mark all cells along the line
-                            dx = abs(gx - last_gx)
-                            dy = abs(gy - last_gy)
-                            sx = 1 if gx > last_gx else -1
-                            sy = 1 if gy > last_gy else -1
-                            err = dx - dy
+            if in_solid_infill:
+                # Reset tracking on ANY G0 travel move (breaks continuity)
+                if line.startswith('G0'):
+                    last_solid_pos = None
+                    last_solid_coords = None
+                
+                # Reset tracking on retraction (E decreasing or negative E value)
+                # This prevents connecting across travel moves
+                if line.startswith('G1'):
+                    e_check = re.search(r'E([-+]?\d*\.?\d+)', line)
+                    if e_check:
+                        e_val = float(e_check.group(1))
+                        # Negative E or E near zero after G92 E0 = retraction
+                        if e_val < 0.01:  # Small threshold to catch retractions
+                            last_solid_pos = None
+                            last_solid_coords = None
+                
+                # Now process ONLY G1 moves with XY coordinates (G0 is travel, skip it)
+                if line.startswith('G1'):
+                    xy_match = re.search(r'X([-+]?\d*\.?\d+)\s*Y([-+]?\d*\.?\d+)', line)
+                    if xy_match:
+                        x, y = map(float, xy_match.groups())
+                        # Use floor division for consistent grid cell assignment
+                        gx = int(x / grid_resolution)
+                        gy = int(y / grid_resolution)
+                        
+                        # Only mark grid cells for G1 moves WITH extrusion (E parameter present)
+                        e_match = re.search(r'E([-+]?\d*\.?\d+)', line)
+                        has_extrusion = False
+                        if e_match:
+                            e_value = float(e_match.group(1))
+                            # Only consider it extrusion if E value is positive (or increasing if tracking absolute E)
+                            # For simplicity, we'll mark any G1 with E parameter (relative or absolute)
+                            has_extrusion = True
+                        
+                        if has_extrusion:
+                            # Mark all grid cells from last position to current position
+                            if last_solid_pos is not None:
+                                last_gx, last_gy = last_solid_pos
+                                last_x, last_y = last_solid_coords
+                                
+                                # DDA-style grid traversal: mark every cell the line crosses
+                                # We'll step through the line and mark cells as we go
+                                dx = x - last_x
+                                dy = y - last_y
+                                dist = max(abs(dx), abs(dy))
+                                
+                                # Step in small increments to catch all cells
+                                # Use steps smaller than grid_resolution to ensure we don't skip cells
+                                steps = int(dist / (grid_resolution * 0.1)) + 1
+                                
+                                marked_cells = set()
+                                for i in range(steps + 1):
+                                    t = i / max(steps, 1)
+                                    sx = last_x + t * dx
+                                    sy = last_y + t * dy
+                                    cell_x = int(sx / grid_resolution)
+                                    cell_y = int(sy / grid_resolution)
+                                    marked_cells.add((cell_x, cell_y, current_layer_num))
+                                
+                                # Mark all cells we found
+                                for cell in marked_cells:
+                                    solid_at_grid[cell] = True
+                                
+                                debug_line_count += 1
+                                debug_cells_marked += len(marked_cells)
+                                
+                                # Debug output for first few lines
+                                if debug >= 1 and debug_line_count <= 10:
+                                    print(f"[DEBUG] Line {debug_line_count}: ({last_gx},{last_gy}) -> ({gx},{gy}) marked {len(marked_cells)} cells")
+                            else:
+                                # First point - just mark it
+                                solid_at_grid[(gx, gy, current_layer_num)] = True
                             
-                            cells_on_this_line = 0
-                            curr_gx, curr_gy = last_gx, last_gy
-                            while True:
-                                solid_at_grid[(curr_gx, curr_gy, current_layer_num)] = True
-                                cells_on_this_line += 1
-                                if curr_gx == gx and curr_gy == gy:
-                                    break
-                                e2 = 2 * err
-                                if e2 > -dy:
-                                    err -= dy
-                                    curr_gx += sx
-                                if e2 < dx:
-                                    err += dx
-                                    curr_gy += sy
+                            # Save actual coordinates for next iteration
+                            last_solid_coords = (x, y)
                             
-                            debug_line_count += 1
-                            debug_cells_marked += cells_on_this_line
-                            
-                            # Debug output for first few lines
-                            if debug and debug_line_count <= 10:
-                                print(f"[DEBUG] Line {debug_line_count}: ({last_gx},{last_gy}) -> ({gx},{gy}) marked {cells_on_this_line} cells")
-                        else:
-                            # First point - just mark it
-                            solid_at_grid[(gx, gy, current_layer_num)] = True
-                    
-                    # Update position for BOTH G0 and G1
-                    last_solid_pos = (gx, gy)
+                            # Update last position for next line (for continuity)
+                            last_solid_pos = (gx, gy)
+            
+            # Track previous line for debugging
+            prev_line = line
         
         logging.info(f"Total solid infill layers: {len(solid_infill_heights)}")
         logging.info(f"Grid cells marked with solid: {len(solid_at_grid)}")
-        if debug:
+        if debug >= 1:
             print(f"[DEBUG] Marked {len(solid_at_grid)} grid cells with solid infill")
             print(f"[DEBUG] Processed {debug_line_count} line segments, avg {debug_cells_marked/max(1,debug_line_count):.1f} cells per line")
+            print(f"\n[DEBUG] All TYPE markers seen in G-code: {sorted(type_markers_seen)}")
+            
+            # Show which layers have solid infill
+            layers_with_solid = sorted(set(layer for _, _, layer in solid_at_grid.keys()))
+            print(f"[DEBUG] Layers with solid infill: {layers_with_solid[:30]}..." if len(layers_with_solid) > 30 else f"[DEBUG] Layers with solid infill: {layers_with_solid}")
+            
+            # Show coverage per layer for first few layers
+            print(f"\n[DEBUG] Grid cell coverage for first 10 layers:")
+            for layer in layers_with_solid[:10]:
+                cells_at_layer = [(gx, gy) for (gx, gy, lay) in solid_at_grid.keys() if lay == layer]
+                layer_z = z_layer_map.get(layer, "unknown")
+                print(f"  Layer {layer} (Z={layer_z}): {len(cells_at_layer)} cells marked")
+                if len(cells_at_layer) < 20:  # If few cells, show them
+                    print(f"    Cells: {sorted(cells_at_layer)}")
         
         # Third pass: Calculate safe Z range PER GRID CELL
         # For each grid cell (gx, gy), track the safe Z range between solid layers
@@ -685,11 +753,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info("\nCalculating safe Z ranges per grid cell...")
         logging.info(f"  Processing {len(set((gx, gy) for gx, gy, _ in solid_at_grid.keys()))} unique grid positions...")
         grid_cell_safe_z = {}  # (gx, gy) -> list of (layer_num, z_min, z_max) tuples
+        grid_cell_solid_regions = {}  # (gx, gy) -> list of (layer_start, layer_end, z_bottom, z_top) tuples
         
         # Get all unique grid positions
         all_grid_positions = sorted(set((gx, gy) for gx, gy, _ in solid_at_grid.keys()))
         
-        # For each grid cell, scan through layers and find safe ranges
+        # For each grid cell, scan through layers and find solid regions and safe ranges
         for gx, gy in all_grid_positions:
             # Get all layers where this grid cell has solid infill, sorted
             solid_layers_at_cell = sorted([layer for (g_x, g_y, layer) in solid_at_grid.keys() 
@@ -698,24 +767,46 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             if not solid_layers_at_cell:
                 continue
             
-            # Build safe ranges for this cell
+            # STEP 1: Identify continuous solid regions
+            # A solid region is a group of consecutive layers with solid infill
+            solid_regions = []
+            region_start = solid_layers_at_cell[0]
+            
+            for i in range(1, len(solid_layers_at_cell)):
+                # Check if there's a gap between this layer and the previous
+                if solid_layers_at_cell[i] > solid_layers_at_cell[i-1] + 1:
+                    # Gap found - end current region
+                    region_end = solid_layers_at_cell[i-1]
+                    z_bottom = z_layer_map[region_start]
+                    z_top = z_layer_map[region_end] + base_layer_height
+                    solid_regions.append((region_start, region_end, z_bottom, z_top))
+                    
+                    # Start new region
+                    region_start = solid_layers_at_cell[i]
+            
+            # Don't forget the last region
+            region_end = solid_layers_at_cell[-1]
+            z_bottom = z_layer_map[region_start]
+            z_top = z_layer_map[region_end] + base_layer_height
+            solid_regions.append((region_start, region_end, z_bottom, z_top))
+            
+            # Store solid regions for this cell
+            grid_cell_solid_regions[(gx, gy)] = solid_regions
+            
+            # STEP 2: Build safe ranges between solid regions
             safe_ranges = []
             
-            # For each pair of consecutive solid layers, the space between is safe
-            for i in range(len(solid_layers_at_cell) - 1):
-                layer_bottom = solid_layers_at_cell[i]
-                layer_top = solid_layers_at_cell[i + 1]
+            # For each pair of consecutive solid regions, the space between is safe
+            for i in range(len(solid_regions) - 1):
+                _, region1_end, _, z_top_region1 = solid_regions[i]
+                region2_start, _, z_bottom_region2, _ = solid_regions[i + 1]
                 
-                z_bottom = z_layer_map[layer_bottom]
-                z_top = z_layer_map[layer_top]
+                # The safe range is from top of first region to bottom of second region
+                z_min_safe = z_top_region1  # Top of lower solid region
+                z_max_safe = z_bottom_region2  # Bottom of upper solid region
                 
-                # The solid at layer_bottom occupies space from z_bottom to (z_bottom + base_layer_height)
-                # So the safe range starts AFTER the solid layer ends
-                z_min_safe = z_bottom + base_layer_height
-                z_max_safe = z_top  # Top boundary is where the next solid layer starts
-                
-                # For all layers between these two solid layers, the safe range is [z_min_safe, z_max_safe]
-                for layer_num in range(layer_bottom + 1, layer_top):
+                # For all layers between these two solid regions, the safe range is [z_min_safe, z_max_safe]
+                for layer_num in range(region1_end + 1, region2_start):
                     safe_ranges.append((layer_num, z_min_safe, z_max_safe))
             
             # Store all safe ranges for this grid cell
@@ -723,15 +814,28 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 grid_cell_safe_z[(gx, gy)] = safe_ranges
         
         logging.info(f"  Calculated safe Z ranges for {len(all_grid_positions)} unique grid cells")
+        logging.info(f"  Identified {sum(len(regions) for regions in grid_cell_solid_regions.values())} solid regions")
         total_safe_ranges = sum(len(ranges) for ranges in grid_cell_safe_z.values())
         logging.info(f"  Total safe range entries: {total_safe_ranges}")
         
-        if debug:
+        if debug >= 1:
             print(f"[DEBUG] Calculated safe Z ranges for {len(all_grid_positions)} unique grid cells")
+            print(f"[DEBUG] Identified {sum(len(regions) for regions in grid_cell_solid_regions.values())} solid regions")
             total_safe_ranges = sum(len(ranges) for ranges in grid_cell_safe_z.values())
             print(f"[DEBUG] Total safe range entries: {total_safe_ranges}")
             
-            # Show example safe ranges for a few grid cells
+            # Show example solid regions and safe ranges for a few grid cells
+            print(f"\n[DEBUG VISUALIZATION] Example solid regions for first 5 grid cells:")
+            for idx, ((gx, gy), regions) in enumerate(list(grid_cell_solid_regions.items())[:5]):
+                print(f"  Grid cell ({gx}, {gy}) at X={gx*grid_resolution:.1f}, Y={gy*grid_resolution:.1f}:")
+                for region_start, region_end, z_bottom, z_top in regions:
+                    print(f"    Solid region: layers {region_start}-{region_end}, Z={z_bottom:.2f} to {z_top:.2f}")
+            
+            # Check if we're missing bottom layers
+            all_layer_nums = sorted(set(layer for _, _, layer in solid_at_grid.keys()))
+            print(f"\n[DEBUG] Solid layers detected: {all_layer_nums[:20]}..." if len(all_layer_nums) > 20 else f"\n[DEBUG] Solid layers detected: {all_layer_nums}")
+            print(f"[DEBUG] First solid layer: {min(all_layer_nums)}, Last: {max(all_layer_nums)}")
+            
             print(f"\n[DEBUG VISUALIZATION] Example safe Z ranges for first 5 grid cells:")
             for idx, ((gx, gy), ranges) in enumerate(list(grid_cell_safe_z.items())[:5]):
                 print(f"  Grid cell ({gx}, {gy}) at X={gx*grid_resolution:.1f}, Y={gy*grid_resolution:.1f}:")
@@ -740,20 +844,72 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     print(f"    Layer {layer_num} (Z={layer_z:.2f}): safe range [{z_min:.2f}, {z_max:.2f}]")
                 if len(ranges) > 3:
                     print(f"    ... and {len(ranges) - 3} more ranges")
+            
+            # Generate debug PNG images for first 10 layers
+            print(f"\n[DEBUG] Generating layer visualization PNGs...")
+            try:
+                from PIL import Image, ImageDraw
+                
+                # Get grid bounds
+                all_gx = [gx for gx, gy, lay in solid_at_grid.keys()]
+                all_gy = [gy for gx, gy, lay in solid_at_grid.keys()]
+                grid_x_min, grid_x_max = min(all_gx), max(all_gx)
+                grid_y_min, grid_y_max = min(all_gy), max(all_gy)
+                
+                grid_width = grid_x_max - grid_x_min + 1
+                grid_height = grid_y_max - grid_y_min + 1
+                
+                # Scale up for visibility (each grid cell = 4 pixels)
+                scale = 4
+                img_width = grid_width * scale
+                img_height = grid_height * scale
+                
+                layers_to_visualize = sorted(all_layer_nums)  # ALL layers
+                print(f"[DEBUG] Generating PNG images for {len(layers_to_visualize)} layers...")
+                for layer in layers_to_visualize:
+                    # Create image (black background = air)
+                    img = Image.new('RGB', (img_width, img_height), color='black')
+                    draw = ImageDraw.Draw(img)
+                    
+                    # Draw grid cells with solid material
+                    for (gx, gy, lay) in solid_at_grid.keys():
+                        if lay == layer:
+                            # Convert to image coordinates (flip Y axis)
+                            img_x = (gx - grid_x_min) * scale
+                            img_y = (grid_y_max - gy) * scale  # Flip Y
+                            
+                            # Draw filled rectangle for this grid cell (white = solid)
+                            draw.rectangle(
+                                [img_x, img_y, img_x + scale - 1, img_y + scale - 1],
+                                fill='white'
+                            )
+                    
+                    # Save image
+                    layer_z = z_layer_map.get(layer, 0)
+                    img_filename = os.path.join(script_dir, f"layer_{layer:03d}_z{layer_z:.2f}.png")
+                    img.save(img_filename)
+                    print(f"  Saved: {os.path.basename(img_filename)}")
+                
+                print(f"[DEBUG] Generated {len(layers_to_visualize)} layer visualization PNGs")
+            except ImportError:
+                print(f"[DEBUG] PIL/Pillow not available - skipping PNG generation")
+                print(f"[DEBUG] Install with: pip install Pillow")
         
         # Get all layers that have solid infill anywhere (for visualization)
         all_solid_layers = sorted(set(layer for _, _, layer in solid_at_grid.keys()))
-        if debug:
+        if debug >= 1:
             print(f"[DEBUG] Found solid infill on {len(all_solid_layers)} layers: {all_solid_layers[:10]}..." if len(all_solid_layers) > 10 else f"[DEBUG] Found solid infill on {len(all_solid_layers)} layers: {all_solid_layers}")
         
         # Prepare grid visualization G-code to insert at layer 0 (only if debug enabled)
         grid_visualization_gcode = []
-        if debug:
+        if debug >= 1:
             grid_visualization_gcode.append("; ========================================\n")
             grid_visualization_gcode.append("; GRID VISUALIZATION - Solid Infill Detection & Safe Z Ranges PER CELL\n")
             grid_visualization_gcode.append("; Grid: horizontal and vertical lines showing grid structure\n")
             grid_visualization_gcode.append("; + markers: safe Z range boundaries for each grid cell\n")
             grid_visualization_gcode.append("; ========================================\n")
+            grid_visualization_gcode.append("G90 ; Absolute positioning\n")
+            grid_visualization_gcode.append("M82 ; Absolute extrusion mode\n")
             
             # Calculate overall grid bounds from solid cells
             all_gx = [gx for gx, gy, lay in solid_at_grid.keys()]
@@ -807,86 +963,101 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     grid_e += 0.001
             
             # Now draw safe range boundaries for each grid cell
-            # AND also visualize cells with solid material (even if no safe ranges)
-            grid_visualization_gcode.append(f"\n; === SAFE Z RANGE VISUALIZATION (per grid cell) ===\n")
+            # Just draw simple + markers at each grid cell position (at first layer Z)
+            grid_visualization_gcode.append(f"\n; === GRID CELL MARKERS (at each cell position) ===\n")
             
-            # First, visualize safe ranges (gaps between solid layers)
-            for (gx, gy), ranges in grid_cell_safe_z.items():
-                if not ranges:
-                    continue
-                
-                # Find overall min and max Z for this cell across all layers
-                overall_z_min = min(z_min for _, z_min, _ in ranges)
-                overall_z_max = max(z_max for _, _, z_max in ranges)
-                
-                # Skip sentinel values
-                if overall_z_min < -100 or overall_z_max > 100:
-                    continue
-                
-                # Markers at exact grid coordinates (where LUT data is)
+            for (gx, gy) in all_grid_positions:
                 x = gx * grid_resolution
                 y = gy * grid_resolution
                 
-                # Draw + marker at z_min (bottom of safe range)
-                grid_visualization_gcode.append(f"; Cell ({gx},{gy}): z_min={overall_z_min:.2f}\n")
-                grid_visualization_gcode.append(f"G0 Z{overall_z_min:.2f} F3000\n")
-                grid_visualization_gcode.append(f"G0 X{x-0.3:.2f} Y{y:.2f} Z{overall_z_min:.2f} F6000\n")
-                grid_visualization_gcode.append(f"G1 X{x+0.3:.2f} Y{y:.2f} Z{overall_z_min:.2f} E{grid_e:.5f} F1200\n")
-                grid_e += 0.002
-                grid_visualization_gcode.append(f"G0 X{x:.2f} Y{y-0.3:.2f} Z{overall_z_min:.2f} F6000\n")
-                grid_visualization_gcode.append(f"G1 X{x:.2f} Y{y+0.3:.2f} Z{overall_z_min:.2f} E{grid_e:.5f} F1200\n")
-                grid_e += 0.002
-                
-                # Draw + marker at z_max (top of safe range)
-                grid_visualization_gcode.append(f"; Cell ({gx},{gy}): z_max={overall_z_max:.2f}\n")
-                grid_visualization_gcode.append(f"G0 Z{overall_z_max:.2f} F3000\n")
-                grid_visualization_gcode.append(f"G0 X{x-0.3:.2f} Y{y:.2f} Z{overall_z_max:.2f} F6000\n")
-                grid_visualization_gcode.append(f"G1 X{x+0.3:.2f} Y{y:.2f} Z{overall_z_max:.2f} E{grid_e:.5f} F1200\n")
-                grid_e += 0.002
-                grid_visualization_gcode.append(f"G0 X{x:.2f} Y{y-0.3:.2f} Z{overall_z_max:.2f} F6000\n")
-                grid_visualization_gcode.append(f"G1 X{x:.2f} Y{y+0.3:.2f} Z{overall_z_max:.2f} E{grid_e:.5f} F1200\n")
-                grid_e += 0.002
+                # Draw + marker at this grid cell position
+                grid_visualization_gcode.append(f"G0 X{x-0.3:.2f} Y{y:.2f} Z{first_z:.2f} F6000\n")
+                grid_visualization_gcode.append(f"G1 X{x+0.3:.2f} Y{y:.2f} Z{first_z:.2f} E{grid_e:.5f} F1200\n")
+                grid_e += 0.001
+                grid_visualization_gcode.append(f"G0 X{x:.2f} Y{y-0.3:.2f} Z{first_z:.2f} F6000\n")
+                grid_visualization_gcode.append(f"G1 X{x:.2f} Y{y+0.3:.2f} Z{first_z:.2f} E{grid_e:.5f} F1200\n")
+                grid_e += 0.001
             
-            # Second, visualize ALL solid cells (show min/max Z where solid exists)
-            grid_visualization_gcode.append(f"\n; === SOLID MATERIAL VISUALIZATION (cells with continuous solid) ===\n")
-            for gx, gy in all_grid_positions:
-                # Skip if already visualized in safe ranges
-                if (gx, gy) in grid_cell_safe_z:
-                    continue
-                
-                # Get all layers where this cell has solid material
-                solid_layers = sorted([layer for (g_x, g_y, layer) in solid_at_grid.keys() 
-                                      if g_x == gx and g_y == gy])
-                
-                if len(solid_layers) < 2:
-                    continue  # Need at least 2 layers to show a range
-                
-                # Show min and max Z where solid exists
-                z_min = z_layer_map[solid_layers[0]]
-                z_max = z_layer_map[solid_layers[-1]]
-                
-                x = gx * grid_resolution
-                y = gy * grid_resolution
-                
-                # Draw + marker at z_min (first solid layer)
-                grid_visualization_gcode.append(f"; Cell ({gx},{gy}) SOLID: z_min={z_min:.2f}\n")
-                grid_visualization_gcode.append(f"G0 Z{z_min:.2f} F3000\n")
-                grid_visualization_gcode.append(f"G0 X{x-0.3:.2f} Y{y:.2f} Z{z_min:.2f} F6000\n")
-                grid_visualization_gcode.append(f"G1 X{x+0.3:.2f} Y{y:.2f} Z{z_min:.2f} E{grid_e:.5f} F1200\n")
-                grid_e += 0.002
-                grid_visualization_gcode.append(f"G0 X{x:.2f} Y{y-0.3:.2f} Z{z_min:.2f} F6000\n")
-                grid_visualization_gcode.append(f"G1 X{x:.2f} Y{y+0.3:.2f} Z{z_min:.2f} E{grid_e:.5f} F1200\n")
-                grid_e += 0.002
-                
-                # Draw + marker at z_max (last solid layer)
-                grid_visualization_gcode.append(f"; Cell ({gx},{gy}) SOLID: z_max={z_max:.2f}\n")
-                grid_visualization_gcode.append(f"G0 Z{z_max:.2f} F3000\n")
-                grid_visualization_gcode.append(f"G0 X{x-0.3:.2f} Y{y:.2f} Z{z_max:.2f} F6000\n")
-                grid_visualization_gcode.append(f"G1 X{x+0.3:.2f} Y{y:.2f} Z{z_max:.2f} E{grid_e:.5f} F1200\n")
-                grid_e += 0.002
-                grid_visualization_gcode.append(f"G0 X{x:.2f} Y{y-0.3:.2f} Z{z_max:.2f} F6000\n")
-                grid_visualization_gcode.append(f"G1 X{x:.2f} Y{y+0.3:.2f} Z{z_max:.2f} E{grid_e:.5f} F1200\n")
-                grid_e += 0.002
+            # Add cross-section views beside the grid (projected onto Z plane)
+            grid_visualization_gcode.append(f"\n; === CROSS-SECTION VIEWS (side views projected to build plate) ===\n")
+            
+            # Calculate center of grid for cross-sections
+            center_gx = (grid_x_min + grid_x_max) // 2
+            center_gy = (grid_y_min + grid_y_max) // 2
+            
+            if debug >= 1:
+                msg = f"Cross-section center: gx={center_gx} (X={center_gx * grid_resolution:.1f}mm), gy={center_gy} (Y={center_gy * grid_resolution:.1f}mm)"
+                print(f"[DEBUG] {msg}")
+                logging.info(f"[DEBUG] {msg}")
+                msg = f"Grid bounds: X=[{grid_x_min}, {grid_x_max}], Y=[{grid_y_min}, {grid_y_max}]"
+                print(f"[DEBUG] {msg}")
+                logging.info(f"[DEBUG] {msg}")
+            
+            # Cross-section 1: YZ plane (view from +X direction) - shows Y vs Z
+            # Draw individual dots for each layer that has solid material
+            x_section_x_base = (grid_x_max + 3) * grid_resolution  # Base X position to the right of grid
+            z_scale = 1.0  # Use 1:1 scale for Z
+            grid_visualization_gcode.append(f"\n; Cross-section YZ plane (looking from +X, through X={center_gx})\n")
+            grid_visualization_gcode.append(f"; Each dot = solid material at that Y,Z position\n")
+            
+            # Draw solid cells as individual markers
+            yz_cells_count = 0
+            for (gx, gy, layer) in solid_at_grid.keys():
+                if gx == center_gx:  # Only cells on the center slice
+                    yz_cells_count += 1
+                    if layer in z_layer_map:
+                        layer_z = z_layer_map[layer]
+                        y_draw = gy * grid_resolution
+                        x_draw = x_section_x_base + (layer_z * z_scale)
+                        
+                        # Draw a small marker (short line)
+                        grid_visualization_gcode.append(f"G0 X{x_draw:.2f} Y{y_draw:.2f} Z{first_z:.2f} F6000\n")
+                        grid_visualization_gcode.append(f"G1 X{x_draw + 0.2:.2f} Y{y_draw:.2f} Z{first_z:.2f} E{grid_e:.5f} F300\n")
+                        grid_e += 0.001
+            
+            if debug >= 1:
+                msg = f"YZ cross-section: found {yz_cells_count} solid cells at gx={center_gx}"
+                print(f"[DEBUG] {msg}")
+                logging.info(f"[DEBUG] {msg}")
+                # Show which Y positions have cells on layer 0
+                layer0_cells = [(gy, gx, layer) for (gx, gy, layer) in solid_at_grid.keys() if gx == center_gx and layer == 0]
+                if layer0_cells:
+                    y_positions = sorted(set([gy for gy, _, _ in layer0_cells]))
+                    msg = f"Layer 0 Y positions at gx={center_gx}: {y_positions}"
+                    print(f"[DEBUG] {msg}")
+                    logging.info(f"[DEBUG] {msg}")
+            
+            # Cross-section 2: XZ plane (view from +Y direction) - shows X vs Z
+            y_section_y_base = (grid_y_max + 3) * grid_resolution  # Base Y position below grid
+            grid_visualization_gcode.append(f"\n; Cross-section XZ plane (looking from +Y, through Y={center_gy})\n")
+            grid_visualization_gcode.append(f"; Each dot = solid material at that X,Z position\n")
+            
+            # Draw solid cells as individual markers
+            xz_cells_count = 0
+            for (gx, gy, layer) in solid_at_grid.keys():
+                if gy == center_gy:  # Only cells on the center slice
+                    xz_cells_count += 1
+                    if layer in z_layer_map:
+                        layer_z = z_layer_map[layer]
+                        x_draw = gx * grid_resolution
+                        y_draw = y_section_y_base + (layer_z * z_scale)
+                        
+                        # Draw a small marker (short line)
+                        grid_visualization_gcode.append(f"G0 X{x_draw:.2f} Y{y_draw:.2f} Z{first_z:.2f} F6000\n")
+                        grid_visualization_gcode.append(f"G1 X{x_draw:.2f} Y{y_draw + 0.2:.2f} Z{first_z:.2f} E{grid_e:.5f} F300\n")
+                        grid_e += 0.001
+            
+            if debug >= 1:
+                msg = f"XZ cross-section: found {xz_cells_count} solid cells at gy={center_gy}"
+                print(f"[DEBUG] {msg}")
+                logging.info(f"[DEBUG] {msg}")
+                # Show which X positions have cells on layer 0
+                layer0_cells = [(gx, gy, layer) for (gx, gy, layer) in solid_at_grid.keys() if gy == center_gy and layer == 0]
+                if layer0_cells:
+                    x_positions = sorted(set([gx for gx, _, _ in layer0_cells]))
+                    msg = f"Layer 0 X positions at gy={center_gy}: {x_positions}"
+                    print(f"[DEBUG] {msg}")
+                    logging.info(f"[DEBUG] {msg}")
             
             grid_visualization_gcode.append(f"G92 E0 ; Reset extruder after grid visualization\n")
             grid_visualization_gcode.append("; === End of grid visualization ===\n\n")
@@ -1165,7 +1336,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Insert grid visualization at layer 0
             if current_layer == 0 and 'grid_visualization_gcode' in locals():
-                if debug:
+                if debug >= 1:
                     print(f"[DEBUG] Inserting grid visualization at layer 0 ({len(grid_visualization_gcode)} lines)")
                 modified_lines.extend(grid_visualization_gcode)
                 del grid_visualization_gcode  # Only insert once
@@ -1183,14 +1354,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         old_z = current_z
                         current_z = float(z_marker_match.group(1))
                         logging.info(f"\nLayer {current_layer} Z marker: updated current_z from {old_z:.3f} to {current_z:.3f}")
-                        if debug:
+                        if debug >= 1:
                             print(f"[DEBUG] Layer {current_layer}: Updated current_z from {old_z:.3f} to {current_z:.3f} (from ;Z: marker)")
                 if ";HEIGHT:" in lines[j]:
                     height_match = re.search(r';HEIGHT:([\d.]+)', lines[j])
                     if height_match:
                         current_layer_height = float(height_match.group(1))
                         logging.info(f"Layer {current_layer} HEIGHT marker: layer_height={current_layer_height:.3f}")
-                        if debug:
+                        if debug >= 1:
                             print(f"[DEBUG] Layer {current_layer}: current_layer_height={current_layer_height:.3f}, current_z={current_z:.3f}")
                         break
             modified_lines.append(line)
@@ -1498,10 +1669,26 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             block_travel_x = travel_start_x
                             block_travel_y = travel_start_y
                         
-                        # On layer 0: all blocks are base blocks (no shifting)
-                        # On layer 1+: alternate between shifted and base
-                        if current_layer == 0:
-                            is_shifted = False  # All base blocks on layer 0
+                        # Detect if this layer is a base or top of a solid region
+                        # Use grid position of the perimeter block to check solid regions
+                        is_base_layer = False
+                        is_top_layer = False
+                        
+                        if block_travel_x is not None and block_travel_y is not None:
+                            gx = int(round(block_travel_x / grid_resolution))
+                            gy = int(round(block_travel_y / grid_resolution))
+                            
+                            if (gx, gy) in grid_cell_solid_regions:
+                                for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
+                                    if current_layer == region_start:
+                                        is_base_layer = True
+                                    if current_layer == region_end:
+                                        is_top_layer = True
+                        
+                        # On base layers: all blocks are base blocks (no shifting)
+                        # On other layers: alternate between shifted and base
+                        if is_base_layer:
+                            is_shifted = False  # All base blocks on base layers
                         else:
                             is_shifted = perimeter_block_count % 2 == 1
                         
@@ -1524,9 +1711,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         # Now output this loop with bricklayer pattern
                         if is_shifted:
                             # Shifted block: single pass at Z + 0.5h
-                            # On last layer, use 0.5x extrusion to end flat
-                            adjusted_z = current_z + z_shift
-                            extrusion_factor = 0.5 if is_last_layer else 1.0
+                            # On top layers, use 0.75x height (0.5 → 0.375 shift) for flat top
+                            z_shift_adjusted = z_shift * 0.75 if is_top_layer else z_shift
+                            adjusted_z = current_z + z_shift_adjusted
+                            extrusion_factor = 1.0
                             
                             # Track actual max Z for this layer (for safe Z-hop)
                             if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
@@ -1550,9 +1738,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         
                         else:
                             # Base block (non-shifted)
-                            # Only use two-pass on layer 0, single pass thereafter
-                            if current_layer == 0:
-                                # Layer 0: TWO passes at 0.75h each (total 1.5h)
+                            # Use two-pass on base layers (start of solid regions), single pass otherwise
+                            if is_base_layer:
+                                # Base layer: TWO passes at 0.75h each (total 1.5h)
                                 pass1_z = current_z  # Start at normal layer Z
                                 pass2_z = current_z + (current_layer_height * 0.75)  # Raise by 0.75h for second pass
                                 
@@ -1634,10 +1822,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # Reset Z
                                 modified_lines.append(f"G1 Z{current_z:.3f} ; Reset Z\n")
                             else:
-                                # Layer 1+: Single pass at Z + 0.5h (sits on previous layer's shifted block)
-                                # On last layer, use 0.5x extrusion to end flat
-                                adjusted_z = current_z + z_shift
-                                extrusion_factor = 0.5 if is_last_layer else 1.0
+                                # Non-base layers: Single pass at Z + 0.5h (sits on previous layer's shifted block)
+                                # On top layers, use 0.75x height for flat top
+                                z_shift_adjusted = z_shift * 0.75 if is_top_layer else z_shift
+                                adjusted_z = current_z + z_shift_adjusted
+                                extrusion_factor = 1.0
                                 
                                 # Track actual max Z for this layer (for safe Z-hop)
                                 if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
@@ -1674,6 +1863,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Save the current layer Z before applying non-planar modulation
             layer_z = current_z
             last_infill_z = layer_z  # Track last Z used in infill
+            adaptive_comment_added = False  # Track if we've added the adaptive E comment for this layer
 
             # Process infill lines
             while i < len(lines):
@@ -1757,8 +1947,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # Reduce modulation near walls/perimeters to prevent visible artifacts
                             
                             for idx, (sx, sy) in enumerate(segments):
-                                current_e += e_per_segment
-                                
                                 # Calculate distance to nearest perimeter/solid to taper modulation
                                 # Check surrounding grid cells for solid material at current layer
                                 gx = int(round(sx / grid_resolution))
@@ -1805,42 +1993,34 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 z_offset = amplitude * taper_factor * noise_value
                                 z_mod = layer_z + z_offset
                                 
-                                # PER-CELL CLAMPING using grid-based safe Z range
-                                # (gx, gy already calculated above for wall proximity)
+                                # PER-CELL CLAMPING using solid regions
+                                # Check if z_mod would collide with any solid region in this cell
+                                local_z_min = -999  # Floor (top of solid below)
+                                local_z_max = 999   # Ceiling (bottom of solid above)
                                 
-                                # Find safe range for this cell at this layer
-                                local_z_min = -999
-                                local_z_max = 999
-                                if (gx, gy) in grid_cell_safe_z:
-                                    # Search for this layer in the cell's safe ranges
-                                    for range_layer, z_min, z_max in grid_cell_safe_z[(gx, gy)]:
-                                        if range_layer == current_layer:
-                                            # Add layer_height margin to safe range
-                                            # z_min is the top of solid below, so add layer_height for clearance
-                                            local_z_min = z_min + base_layer_height
-                                            # z_max is the bottom of solid above
-                                            # Subtract 2x layer_height to stay well below it
-                                            local_z_max = z_max - (2 * base_layer_height)
-                                            break
-                                
-                                # ADDITIONAL CONSTRAINT: Don't let infill rise/fall more than amplitude from current layer
-                                # This prevents infill from going way too high/low when there's a large gap
-                                max_rise_from_layer = layer_z + amplitude
-                                max_fall_from_layer = layer_z - amplitude
-                                if local_z_max < 100:  # Only constrain if we have a valid z_max
-                                    local_z_max = min(local_z_max, max_rise_from_layer)
-                                if local_z_min > -100:  # Only constrain if we have a valid z_min
-                                    local_z_min = max(local_z_min, max_fall_from_layer)
+                                if (gx, gy) in grid_cell_solid_regions:
+                                    for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
+                                        # Check if this solid region is BELOW our current layer
+                                        if region_end < current_layer:
+                                            # This solid is below - use its top as our floor
+                                            local_z_min = max(local_z_min, z_top)
+                                        # Check if this solid region is ABOVE our current layer
+                                        elif region_start > current_layer:
+                                            # This solid is above - use its bottom as our ceiling
+                                            if local_z_max == 999:  # Take the LOWEST ceiling
+                                                local_z_max = z_bottom - base_layer_height
+                                            else:
+                                                local_z_max = min(local_z_max, z_bottom - base_layer_height)
                                 
                                 # DEBUG output for first segment only (when debug flag is enabled)
                                 if debug and idx == 1 and current_layer <= 3 and current_layer % 1 == 0:
                                     print(f"[Layer {current_layer}] Z={layer_z:.2f}, cell=({gx},{gy}), range=[{local_z_min:.2f}, {local_z_max:.2f}], z_mod: {z_mod:.3f} -> ", end='')
                                 
-                                # Clamp Z to safe range (with layer_height margins)
+                                # Clamp Z to safe range
                                 z_mod_original = z_mod
-                                if local_z_min > -100:  # Valid z_min
+                                if local_z_min > -999:  # Valid z_min
                                     z_mod = max(local_z_min, z_mod)
-                                if local_z_max < 100:  # Valid z_max
+                                if local_z_max < 999:  # Valid z_max
                                     z_mod = min(local_z_max, z_mod)
                                 
                                 if debug and idx == 1 and current_layer <= 3 and current_layer % 1 == 0:
@@ -1853,7 +2033,45 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 if current_layer not in actual_layer_max_z or z_mod > actual_layer_max_z[current_layer]:
                                     actual_layer_max_z[current_layer] = z_mod
                                 
-                                # Output with Z modulation and boosted feedrate
+                                # Calculate E multiplier based on Z lift (only when going UP and if enabled)
+                                # This adds extra material that droops down to bond with layer below
+                                # ONLY apply on first infill layer (when solid is directly below)
+                                e_segment_multiplier = 1.0  # Default: no change
+                                applied_adaptive_extrusion = False  # Track if we actually apply it
+                                
+                                if enable_adaptive_extrusion:
+                                    # Check if this is the first infill layer after a solid region
+                                    # Look up solid regions for this cell and check if current_layer is right after one
+                                    is_first_infill_layer = False
+                                    
+                                    if (gx, gy) in grid_cell_solid_regions:
+                                        for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
+                                            # Check if we're on the layer immediately after a solid region ends
+                                            if current_layer == region_end + 1:
+                                                is_first_infill_layer = True
+                                                break
+                                    
+                                    if is_first_infill_layer:
+                                        z_lift = z_mod - layer_z  # How much above base layer
+                                        
+                                        if z_lift > 0:  # Only when lifting UP
+                                            # Increase E proportional to lift
+                                            # For each layer_height of lift, add 100% more material
+                                            # Example: 0.2mm lift with 0.2mm layer = 2x material
+                                            #          0.4mm lift with 0.2mm layer = 3x material
+                                            e_segment_multiplier = 1.0 + (z_lift / base_layer_height)
+                                            applied_adaptive_extrusion = True
+                                
+                                # Apply E multiplier to this segment's extrusion amount
+                                adjusted_e_per_segment = e_per_segment * e_segment_multiplier
+                                current_e += adjusted_e_per_segment
+                                
+                                # Add a comment once per layer when adaptive extrusion is being applied
+                                if applied_adaptive_extrusion and not adaptive_comment_added:
+                                    modified_lines.append(f"; Adaptive E: {e_segment_multiplier:.2f}x (z_lift={z_lift:.3f}mm, local_z_min={local_z_min:.2f}, layer_z={layer_z:.2f})\n")
+                                    adaptive_comment_added = True
+                                
+                                # Output with Z modulation, adjusted E, and boosted feedrate
                                 if feedrate is not None:
                                     modified_lines.append(
                                         f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(feedrate)}\n"
@@ -2060,22 +2278,35 @@ if __name__ == "__main__":
                        help=f'Amplitude of Z modulation for non-planar infill in mm when float, layers when integer (default: {DEFAULT_AMPLITUDE})')
     parser.add_argument('-frequency', '--frequency', type=float, default=DEFAULT_FREQUENCY,
                        help=f'Frequency of Z modulation for non-planar infill (default: {DEFAULT_FREQUENCY})')
+    parser.add_argument('-disableAdaptiveExtrusion', '--disable-adaptive-extrusion', action='store_false', dest='enable_adaptive_extrusion',
+                       help='Disable adaptive extrusion multiplier for Z-lift (adds extra material when lifting to bond with layer below, default: enabled)')
     
     parser.add_argument('-disableSafeZHop', '--disable-safe-z-hop', action='store_false', dest='enable_safe_z_hop',
                        help='Disable safe Z-hop during travel moves (default: enabled)')
     parser.add_argument('-safeZHopMargin', '--safe-z-hop-margin', type=float, default=DEFAULT_SAFE_Z_HOP_MARGIN,
                        help=f'Safety margin in mm to add above max Z during travel (default: {DEFAULT_SAFE_Z_HOP_MARGIN})')
     
-    parser.add_argument('--debug', action='store_true', default=False,
-                       help='Enable debug visualization: draws grid showing detected solid infill and safe Z ranges (default: disabled)')
+    # Debug mode arguments
+    debug_group = parser.add_mutually_exclusive_group()
+    debug_group.add_argument('-debug', '--debug', dest='debug_level', action='store_const', const=0, default=-1,
+                       help='Enable basic debug mode with standard logging (WARNING level)')
+    debug_group.add_argument('-debug-full', '--debug-full', dest='debug_level', action='store_const', const=1,
+                       help='Enable full debug mode: INFO logging + PNG layer images + debug G-code visualization')
     
     args = parser.parse_args()
     
+    # Set logging level based on debug argument
+    debug = args.debug_level
+    if debug >= 1:
+        logging.getLogger().setLevel(logging.INFO)
+    
     # Log all received arguments for debugging
-    logging.info("=" * 70)
-    logging.info("Command-line arguments received:")
-    logging.info(f"  Raw sys.argv: {sys.argv}")
-    logging.info(f"  Parsed input_file: {args.input_file}")
+    if debug >= 1:
+        logging.info("Debug mode enabled - log level set to INFO")
+        logging.info("=" * 70)
+        logging.info("Command-line arguments received:")
+        logging.info(f"  Raw sys.argv: {sys.argv}")
+        logging.info(f"  Parsed input_file: {args.input_file}")
     logging.info(f"  Parsed output_file: {args.output_file}")
     logging.info(f"  Enable all: {args.enable_all}")
     logging.info(f"  Enable bricklayers: {args.enable_bricklayers}")
@@ -2112,11 +2343,12 @@ if __name__ == "__main__":
             deform_type=args.deform_type,
             segment_length=args.segment_length,
             nonplanar_feedrate_multiplier=args.nonplanar_feedrate_multiplier,
+            enable_adaptive_extrusion=args.enable_adaptive_extrusion,
             amplitude=args.amplitude,
             frequency=args.frequency,
             enable_safe_z_hop=args.enable_safe_z_hop,
             safe_z_hop_margin=args.safe_z_hop_margin,
-            debug=args.debug
+            debug=debug
         )
     except Exception as e:
         logging.error(f"\n{'='*70}")

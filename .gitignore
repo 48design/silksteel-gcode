@@ -9,6 +9,9 @@ __pycache__/
 *.log
 *.txt
 
+# Debug images
+/*.png
+
 # G-code files
 *.gcode
 *.gco
