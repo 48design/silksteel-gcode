@@ -1811,14 +1811,19 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 seen_extrusion = False  # Track if we've seen any extrusion moves yet
                                 
                                 for loop_line in loop_lines:
-                                    # Check if we've reached the ending sequence
+                                    # Check if we've reached the ending sequence (retraction or final travel)
                                     if not in_ending:
                                         # Mark that we've seen extrusion
                                         if loop_line.startswith("G1") and "X" in loop_line and "Y" in loop_line and "E" in loop_line:
                                             seen_extrusion = True
                                         
-                                        # Only consider M107/G92 as ending if we've already seen extrusion moves
-                                        if seen_extrusion and (loop_line.startswith("M107") or loop_line.startswith("G92") or (loop_line.startswith("G1") and "E-" in loop_line and "X" not in loop_line)):
+                                        # Only consider retractions or travel moves as ending
+                                        # Retraction: G1 with E- but no X/Y (just retracting filament)
+                                        # Travel: G1 with X/Y and F but no E (moving without extruding)
+                                        is_retraction = loop_line.startswith("G1") and "E-" in loop_line and "X" not in loop_line and "Y" not in loop_line
+                                        is_travel = loop_line.startswith("G1") and ("X" in loop_line or "Y" in loop_line) and "F" in loop_line and "E" not in loop_line
+                                        
+                                        if seen_extrusion and (is_retraction or is_travel):
                                             in_ending = True
                                             ending_commands.append(loop_line)
                                         else:
@@ -1840,7 +1845,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     modified_lines.append(f"G1 Z{pass1_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n")
                                 # Reset E after Z lift so extrusion values start fresh
                                 modified_lines.append("G92 E0\n")
-                                last_e_value = None
+                                
                                 for line in main_section:
                                     if line.startswith("G1") and "E" in line:
                                         e_match = re.search(r'E([-\d.]+)', line)
@@ -1848,10 +1853,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                             e_value = float(e_match.group(1))
                                             new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
                                             line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', line)
-                                            last_e_value = new_e_value  # Track last E value for travel move
                                     modified_lines.append(line)
                                 
-                                # Pass 2: Second 0.75h - travel to start, then only extrusion moves
+                                # Pass 2: Second 0.75h - travel to start, then print same moves at higher Z
                                 # Reset extruder position before pass 2
                                 modified_lines.append("G92 E0 ; Reset extruder for pass 2\n")
                                 # Use block-specific travel position if found, otherwise fall back to first extrusion point
@@ -1861,8 +1865,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     modified_lines.append(f"G1 X{use_x:.3f} Y{use_y:.3f} F8400 ; Travel to start for pass 2\n")
                                 # Raise Z for pass 2
                                 modified_lines.append(f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n")
+                                
+                                # Print same moves as pass 1 (same XY, different Z)
                                 for line in main_section:
-                                    # Only output actual extrusion G1 moves (skip M117, M107, etc. on second pass)
+                                    # Only output actual extrusion G1 moves (skip WIDTH comments, M107, etc. on second pass)
                                     if line.startswith("G1") and "X" in line and "Y" in line and "E" in line:
                                         e_match = re.search(r'E([-\d.]+)', line)
                                         if e_match:
