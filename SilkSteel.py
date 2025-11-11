@@ -1737,8 +1737,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
                                     if current_layer == region_start:
                                         is_base_layer = True
+                                        logging.info(f"  [BRICKLAYERS DEBUG] Layer {current_layer}, Block #{perimeter_block_count}: Detected BASE layer (region_start={region_start}, region_end={region_end})")
                                     if current_layer == region_end:
                                         is_top_layer = True
+                                        logging.info(f"  [BRICKLAYERS DEBUG] Layer {current_layer}, Block #{perimeter_block_count}: Detected TOP layer (region_start={region_start}, region_end={region_end})")
                         
                         # On base layers: all blocks are base blocks (no shifting)
                         # On other layers: alternate between shifted and base
@@ -1823,10 +1825,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         # Only consider retractions or travel moves as ending
                                         # Retraction: G1 with E- but no X/Y (just retracting filament)
                                         # Travel: G1 with X/Y and F but no E (moving without extruding)
+                                        # G92 E0: Extruder reset (should be in ending)
                                         is_retraction = loop_line.startswith("G1") and "E-" in loop_line and "X" not in loop_line and "Y" not in loop_line
                                         is_travel = loop_line.startswith("G1") and ("X" in loop_line or "Y" in loop_line) and "F" in loop_line and "E" not in loop_line
+                                        is_e_reset = loop_line.startswith("G92") and "E" in loop_line
                                         
-                                        if seen_extrusion and (is_retraction or is_travel):
+                                        if seen_extrusion and (is_retraction or is_travel or is_e_reset):
                                             in_ending = True
                                             ending_commands.append(loop_line)
                                         else:
@@ -1861,11 +1865,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # Pass 2: Second 0.75h - travel to start, then print same moves at higher Z
                                 # Reset extruder position before pass 2
                                 modified_lines.append("G92 E0 ; Reset extruder for pass 2\n")
-                                # Use block-specific travel position if found, otherwise fall back to first extrusion point
-                                use_x = block_travel_x if block_travel_x is not None else start_x
-                                use_y = block_travel_y if block_travel_y is not None else start_y
-                                if use_x is not None and use_y is not None:
-                                    modified_lines.append(f"G1 X{use_x:.3f} Y{use_y:.3f} F8400 ; Travel to start for pass 2\n")
+                                # Use first extrusion point for pass 2 travel (where extrusion actually starts)
+                                if start_x is not None and start_y is not None:
+                                    modified_lines.append(f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n")
                                 # Raise Z for pass 2
                                 modified_lines.append(f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n")
                                 
