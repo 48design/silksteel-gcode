@@ -71,7 +71,7 @@ GRID_RESOLUTION = 0.85  # Grid cell size in mm (smaller = finer detail, larger =
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
-DEFAULT_SAFE_Z_HOP_MARGIN = 1.0  # mm - safety margin above max Z in layer
+DEFAULT_SAFE_Z_HOP_MARGIN = 0.5  # mm - safety margin above max Z in layer
 DEFAULT_Z_HOP_RETRACTION = 3.0  # mm - retraction distance during Z-hop to prevent stringing
 
 def get_layer_height(gcode_lines):
@@ -1461,9 +1461,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 current_travel_z = current_z
                 is_hopped = False  # Explicit Z move means we're at working height, not hopped
                 
-                # Update actual_layer_max_z for safe Z-hop calculations
-                if current_layer not in actual_layer_max_z or current_z > actual_layer_max_z[current_layer]:
-                    actual_layer_max_z[current_layer] = current_z
+                # DON'T update actual_layer_max_z here - it gets set by Smoothificator/Bricklayers/Non-planar
+                # when they ACTUALLY raise Z above the base layer height!
             
             # Check if next lines contain external perimeter - if so, don't output Z yet
             # Smoothificator will handle Z for each pass
@@ -1799,6 +1798,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # Base layer: TWO passes at 0.75h each (total 1.5h)
                                 pass1_z = current_z  # Start at normal layer Z
                                 pass2_z = current_z + (current_layer_height * 0.75)  # Raise by 0.75h for second pass
+                                
+                                # Track actual max Z for this layer (for safe Z-hop)
+                                if current_layer not in actual_layer_max_z or pass2_z > actual_layer_max_z[current_layer]:
+                                    actual_layer_max_z[current_layer] = pass2_z
                                 
                                 logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base in 2 passes at Z={pass1_z:.3f} and Z={pass2_z:.3f}")
                                 
@@ -2166,14 +2169,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             continue
         
-        # ========== SAFE Z-HOP: Apply Z-hop to TRAVEL MOVES in sparse infill/support ==========
-        # CRITICAL: Only in areas where non-planar infill from below might poke through
-        # EXCLUDE solid blocking layers (bridge infill, top solid, perimeters)
-        elif enable_safe_z_hop and seen_first_layer and line.startswith("G1") and \
-             current_type not in [";TYPE:Bridge infill", ";TYPE:Internal bridge infill", 
-                                   ";TYPE:Top solid infill", ";TYPE:Solid infill",
-                                   ";TYPE:External perimeter", ";TYPE:Internal perimeter", 
-                                   ";TYPE:Perimeter", ";TYPE:Overhang perimeter"]:
+        # ========== SAFE Z-HOP: Apply Z-hop to ALL TRAVEL MOVES ==========
+        # CRITICAL: Travel moves don't extrude, so they can collide with non-planar geometry from any layer below
+        elif enable_safe_z_hop and seen_first_layer and line.startswith("G1"):
             
             # Track current E position for retraction management
             e_match = re.search(r'E([-\d.]+)', line)
@@ -2229,15 +2227,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Detect travel moves: G1 with X/Y, F (feedrate), but no E (extrusion)
             if ('X' in line or 'Y' in line) and 'F' in line and not is_extrusion:
                 # This is a travel move - apply Z-hop if needed
-                # CRITICAL: Use CUMULATIVE maximum Z across ALL previous layers
-                # Because Bricklayers/Non-planar on layer 5 might stick up into layer 10's airspace!
-                cumulative_max_z = 0.0
-                for layer_num in range(0, current_layer + 1):
-                    if layer_num in actual_layer_max_z:
-                        cumulative_max_z = max(cumulative_max_z, actual_layer_max_z[layer_num])
+                # SMART: Only check CURRENT layer's max Z (all deformations build on top of current layer)
+                # No need to check ancient layers below - they're already covered by new layers!
+                layer_max_z = 0.0
+                if current_layer in actual_layer_max_z:
+                    layer_max_z = actual_layer_max_z[current_layer]
                 
-                if cumulative_max_z > 0:
-                    safe_z = cumulative_max_z + safe_z_hop_margin
+                if layer_max_z > 0:
+                    safe_z = layer_max_z + safe_z_hop_margin
                     
                     # Only hop if we're not already above safe_z
                     if current_travel_z < safe_z:
