@@ -2003,15 +2003,30 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             
                             segments = segment_line(x1, y1, x2, y2, segment_length)
                             
-                            # Calculate extrusion per segment
-                            num_segments = len(segments)
-                            e_per_segment = e_delta / num_segments
-                            current_e = e_start
+                            # Calculate total XY distance for the move
+                            total_xy_distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
                             
-                            # STEP 2: Add Z modulation using 3D noise LUT with wall-proximity tapering
+                            # Calculate base E per mm of XY distance
+                            # This ensures consistent extrusion regardless of segment count
+                            e_per_mm = e_delta / total_xy_distance if total_xy_distance > 0 else 0
+                            
+                            current_e = e_start
+                            prev_segment = None
+                            
+                            # STEP 2: Add Z modulation using LUT with wall-proximity tapering
                             # Reduce modulation near walls/perimeters to prevent visible artifacts
                             
                             for idx, (sx, sy) in enumerate(segments):
+                                # Calculate XY distance for THIS segment
+                                if prev_segment is not None:
+                                    seg_distance = math.sqrt((sx - prev_segment[0])**2 + (sy - prev_segment[1])**2)
+                                else:
+                                    # First segment - distance from original start point
+                                    seg_distance = math.sqrt((sx - x1)**2 + (sy - y1)**2)
+                                
+                                # Base extrusion for this segment based on XY distance
+                                base_e_for_segment = seg_distance * e_per_mm
+                                
                                 # Calculate distance to nearest perimeter/solid to taper modulation
                                 # Check surrounding grid cells for solid material at current layer
                                 # Use floor division to match grid building method
@@ -2103,7 +2118,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # Calculate E multiplier based on Z lift (only when going UP and if enabled)
                                 # This adds extra material that droops down to bond with layer below
                                 # ONLY apply on first infill layer (when solid is directly below)
-                                e_segment_multiplier = 1.0  # Default: no change
+                                # CRITICAL: Start with base extrusion (XY distance), ADD extra for Z lift
+                                adjusted_e_for_segment = base_e_for_segment  # Always extrude for XY distance!
                                 applied_adaptive_extrusion = False  # Track if we actually apply it
                                 
                                 if enable_adaptive_extrusion:
@@ -2122,23 +2138,24 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         z_lift = z_mod - layer_z  # How much above base layer
                                         
                                         if z_lift > 0:  # Only when lifting UP
-                                            # Increase E proportional to lift using configurable multiplier
-                                            # Formula: (z_lift / layer_height) * multiplier
-                                            # Example with 1.33x multiplier and 0.2mm layer height:
-                                            #   0.2mm lift = (0.2/0.2) * 1.33 = 1.33x material
-                                            #   0.4mm lift = (0.4/0.2) * 1.33 = 2.66x material
+                                            # ADD extra material proportional to lift
+                                            # Formula: base_e + (base_e * (z_lift / layer_height) * multiplier)
                                             lift_in_layers = z_lift / base_layer_height
-                                            e_segment_multiplier = lift_in_layers * adaptive_extrusion_multiplier
+                                            extra_e = base_e_for_segment * lift_in_layers * adaptive_extrusion_multiplier
+                                            adjusted_e_for_segment += extra_e  # ADD to base!
                                             applied_adaptive_extrusion = True
                                 
-                                # Apply E multiplier to this segment's extrusion amount
-                                adjusted_e_per_segment = e_per_segment * e_segment_multiplier
-                                current_e += adjusted_e_per_segment
+                                # Update current E position
+                                current_e += adjusted_e_for_segment
                                 
                                 # Add a comment once per layer when adaptive extrusion is being applied
                                 if applied_adaptive_extrusion and not adaptive_comment_added:
-                                    modified_lines.append(f"; Adaptive E: {e_segment_multiplier:.2f}x (z_lift={z_lift:.3f}mm, local_z_min={local_z_min:.2f}, layer_z={layer_z:.2f})\n")
+                                    total_multiplier = adjusted_e_for_segment / base_e_for_segment if base_e_for_segment > 0 else 1.0
+                                    modified_lines.append(f"; Adaptive E: {total_multiplier:.2f}x (z_lift={z_lift:.3f}mm, local_z_min={local_z_min:.2f}, layer_z={layer_z:.2f})\n")
                                     adaptive_comment_added = True
+                                
+                                # Save current segment position for next iteration
+                                prev_segment = (sx, sy)
                                 
                                 # Output with Z modulation, adjusted E, and boosted feedrate
                                 if feedrate is not None:
