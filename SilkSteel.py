@@ -62,17 +62,17 @@ DEFAULT_OUTER_LAYER_HEIGHT = "Auto"  # "Auto" = min(first_layer, base_layer) * 0
 DEFAULT_AMPLITUDE = 4  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
 DEFAULT_FREQUENCY = 8  # Default frequency of the sine wave (reduced for longer waves)
 DEFAULT_SEGMENT_LENGTH = 0.64  # Split infill lines into segments of this length (mm) - LARGER = fewer segments, smoother motion
-DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 1.33  # Boost feedrate by this factor for non-planar 3D moves (2.0 = double speed)
+DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 1.1  # Boost feedrate by this factor for non-planar 3D moves (2.0 = double speed)
 DEFAULT_ENABLE_ADAPTIVE_EXTRUSION = True  # Enable adaptive extrusion multiplier for Z-lift (adds material to droop down and bond)
-DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER = 1.33  # Base multiplier for adaptive extrusion (e.g., 1.33 = 33% extra material per layer height of lift)
+DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER = 1.5  # Base multiplier for adaptive extrusion (e.g., 1.33 = 33% extra material per layer height of lift)
 
 # Grid resolution for solid occupancy detection
 GRID_RESOLUTION = 0.85  # Grid cell size in mm (smaller = finer detail, larger = faster processing)
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
-DEFAULT_SAFE_Z_HOP_MARGIN = 0.5  # mm - safety margin above max Z in layer
-DEFAULT_Z_HOP_RETRACTION = 1.75  # mm - retraction distance during Z-hop to prevent stringing
+DEFAULT_SAFE_Z_HOP_MARGIN = 1.0  # mm - safety margin above max Z in layer
+DEFAULT_Z_HOP_RETRACTION = 3.0  # mm - retraction distance during Z-hop to prevent stringing
 
 def get_layer_height(gcode_lines):
     """Extract layer height from G-code header comments"""

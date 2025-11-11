@@ -179,12 +179,12 @@ input_file              Input G-code file (required)
                                    Higher = more pronounced waves
 -frequency FLOAT                   Pattern frequency (default: 8)
                                    Higher = tighter waves
--nonplanarFeedrateMultiplier FLOAT Feedrate boost for non-planar moves (default: 1.33x)
+-nonplanarFeedrateMultiplier FLOAT Feedrate boost for non-planar moves (default: 1.1x)
 -disableAdaptiveExtrusion          Disable adaptive extrusion (default: enabled)
--adaptiveExtrusionMultiplier FLOAT Extrusion boost per layer of Z-lift (default: 1.33x)
+-adaptiveExtrusionMultiplier FLOAT Extrusion boost per layer of Z-lift (default: 1.5x)
                                    Controls extra material for bonding when lifting
-                                   Example: 1 layer lift = 1.33x extrusion
-                                            2 layer lift = 2.66x extrusion
+                                   Example: 1 layer lift = 1.5x extrusion
+                                            2 layer lift = 3.0x extrusion
 ```
 
 ### Safe Z-hop Settings
