@@ -172,12 +172,12 @@ input_file              Input G-code file (required)
 -deformType {sine,noise}           Pattern type (default: sine)
                                    sine: smooth wave patterns
                                    noise: Perlin noise for organic variation
--segmentLength FLOAT               Line subdivision length in mm (default: 0.2)
--amplitude INT|FLOAT               Z modulation amplitude (default: 12)
-                                   INT = number of layer heights (e.g., 12 → 12 layers)
+-segmentLength FLOAT               Line subdivision length in mm (default: 0.64)
+-amplitude INT|FLOAT               Z modulation amplitude (default: 4)
+                                   INT = number of layer heights (e.g., 4 → 4 layers)
                                    FLOAT = explicit value in mm (e.g., 2.5 → 2.5mm)
                                    Higher = more pronounced waves
--frequency FLOAT                   Pattern frequency (default: 6)
+-frequency FLOAT                   Pattern frequency (default: 8)
                                    Higher = tighter waves
 -nonplanarFeedrateMultiplier FLOAT Feedrate boost for non-planar moves (default: 1.33x)
 -disableAdaptiveExtrusion          Disable adaptive extrusion (default: enabled)
