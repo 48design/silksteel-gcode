@@ -575,6 +575,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Non-planar infill variables
     solid_infill_heights = []
     in_infill = False
+    in_bridge_infill = False  # Track when we're in bridge infill (skip Z-hops)
     processed_infill_indices = set()
     
     # First pass: Build 3D grid showing which Z layers have solid at each XY position
@@ -1361,6 +1362,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # Track TYPE markers for Z-hop exclusion logic
         if ";TYPE:" in line:
             current_type = line.strip()
+            # Track when we're in bridge infill (any kind)
+            if "Bridge infill" in current_type or "Internal bridge infill" in current_type:
+                in_bridge_infill = True
+            else:
+                in_bridge_infill = False
         
         # Progress logging every 10,000 lines
         if line_count_processed % 10000 == 0:
@@ -1807,86 +1813,89 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base in 2 passes at Z={pass1_z:.3f} and Z={pass2_z:.3f}")
                                 
-                                # Extract starting position from first extrusion move for pass 2 travel
+                                # Separate extrusion moves from non-extrusion commands
+                                # Extrusion moves: G1 with X, Y, and E (the actual printing)
+                                # Non-extrusion: WIDTH comments, G92, retractions, travel, etc.
+                                # Fan commands (M106/M107): Keep only first and last
+                                extrusion_moves = []
+                                non_extrusion_commands = []
+                                fan_commands = []  # Collect all fan commands separately
                                 start_x, start_y = None, None
-                                # Separate all lines before ending from ending commands
-                                main_section = []
-                                ending_commands = []
-                                in_ending = False
-                                seen_extrusion = False  # Track if we've seen any extrusion moves yet
                                 
                                 for loop_line in loop_lines:
-                                    # Check if we've reached the ending sequence (retraction or final travel)
-                                    if not in_ending:
-                                        # Mark that we've seen extrusion
-                                        if loop_line.startswith("G1") and "X" in loop_line and "Y" in loop_line and "E" in loop_line:
-                                            seen_extrusion = True
-                                        
-                                        # Only consider retractions or travel moves as ending
-                                        # Retraction: G1 with E- but no X/Y (just retracting filament)
-                                        # Travel: G1 with X/Y and F but no E (moving without extruding)
-                                        # G92 E0: Extruder reset (should be in ending)
-                                        is_retraction = loop_line.startswith("G1") and "E-" in loop_line and "X" not in loop_line and "Y" not in loop_line
-                                        is_travel = loop_line.startswith("G1") and ("X" in loop_line or "Y" in loop_line) and "F" in loop_line and "E" not in loop_line
-                                        is_e_reset = loop_line.startswith("G92") and "E" in loop_line
-                                        
-                                        if seen_extrusion and (is_retraction or is_travel or is_e_reset):
-                                            in_ending = True
-                                            ending_commands.append(loop_line)
-                                        else:
-                                            main_section.append(loop_line)
-                                            # Get start position from first extrusion move
-                                            if start_x is None and loop_line.startswith("G1") and "X" in loop_line and "Y" in loop_line and "E" in loop_line:
-                                                x_match = re.search(r'X([-\d.]+)', loop_line)
-                                                y_match = re.search(r'Y([-\d.]+)', loop_line)
-                                                if x_match and y_match:
-                                                    start_x = float(x_match.group(1))
-                                                    start_y = float(y_match.group(1))
+                                    # Check if this is an extrusion move
+                                    is_extrusion = loop_line.startswith("G1") and "X" in loop_line and "Y" in loop_line and "E" in loop_line and "E-" not in loop_line
+                                    # Check if this is a fan command
+                                    is_fan_command = loop_line.startswith("M106") or loop_line.startswith("M107")
+                                    
+                                    if is_extrusion:
+                                        extrusion_moves.append(loop_line)
+                                        # Extract start position from first extrusion move
+                                        if start_x is None:
+                                            x_match = re.search(r'X([-\d.]+)', loop_line)
+                                            y_match = re.search(r'Y([-\d.]+)', loop_line)
+                                            if x_match and y_match:
+                                                start_x = float(x_match.group(1))
+                                                start_y = float(y_match.group(1))
+                                    elif is_fan_command:
+                                        # Collect fan commands separately
+                                        fan_commands.append(loop_line)
                                     else:
-                                        ending_commands.append(loop_line)
+                                        # Everything else (WIDTH comments, G92, retraction, travel)
+                                        non_extrusion_commands.append(loop_line)
                                 
-                                # Pass 1: First 0.75h - all main section (extrusion moves + M117 messages)
+                                # Keep only first and last fan command
+                                if fan_commands:
+                                    if len(fan_commands) == 1:
+                                        non_extrusion_commands.insert(0, fan_commands[0])
+                                    else:
+                                        non_extrusion_commands.insert(0, fan_commands[0])  # First at beginning
+                                        non_extrusion_commands.append(fan_commands[-1])    # Last at end
+                                
+                                # Validation: make sure we found extrusion moves and start position
+                                if not extrusion_moves:
+                                    logging.warning(f"  [BRICKLAYERS WARNING] Layer {current_layer}, Block #{perimeter_block_count}: No extrusion moves found in loop!")
+                                if start_x is None or start_y is None:
+                                    logging.warning(f"  [BRICKLAYERS WARNING] Layer {current_layer}, Block #{perimeter_block_count}: Could not extract start position!")
+                                
+                                # Pass 1: Print at base layer Z
                                 if pre_block_e_value is not None:
                                     modified_lines.append(f"G1 Z{pass1_z:.3f} E{pre_block_e_value:.5f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n")
                                 else:
                                     modified_lines.append(f"G1 Z{pass1_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n")
-                                # Reset E after Z lift so extrusion values start fresh
+                                
+                                # Reset E after Z move so extrusion values start fresh
                                 modified_lines.append("G92 E0\n")
                                 
-                                for line in main_section:
-                                    if line.startswith("G1") and "E" in line:
-                                        e_match = re.search(r'E([-\d.]+)', line)
-                                        if e_match:
-                                            e_value = float(e_match.group(1))
-                                            new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
-                                            line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', line)
+                                # Output all extrusion moves with adjusted E values (0.75x height)
+                                for line in extrusion_moves:
+                                    e_match = re.search(r'E([-\d.]+)', line)
+                                    if e_match:
+                                        e_value = float(e_match.group(1))
+                                        new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
+                                        line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', line)
                                     modified_lines.append(line)
                                 
-                                # Pass 2: Second 0.75h - travel to start, then print same moves at higher Z
-                                # Reset extruder position before pass 2
+                                # Pass 2: Travel to start, raise Z, print same moves
                                 modified_lines.append("G92 E0 ; Reset extruder for pass 2\n")
-                                # Use first extrusion point for pass 2 travel (where extrusion actually starts)
                                 if start_x is not None and start_y is not None:
                                     modified_lines.append(f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n")
-                                # Raise Z for pass 2
                                 modified_lines.append(f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n")
                                 
-                                # Print same moves as pass 1 (same XY, different Z)
-                                for line in main_section:
-                                    # Only output actual extrusion G1 moves (skip WIDTH comments, M107, etc. on second pass)
-                                    if line.startswith("G1") and "X" in line and "Y" in line and "E" in line:
-                                        e_match = re.search(r'E([-\d.]+)', line)
-                                        if e_match:
-                                            e_value = float(e_match.group(1))
-                                            new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
-                                            line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', line)
-                                        modified_lines.append(line)
+                                # Output same extrusion moves again at higher Z
+                                for line in extrusion_moves:
+                                    e_match = re.search(r'E([-\d.]+)', line)
+                                    if e_match:
+                                        e_value = float(e_match.group(1))
+                                        new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
+                                        line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', line)
+                                    modified_lines.append(line)
                                 
-                                # Output ending commands once (M107, G92, retraction, travel)
-                                for cmd in ending_commands:
+                                # Output non-extrusion commands once (M107, WIDTH, G92, retraction, travel, etc.)
+                                for cmd in non_extrusion_commands:
                                     modified_lines.append(cmd)
                                 
-                                # Reset Z
+                                # Reset Z back to layer height
                                 modified_lines.append(f"G1 Z{current_z:.3f} ; Reset Z\n")
                             else:
                                 # Non-base layers: Single pass at Z + 0.5h (sits on previous layer's shifted block)
@@ -2245,6 +2254,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Detect travel moves: G1 with X/Y, F (feedrate), but no E (extrusion)
             if ('X' in line or 'Y' in line) and 'F' in line and not is_extrusion:
+                # Skip Z-hops for travel moves within bridge infill (tracked via TYPE markers)
+                if in_bridge_infill:
+                    modified_lines.append(line)
+                    i += 1
+                    continue
+                
                 # This is a travel move - apply Z-hop if needed
                 # SMART: Only check CURRENT layer's max Z (all deformations build on top of current layer)
                 # No need to check ancient layers below - they're already covered by new layers!
