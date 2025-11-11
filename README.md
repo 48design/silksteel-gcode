@@ -150,8 +150,15 @@ input_file              Input G-code file (required)
 
 ### Smoothificator Settings
 ```
--outerLayerHeight FLOAT            Height for outer wall passes in mm
-                                   (default: uses min_layer_height from G-code)
+-outerLayerHeight MODE|FLOAT       Height for outer wall passes:
+                                   "Auto" = min(first_layer, base_layer) * 0.5 (default)
+                                   "Min" = uses min_layer_height from G-code
+                                   FLOAT = explicit value in mm (e.g., 0.1)
+                                   
+                                   Examples:
+                                   -outerLayerHeight Auto    → Smart default
+                                   -outerLayerHeight Min     → Ultra-fine (slow)
+                                   -outerLayerHeight 0.12    → Manual control
 ```
 
 ### Bricklayers Settings
@@ -166,10 +173,18 @@ input_file              Input G-code file (required)
                                    sine: smooth wave patterns
                                    noise: Perlin noise for organic variation
 -segmentLength FLOAT               Line subdivision length in mm (default: 0.2)
--amplitude FLOAT                   Z modulation amplitude in mm (default: 2)
+-amplitude INT|FLOAT               Z modulation amplitude (default: 12)
+                                   INT = number of layer heights (e.g., 12 → 12 layers)
+                                   FLOAT = explicit value in mm (e.g., 2.5 → 2.5mm)
                                    Higher = more pronounced waves
 -frequency FLOAT                   Pattern frequency (default: 6)
                                    Higher = tighter waves
+-nonplanarFeedrateMultiplier FLOAT Feedrate boost for non-planar moves (default: 1.33x)
+-disableAdaptiveExtrusion          Disable adaptive extrusion (default: enabled)
+-adaptiveExtrusionMultiplier FLOAT Extrusion boost per layer of Z-lift (default: 1.33x)
+                                   Controls extra material for bonding when lifting
+                                   Example: 1 layer lift = 1.33x extrusion
+                                            2 layer lift = 2.66x extrusion
 ```
 
 ### Safe Z-hop Settings
@@ -252,10 +267,14 @@ python SilkSteel.py model.gcode -o output.gcode -full
 
 ### How Smoothificator Works
 1. Detects external perimeter blocks via TYPE comments
-2. Calculates number of passes needed based on outer_layer_height
-3. Splits perimeter into multiple passes, each at incrementing Z
-4. Adjusts extrusion per pass to maintain proper wall thickness
-5. Handles wipe moves and travel moves correctly
+2. Determines target layer height:
+   - **Auto mode** (default): Uses `min(first_layer_height, base_layer_height) * 0.5`
+   - **Min mode**: Uses `min_layer_height` from adaptive layer settings
+   - **Manual**: Uses specified float value
+3. Calculates number of passes needed based on outer_layer_height
+4. Splits perimeter into multiple passes, each at incrementing Z
+5. Adjusts extrusion per pass to maintain proper wall thickness
+6. Handles wipe moves and travel moves correctly
 
 ### How Bricklayers Works
 1. Detects internal perimeter blocks
@@ -307,7 +326,16 @@ python SilkSteel.py model.gcode -o output.gcode -full
 ## 🐛 Troubleshooting
 
 ### Issue: Rough surfaces after Smoothificator
-**Solution**: Decrease outer_layer_height (try 0.1mm or 0.12mm)
+**Solutions**: 
+- Decrease outer_layer_height (try `-outerLayerHeight 0.1` or `0.12`)
+- Use Auto mode (default) for balanced results
+- Use Min mode (`-outerLayerHeight Min`) for ultra-smooth but slower prints
+
+### Issue: First layer too thin/adhesion problems
+**Solution**: 
+- Use Auto mode (default) instead of Min mode
+- Auto mode avoids splitting thin first layers into ultra-tiny passes
+- Manual override: `-outerLayerHeight 0.15` for thicker passes
 
 ### Issue: Weak Bricklayers shifting
 **Solution**: Increase bricklayers_extrusion multiplier to 1.05-1.1

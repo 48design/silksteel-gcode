@@ -55,15 +55,19 @@ logging.info(f"Log file: {log_file}")
 logging.info(f"Command line args: {sys.argv}")
 logging.info("=" * 70)
 
+# Smoothificator constants
+DEFAULT_OUTER_LAYER_HEIGHT = "Auto"  # "Auto" = min(first_layer, base_layer) * 0.5, "Min" = min_layer_height from G-code, or float value (mm)
+
 # Non-planar infill constants
-DEFAULT_AMPLITUDE = 8  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
+DEFAULT_AMPLITUDE = 4  # Default Z variation in mm [float] or layerheight [int] (reduced for smoother look)
 DEFAULT_FREQUENCY = 8  # Default frequency of the sine wave (reduced for longer waves)
 DEFAULT_SEGMENT_LENGTH = 0.64  # Split infill lines into segments of this length (mm) - LARGER = fewer segments, smoother motion
-DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 2.0  # Boost feedrate by this factor for non-planar 3D moves (2.0 = double speed)
+DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 1.33  # Boost feedrate by this factor for non-planar 3D moves (2.0 = double speed)
 DEFAULT_ENABLE_ADAPTIVE_EXTRUSION = True  # Enable adaptive extrusion multiplier for Z-lift (adds material to droop down and bond)
+DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER = 1.33  # Base multiplier for adaptive extrusion (e.g., 1.33 = 33% extra material per layer height of lift)
 
 # Grid resolution for solid occupancy detection
-GRID_RESOLUTION = 1.0  # Grid cell size in mm (smaller = finer detail, larger = faster processing)
+GRID_RESOLUTION = 0.85  # Grid cell size in mm (smaller = finer detail, larger = faster processing)
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
@@ -79,6 +83,15 @@ def get_layer_height(gcode_lines):
                 return float(match.group(1))
     return None
 
+def get_first_layer_height(gcode_lines):
+    """Extract first layer height from G-code header comments"""
+    for line in gcode_lines:
+        if "first_layer_height =" in line.lower():
+            match = re.search(r'; first_layer_height = (\d*\.?\d+)', line, re.IGNORECASE)
+            if match:
+                return float(match.group(1))
+    return None
+
 def get_min_layer_height(gcode_lines):
     """Extract minimum layer height from G-code header comments"""
     for line in gcode_lines:
@@ -87,6 +100,20 @@ def get_min_layer_height(gcode_lines):
             if match:
                 return float(match.group(1))
     return None
+
+def parse_outer_layer_height(value):
+    """Parse outer layer height argument - can be 'Auto', 'Min', or a float"""
+    if isinstance(value, str):
+        if value.lower() == 'auto':
+            return 'Auto'
+        elif value.lower() == 'min':
+            return 'Min'
+        else:
+            try:
+                return float(value)
+            except ValueError:
+                raise argparse.ArgumentTypeError(f"outer-layer-height must be 'Auto', 'Min', or a number, got: {value}")
+    return value  # Already parsed as default
 
 def segment_line(x1, y1, x2, y2, segment_length):
     """Divide a line into smaller segments for non-planar infill."""
@@ -388,6 +415,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  segment_length=DEFAULT_SEGMENT_LENGTH, amplitude=DEFAULT_AMPLITUDE, frequency=DEFAULT_FREQUENCY,
                  nonplanar_feedrate_multiplier=DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER,
                  enable_adaptive_extrusion=DEFAULT_ENABLE_ADAPTIVE_EXTRUSION,
+                 adaptive_extrusion_multiplier=DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER,
                  enable_safe_z_hop=DEFAULT_ENABLE_SAFE_Z_HOP, safe_z_hop_margin=DEFAULT_SAFE_Z_HOP_MARGIN,
                  z_hop_retraction=DEFAULT_Z_HOP_RETRACTION,
                  debug=False):
@@ -455,11 +483,31 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     else:
         logging.info(f"Detected base layer height: {base_layer_height}mm")
     
-    if outer_layer_height is None:
-        outer_layer_height = get_min_layer_height(lines)
-        if outer_layer_height is None:
-            outer_layer_height = base_layer_height / 2
-            logging.warning(f"Could not find min_layer_height, using half of base: {outer_layer_height}mm")
+    # Determine outer layer height based on mode
+    if isinstance(outer_layer_height, str):
+        if outer_layer_height == 'Auto':
+            # Auto mode: min(first_layer_height, base_layer_height) * 0.5
+            first_layer_height = get_first_layer_height(lines)
+            if first_layer_height is None:
+                first_layer_height = base_layer_height  # Fallback
+                logging.warning(f"Could not find first_layer_height, using base_layer_height")
+            
+            min_height = min(first_layer_height, base_layer_height)
+            outer_layer_height = min_height * 0.5
+            logging.info(f"Auto mode: first_layer={first_layer_height}mm, base={base_layer_height}mm")
+            logging.info(f"          → outer_layer_height = min({first_layer_height}, {base_layer_height}) * 0.5 = {outer_layer_height}mm")
+        
+        elif outer_layer_height == 'Min':
+            # Min mode: use min_layer_height from G-code
+            outer_layer_height = get_min_layer_height(lines)
+            if outer_layer_height is None:
+                outer_layer_height = base_layer_height / 2
+                logging.warning(f"Could not find min_layer_height, using half of base: {outer_layer_height}mm")
+            else:
+                logging.info(f"Min mode: using min_layer_height = {outer_layer_height}mm")
+    else:
+        # Numeric value provided directly
+        logging.info(f"Using specified outer_layer_height = {outer_layer_height}mm")
     
     logging.info(f"Target outer wall height: {outer_layer_height}mm")
     
@@ -476,7 +524,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info(f"Bricklayers extrusion multiplier: {bricklayers_extrusion_multiplier}")
     
     if enable_nonplanar:
-        logging.info(f"Non-planar infill - Deform type: {deform_type}, Amplitude: {amplitude}mm, Frequency: {frequency}, Segment length: {segment_length}mm, Feedrate multiplier: {nonplanar_feedrate_multiplier}x, Adaptive extrusion: {enable_adaptive_extrusion}")
+        logging.info(f"Non-planar infill - Deform type: {deform_type}, Amplitude: {amplitude}mm, Frequency: {frequency}, Segment length: {segment_length}mm, Feedrate multiplier: {nonplanar_feedrate_multiplier}x, Adaptive extrusion: {enable_adaptive_extrusion}, Adaptive multiplier: {adaptive_extrusion_multiplier}x")
     
     # Print feature settings summary to console
     print("\nFeature Settings:")
@@ -487,7 +535,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     if enable_nonplanar:
         print(f"  • Non-planar Infill: amplitude = {amplitude:.2f}mm, frequency = {frequency:.2f}, type = {deform_type}")
         print(f"                       segment length = {segment_length:.2f}mm, feedrate boost = {nonplanar_feedrate_multiplier:.1f}x")
-        print(f"                       adaptive extrusion = {'ON' if enable_adaptive_extrusion else 'OFF'}")
+        print(f"                       adaptive extrusion = {'ON' if enable_adaptive_extrusion else 'OFF'}, multiplier = {adaptive_extrusion_multiplier:.2f}x")
     if enable_safe_z_hop:
         print(f"  • Safe Z-hop: margin = {safe_z_hop_margin:.2f}mm, retraction = {z_hop_retraction:.2f}mm")
     print()
@@ -2065,11 +2113,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         z_lift = z_mod - layer_z  # How much above base layer
                                         
                                         if z_lift > 0:  # Only when lifting UP
-                                            # Increase E proportional to lift
-                                            # For each layer_height of lift, add 100% more material
-                                            # Example: 0.2mm lift with 0.2mm layer = 2x material
-                                            #          0.4mm lift with 0.2mm layer = 3x material
-                                            e_segment_multiplier = 1.0 + (z_lift / base_layer_height)
+                                            # Increase E proportional to lift using configurable multiplier
+                                            # Formula: (z_lift / layer_height) * multiplier
+                                            # Example with 1.33x multiplier and 0.2mm layer height:
+                                            #   0.2mm lift = (0.2/0.2) * 1.33 = 1.33x material
+                                            #   0.4mm lift = (0.4/0.2) * 1.33 = 2.66x material
+                                            lift_in_layers = z_lift / base_layer_height
+                                            e_segment_multiplier = lift_in_layers * adaptive_extrusion_multiplier
                                             applied_adaptive_extrusion = True
                                 
                                 # Apply E multiplier to this segment's extrusion amount
@@ -2269,8 +2319,8 @@ if __name__ == "__main__":
                             'Smoothificator and Safe Z-hop are already enabled by default. '
                             'Individual feature flags can still override this setting.')
     
-    parser.add_argument('-outerLayerHeight', '--outer-layer-height', type=float,
-                       help='Desired height for outer walls (mm). If not provided, uses min_layer_height from G-code')
+    parser.add_argument('-outerLayerHeight', '--outer-layer-height', type=parse_outer_layer_height, default=DEFAULT_OUTER_LAYER_HEIGHT,
+                       help='Outer wall height: "Auto" (min of first/base layer * 0.5), "Min" (uses min_layer_height), or float value in mm (default: Auto)')
     
     # Feature toggles
     parser.add_argument('-enableSmoothificator', '--enable-smoothificator', action='store_true', default=True,
@@ -2297,6 +2347,8 @@ if __name__ == "__main__":
                        help=f'Frequency of Z modulation for non-planar infill (default: {DEFAULT_FREQUENCY})')
     parser.add_argument('-disableAdaptiveExtrusion', '--disable-adaptive-extrusion', action='store_false', dest='enable_adaptive_extrusion',
                        help='Disable adaptive extrusion multiplier for Z-lift (adds extra material when lifting to bond with layer below, default: enabled)')
+    parser.add_argument('-adaptiveExtrusionMultiplier', '--adaptive-extrusion-multiplier', type=float, default=DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER,
+                       help=f'Extrusion multiplier for adaptive extrusion per layer height of Z-lift (default: {DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER}x, try 1.0-2.0)')
     
     parser.add_argument('-disableSafeZHop', '--disable-safe-z-hop', action='store_false', dest='enable_safe_z_hop',
                        help='Disable safe Z-hop during travel moves (default: enabled)')
@@ -2361,6 +2413,7 @@ if __name__ == "__main__":
             segment_length=args.segment_length,
             nonplanar_feedrate_multiplier=args.nonplanar_feedrate_multiplier,
             enable_adaptive_extrusion=args.enable_adaptive_extrusion,
+            adaptive_extrusion_multiplier=args.adaptive_extrusion_multiplier,
             amplitude=args.amplitude,
             frequency=args.frequency,
             enable_safe_z_hop=args.enable_safe_z_hop,
