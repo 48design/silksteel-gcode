@@ -33,6 +33,68 @@ import os
 import argparse
 import math
 import numpy as np  # For 3D noise lookup table
+from io import StringIO
+
+# Pre-compile regex patterns for performance (compiled once, used thousands of times)
+REGEX_X = re.compile(r'X([-\d.]+)')
+REGEX_Y = re.compile(r'Y([-\d.]+)')
+REGEX_Z = re.compile(r'Z([-\d.]+)')
+REGEX_E = re.compile(r'E([-\d.]+)')
+REGEX_F = re.compile(r'F(\d+)')
+REGEX_E_SUB = re.compile(r'E[-\d.]+')
+REGEX_Z_SUB = re.compile(r'Z[-\d.]+\s*')
+
+# Helper functions for fast regex operations
+def extract_x(line):
+    """Extract X coordinate from G-code line"""
+    match = REGEX_X.search(line)
+    return float(match.group(1)) if match else None
+
+def extract_y(line):
+    """Extract Y coordinate from G-code line"""
+    match = REGEX_Y.search(line)
+    return float(match.group(1)) if match else None
+
+def extract_z(line):
+    """Extract Z coordinate from G-code line"""
+    match = REGEX_Z.search(line)
+    return float(match.group(1)) if match else None
+
+def extract_e(line):
+    """Extract E value from G-code line"""
+    match = REGEX_E.search(line)
+    return float(match.group(1)) if match else None
+
+def extract_f(line):
+    """Extract F (feedrate) value from G-code line"""
+    match = REGEX_F.search(line)
+    return int(match.group(1)) if match else None
+
+def replace_e(line, new_e):
+    """Replace E value in G-code line"""
+    return REGEX_E_SUB.sub(f'E{new_e:.5f}', line)
+
+def replace_f(line, new_f):
+    """Replace F (feedrate) value in G-code line"""
+    return re.sub(r'F\d+\.?\d*', f'F{new_f}', line)
+
+def remove_z(line):
+    """Remove Z parameter from G-code line"""
+    return REGEX_Z_SUB.sub('', line)
+
+def write_line(buffer, line):
+    """Write a line to output buffer, ensuring it has a newline"""
+    if line and not line.endswith('\n'):
+        buffer.write(line + '\n')
+    else:
+        buffer.write(line)
+
+def write_and_track(buffer, line, recent_buffer, max_size=20):
+    """Write line to buffer and add to rolling buffer for lookback operations"""
+    write_line(buffer, line)
+    recent_buffer.append(line)
+    if len(recent_buffer) > max_size:
+        recent_buffer.pop(0)  # Remove oldest line
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -67,7 +129,8 @@ DEFAULT_ENABLE_ADAPTIVE_EXTRUSION = True  # Enable adaptive extrusion multiplier
 DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER = 1.5  # Base multiplier for adaptive extrusion (e.g., 1.33 = 33% extra material per layer height of lift)
 
 # Grid resolution for solid occupancy detection
-GRID_RESOLUTION = 0.85  # Grid cell size in mm (smaller = finer detail, larger = faster processing)
+# Will be read from G-code if available, otherwise use default
+DEFAULT_EXTRUSION_WIDTH = 0.45  # Default extrusion width in mm (typical value)
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
@@ -97,6 +160,15 @@ def get_min_layer_height(gcode_lines):
     for line in gcode_lines:
         if "min_layer_height =" in line.lower():
             match = re.search(r'; min_layer_height = (\d*\.?\d+)', line, re.IGNORECASE)
+            if match:
+                return float(match.group(1))
+    return None
+
+def get_extrusion_width(gcode_lines):
+    """Extract extrusion width from G-code header comments"""
+    for line in gcode_lines:
+        if "extrusion_width =" in line.lower():
+            match = re.search(r'; extrusion_width = (\d*\.?\d+)', line, re.IGNORECASE)
             if match:
                 return float(match.group(1))
     return None
@@ -567,10 +639,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     # Bricklayers variables
     perimeter_block_count = 0
-    inside_perimeter_block = False
     is_shifted = False
-    previous_g1_movement = None
-    previous_f_speed = None
     
     # Non-planar infill variables
     solid_infill_heights = []
@@ -580,7 +649,18 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     # First pass: Build 3D grid showing which Z layers have solid at each XY position
     # Then for each layer, determine the safe Z range (space between solid layers)
-    grid_resolution = GRID_RESOLUTION
+    
+    # Get extrusion width from G-code or use default
+    extrusion_width = get_extrusion_width(lines)
+    if extrusion_width is None:
+        extrusion_width = DEFAULT_EXTRUSION_WIDTH
+        logging.info(f"No extrusion_width found in G-code, using default: {extrusion_width}mm")
+    else:
+        logging.info(f"Detected extrusion_width from G-code: {extrusion_width}mm")
+    
+    # Set grid resolution to match extrusion width (no diagonal compensation)
+    grid_resolution = extrusion_width * 1.4444  # 44% larger ensures diagonal coverage
+    
     solid_at_grid = {}  # (grid_x, grid_y, layer_num) -> True if solid exists
     z_layer_map = {}    # layer_num -> Z height
     layer_z_map = {}    # Z height -> layer_num
@@ -588,6 +668,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     if enable_nonplanar:
         logging.info("\n" + "="*70)
         logging.info("PASS 1: Building 3D solid occupancy grid")
+        logging.info("="*70)
+        logging.info(f"Grid resolution: {grid_resolution:.3f}mm (matches extrusion width)")
         logging.info("="*70)
         
         # First, scan to find all Z layers and print bounds
@@ -701,34 +783,39 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     last_solid_pos = None
                     last_solid_coords = None
                 
-                # Reset tracking on retraction (E decreasing or negative E value)
+                # Reset tracking on retraction (NEGATIVE E value only)
                 # This prevents connecting across travel moves
-                if line.startswith('G1'):
-                    e_check = re.search(r'E([-+]?\d*\.?\d+)', line)
+                if line.startswith('G1') and 'E' in line:
+                    e_check = REGEX_E.search(line)
                     if e_check:
                         e_val = float(e_check.group(1))
-                        # Negative E or E near zero after G92 E0 = retraction
-                        if e_val < 0.01:  # Small threshold to catch retractions
+                        # Only reset on actual retraction (negative E)
+                        if e_val < 0:
                             last_solid_pos = None
                             last_solid_coords = None
                 
                 # Now process ONLY G1 moves with XY coordinates (G0 is travel, skip it)
-                if line.startswith('G1'):
-                    xy_match = re.search(r'X([-+]?\d*\.?\d+)\s*Y([-+]?\d*\.?\d+)', line)
-                    if xy_match:
-                        x, y = map(float, xy_match.groups())
+                if line.startswith('G1') and ('X' in line or 'Y' in line):
+                    # Extract X and Y coordinates (handle X-only, Y-only, or both)
+                    x = extract_x(line)
+                    y = extract_y(line)
+                    
+                    # If only one coordinate is present, use last known value for the other
+                    if x is None and last_solid_coords is not None:
+                        x = last_solid_coords[0]
+                    if y is None and last_solid_coords is not None:
+                        y = last_solid_coords[1]
+                    
+                    # Only process if we have both coordinates
+                    if x is not None and y is not None:
                         # Use floor division for consistent grid cell assignment
                         gx = int(x / grid_resolution)
                         gy = int(y / grid_resolution)
                         
-                        # Only mark grid cells for G1 moves WITH extrusion (E parameter present)
-                        e_match = re.search(r'E([-+]?\d*\.?\d+)', line)
-                        has_extrusion = False
-                        if e_match:
-                            e_value = float(e_match.group(1))
-                            # Only consider it extrusion if E value is positive (or increasing if tracking absolute E)
-                            # For simplicity, we'll mark any G1 with E parameter (relative or absolute)
-                            has_extrusion = True
+                        # STRICT extrusion detection: Only mark if E parameter present AND positive
+                        # This prevents marking travel moves
+                        e_value = extract_e(line)
+                        has_extrusion = e_value is not None and e_value >= 0
                         
                         if has_extrusion:
                             # Mark all grid cells from last position to current position
@@ -736,37 +823,74 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 last_gx, last_gy = last_solid_pos
                                 last_x, last_y = last_solid_coords
                                 
-                                # DDA-style grid traversal: mark every cell the line crosses
-                                # We'll step through the line and mark cells as we go
+                                # PROPER GRID TRAVERSAL: Visit every cell the line crosses
+                                # Based on "A Fast Voxel Traversal Algorithm for Ray Tracing"
+                                # This guarantees we hit EVERY grid cell the line passes through
+                                
                                 dx = x - last_x
                                 dy = y - last_y
-                                dist = max(abs(dx), abs(dy))
                                 
-                                # Step in small increments to catch all cells
-                                # Use steps smaller than grid_resolution to ensure we don't skip cells
-                                steps = int(dist / (grid_resolution * 0.1)) + 1
+                                # Determine step direction for each axis
+                                step_x = 1 if dx > 0 else (-1 if dx < 0 else 0)
+                                step_y = 1 if dy > 0 else (-1 if dy < 0 else 0)
                                 
-                                marked_cells = set()
-                                for i in range(steps + 1):
-                                    t = i / max(steps, 1)
-                                    sx = last_x + t * dx
-                                    sy = last_y + t * dy
-                                    cell_x = int(sx / grid_resolution)
-                                    cell_y = int(sy / grid_resolution)
-                                    marked_cells.add((cell_x, cell_y, current_layer_num))
+                                # Calculate how far we must move (in units of t) to cross one grid cell
+                                t_delta_x = abs(grid_resolution / dx) if dx != 0 else float('inf')
+                                t_delta_y = abs(grid_resolution / dy) if dy != 0 else float('inf')
                                 
-                                # Mark all cells we found
-                                for cell in marked_cells:
-                                    solid_at_grid[cell] = True
+                                # Calculate initial t values to reach the next grid line
+                                current_cell_x = int(last_x / grid_resolution)
+                                current_cell_y = int(last_y / grid_resolution)
+                                
+                                # Calculate t for next X and Y grid crossings
+                                if dx > 0:
+                                    t_max_x = ((current_cell_x + 1) * grid_resolution - last_x) / dx
+                                elif dx < 0:
+                                    t_max_x = (current_cell_x * grid_resolution - last_x) / dx
+                                else:
+                                    t_max_x = float('inf')
+                                
+                                if dy > 0:
+                                    t_max_y = ((current_cell_y + 1) * grid_resolution - last_y) / dy
+                                elif dy < 0:
+                                    t_max_y = (current_cell_y * grid_resolution - last_y) / dy
+                                else:
+                                    t_max_y = float('inf')
+                                
+                                # Target cell
+                                target_cell_x = int(x / grid_resolution)
+                                target_cell_y = int(y / grid_resolution)
+                                
+                                # Mark cells along the ray
+                                cells_marked = 0
+                                max_iterations = abs(target_cell_x - current_cell_x) + abs(target_cell_y - current_cell_y) + 1
+                                
+                                # Grid resolution is sized to match extrusion width, so just mark center cells
+                                for _ in range(max_iterations + 10):  # Safety margin
+                                    # Mark current cell only (grid size matches extrusion width)
+                                    solid_at_grid[(current_cell_x, current_cell_y, current_layer_num)] = True
+                                    cells_marked += 1
+                                    
+                                    # Check if we've reached the target
+                                    if current_cell_x == target_cell_x and current_cell_y == target_cell_y:
+                                        break
+                                    
+                                    # Step to next cell
+                                    if t_max_x < t_max_y:
+                                        current_cell_x += step_x
+                                        t_max_x += t_delta_x
+                                    else:
+                                        current_cell_y += step_y
+                                        t_max_y += t_delta_y
                                 
                                 debug_line_count += 1
-                                debug_cells_marked += len(marked_cells)
+                                debug_cells_marked += cells_marked
                                 
                                 # Debug output for first few lines
                                 if debug >= 1 and debug_line_count <= 10:
-                                    print(f"[DEBUG] Line {debug_line_count}: ({last_gx},{last_gy}) -> ({gx},{gy}) marked {len(marked_cells)} cells")
+                                    print(f"[DEBUG] Line {debug_line_count}: ({last_gx},{last_gy}) -> ({gx},{gy}) marked {cells_marked} cells (voxel traversal)")
                             else:
-                                # First point - just mark it
+                                # First point - just mark the cell (grid size matches extrusion width)
                                 solid_at_grid[(gx, gy, current_layer_num)] = True
                             
                             # Save actual coordinates for next iteration
@@ -803,18 +927,29 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # z_min = Z of last solid layer seen at this cell (bottom of safe range)
         # z_max = Z of next solid layer seen at this cell (top of safe range)
         logging.info("\nCalculating safe Z ranges per grid cell...")
-        logging.info(f"  Processing {len(set((gx, gy) for gx, gy, _ in solid_at_grid.keys()))} unique grid positions...")
+        
+        # OPTIMIZATION: Build inverted index (gx, gy) -> [layers] to avoid O(N²) scanning
+        # This converts the nested loop from O(N²) to O(N)
+        grid_to_layers = {}
+        for (gx, gy, layer) in solid_at_grid.keys():
+            if (gx, gy) not in grid_to_layers:
+                grid_to_layers[(gx, gy)] = []
+            grid_to_layers[(gx, gy)].append(layer)
+        
+        # Sort layers for each grid cell
+        for key in grid_to_layers:
+            grid_to_layers[key].sort()
+        
+        all_grid_positions = sorted(grid_to_layers.keys())
+        logging.info(f"  Processing {len(all_grid_positions)} unique grid positions...")
+        
         grid_cell_safe_z = {}  # (gx, gy) -> list of (layer_num, z_min, z_max) tuples
         grid_cell_solid_regions = {}  # (gx, gy) -> list of (layer_start, layer_end, z_bottom, z_top) tuples
         
-        # Get all unique grid positions
-        all_grid_positions = sorted(set((gx, gy) for gx, gy, _ in solid_at_grid.keys()))
-        
         # For each grid cell, scan through layers and find solid regions and safe ranges
         for gx, gy in all_grid_positions:
-            # Get all layers where this grid cell has solid infill, sorted
-            solid_layers_at_cell = sorted([layer for (g_x, g_y, layer) in solid_at_grid.keys() 
-                                          if g_x == gx and g_y == gy])
+            # Get all layers where this grid cell has solid infill (already sorted from index)
+            solid_layers_at_cell = grid_to_layers[(gx, gy)]
             
             if not solid_layers_at_cell:
                 continue
@@ -1349,13 +1484,18 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Calculate max layer number for bricklayers
     max_layer = max(z_layer_map.keys()) if z_layer_map else 0
     
-    modified_lines = []
+    # Use StringIO for faster output building (avoids 100k+ list.append() calls)
+    output_buffer = StringIO()
     i = 0
-    last_type_seen = None  # Track the last TYPE: marker we encountered
     current_type = None  # Track current TYPE for Z-hop exclusion logic
     line_count_processed = 0
+    total_lines = len(lines)  # Cache length to avoid repeated calls
     
-    while i < len(lines):
+    # Rolling buffer for lookback operations on OUTPUT (keep last 50 lines for Smoothificator)
+    recent_output_lines = []
+    max_recent_output = 50
+    
+    while i < total_lines:
         line = lines[i]
         line_count_processed += 1
         
@@ -1400,12 +1540,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             if current_layer == 0 and 'grid_visualization_gcode' in locals():
                 if debug >= 1:
                     print(f"[DEBUG] Inserting grid visualization at layer 0 ({len(grid_visualization_gcode)} lines)")
-                modified_lines.extend(grid_visualization_gcode)
+                for viz_line in grid_visualization_gcode:
+                    write_and_track(output_buffer, viz_line, recent_output_lines)
                 del grid_visualization_gcode  # Only insert once
             
             perimeter_block_count = 0  # Reset block counter for new layer
             move_history = []  # Clear move history for new layer
-            last_type_seen = None  # Reset TYPE tracking for new layer
             is_hopped = False  # Reset hop state for new layer
             
             # Look ahead for HEIGHT and Z markers to update current_z
@@ -1426,19 +1566,19 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         if debug >= 1:
                             print(f"[DEBUG] Layer {current_layer}: current_layer_height={current_layer_height:.3f}, current_z={current_z:.3f}")
                         break
-            modified_lines.append(line)
+            write_and_track(output_buffer, line, recent_output_lines)
             i += 1
             continue
 
         # Track G90/G91 (absolute/relative positioning mode)
         if line.startswith("G91"):
             use_relative_e = True
-            modified_lines.append(line)
+            write_and_track(output_buffer, line, recent_output_lines)
             i += 1
             continue
         elif line.startswith("G90"):
             use_relative_e = False
-            modified_lines.append(line)
+            write_and_track(output_buffer, line, recent_output_lines)
             i += 1
             continue
         
@@ -1447,7 +1587,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             e_reset_match = re.search(r'E([-\d.]+)', line)
             if e_reset_match:
                 current_e = float(e_reset_match.group(1))
-            modified_lines.append(line)
+            write_and_track(output_buffer, line, recent_output_lines)
             i += 1
             continue
 
@@ -1485,7 +1625,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         break
             
             if should_output_z:
-                modified_lines.append(line)
+                write_and_track(output_buffer, line, recent_output_lines)
             actual_output_z = current_z  # Update actual output Z tracker
             
             i += 1
@@ -1493,8 +1633,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
 
         # ========== SMOOTHIFICATOR: External Perimeter Processing ==========
         if enable_smoothificator and (";TYPE:External perimeter" in line or ";TYPE:Outer wall" in line or ";TYPE:Overhang perimeter" in line):
-            last_type_seen = "external_perimeter"  # Mark current TYPE
-            
             
             external_block_lines = []
             external_block_lines.append(line)
@@ -1563,38 +1701,34 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Find the TRUE start position: the last XY position BEFORE this smoothificator block
             # This is where the nozzle was when it encountered the TYPE marker
-            # Look backwards from current position to find last XY coordinate
+            # Look backwards through recent output lines to find last XY coordinate
             start_pos = None
-            for j in range(len(modified_lines) - 1, max(0, len(modified_lines) - 50), -1):
-                prev_line = modified_lines[j]
+            for j in range(len(recent_output_lines) - 1, -1, -1):
+                prev_line = recent_output_lines[j]
                 if "G1" in prev_line and ("X" in prev_line or "Y" in prev_line):
-                    x_match = re.search(r'X([-\d.]+)', prev_line)
-                    y_match = re.search(r'Y([-\d.]+)', prev_line)
-                    if x_match and y_match:
-                        start_pos = (float(x_match.group(1)), float(y_match.group(1)))
+                    x_val = extract_x(prev_line)
+                    y_val = extract_y(prev_line)
+                    if x_val is not None and y_val is not None:
+                        start_pos = (x_val, y_val)
                         logging.info(f"  [SMOOTHIFICATOR] Found TRUE start position from previous lines: X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
                         break
-                    elif x_match:
+                    elif x_val is not None:
                         # Only X found, need to find last Y
-                        x_val = float(x_match.group(1))
-                        for k in range(j - 1, max(0, len(modified_lines) - 50), -1):
-                            if "Y" in modified_lines[k]:
-                                y_match2 = re.search(r'Y([-\d.]+)', modified_lines[k])
-                                if y_match2:
-                                    start_pos = (x_val, float(y_match2.group(1)))
-                                    logging.info(f"  [SMOOTHIFICATOR] Found TRUE start position (X from line {j}, Y from line {k}): X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
-                                    break
+                        for k in range(j - 1, -1, -1):
+                            y_val2 = extract_y(recent_output_lines[k])
+                            if y_val2 is not None:
+                                start_pos = (x_val, y_val2)
+                                logging.info(f"  [SMOOTHIFICATOR] Found TRUE start position (X from recent line {j}, Y from recent line {k}): X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
+                                break
                         break
-                    elif y_match:
+                    elif y_val is not None:
                         # Only Y found, need to find last X
-                        y_val = float(y_match.group(1))
-                        for k in range(j - 1, max(0, len(modified_lines) - 50), -1):
-                            if "X" in modified_lines[k]:
-                                x_match2 = re.search(r'X([-\d.]+)', modified_lines[k])
-                                if x_match2:
-                                    start_pos = (float(x_match2.group(1)), y_val)
-                                    logging.info(f"  [SMOOTHIFICATOR] Found TRUE start position (X from line {k}, Y from line {j}): X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
-                                    break
+                        for k in range(j - 1, -1, -1):
+                            x_val2 = extract_x(recent_output_lines[k])
+                            if x_val2 is not None:
+                                start_pos = (x_val2, y_val)
+                                logging.info(f"  [SMOOTHIFICATOR] Found TRUE start position (X from recent line {k}, Y from recent line {j}): X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
+                                break
                         break
             
             for pass_num in range(passes_needed):
@@ -1609,14 +1743,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     actual_layer_max_z[current_layer] = pass_z
                 
                 if pass_num == 0:
-                    modified_lines.append(f"; ====== SMOOTHIFICATOR START: {passes_needed} passes at {height_per_pass:.4f}mm each ======\n")
+                    write_and_track(output_buffer, f"; ====== SMOOTHIFICATOR START: {passes_needed} passes at {height_per_pass:.4f}mm each ======\n", recent_output_lines)
                 
                 # Output Z move
-                modified_lines.append(f"G0 Z{pass_z:.3f} ; Pass {pass_num + 1} of {passes_needed}\n")
+                write_and_track(output_buffer, f"G0 Z{pass_z:.3f} ; Pass {pass_num + 1} of {passes_needed}\n", recent_output_lines)
                 
                 # For pass 2+, travel back to TRUE start position (where we were before the block)
                 if pass_num > 0 and start_pos:
-                    modified_lines.append(f"G1 X{start_pos[0]:.3f} Y{start_pos[1]:.3f} F8400 ; Travel to start\n")
+                    write_and_track(output_buffer, f"G1 X{start_pos[0]:.3f} Y{start_pos[1]:.3f} F8400 ; Travel to start\n", recent_output_lines)
                 
                 # Now copy ALL lines from the block, adjusting E values
                 previous_e = None
@@ -1631,13 +1765,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     
                     # If line has Z coordinate with X/Y, remove the Z part
                     if "G1" in block_line and "Z" in block_line:
-                        block_line = re.sub(r'\s*Z[-\d.]+', '', block_line)
+                        block_line = REGEX_Z_SUB.sub('', block_line)
                     
                     # Adjust E values
                     if "G1" in block_line and "E" in block_line:
-                        e_match = re.search(r'E([-\d.]+)', block_line)
-                        if e_match:
-                            original_e = float(e_match.group(1))
+                        original_e = extract_e(block_line)
+                        if original_e is not None:
                             
                             if previous_e is None:
                                 # First E in this pass
@@ -1654,16 +1787,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             previous_e = original_e
                             
                             # Replace E value
-                            block_line = re.sub(r'E[-\d.]+', f'E{current_e:.5f}', block_line)
+                            block_line = replace_e(block_line, current_e)
                     
-                    modified_lines.append(block_line)
+                    write_and_track(output_buffer, block_line, recent_output_lines)
             
             continue
         
         # ========== BRICKLAYERS: Internal Perimeter Processing ==========
         elif enable_bricklayers and (";TYPE:Perimeter" in line or ";TYPE:Internal perimeter" in line or ";TYPE:Inner wall" in line):
             if ";TYPE:External perimeter" not in line:
-                modified_lines.append(line)
+                write_and_track(output_buffer, line, recent_output_lines)
                 i += 1
                 
                 z_shift = current_layer_height * 0.5
@@ -1783,21 +1916,20 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
                                 actual_layer_max_z[current_layer] = adjusted_z
                             
-                            modified_lines.append(f"G0 Z{adjusted_z:.3f} ; Bricklayers shifted block #{perimeter_block_count}\n")
+                            write_and_track(output_buffer, f"G0 Z{adjusted_z:.3f} ; Bricklayers shifted block #{perimeter_block_count}\n", recent_output_lines)
                             logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Shifted at Z={adjusted_z:.3f} (extrusion: {extrusion_factor}x)")
                             
                             # Adjust extrusion based on whether it's the last layer
                             for loop_line in loop_lines:
                                 if "E" in loop_line:
-                                    e_match = re.search(r'E([-\d.]+)', loop_line)
-                                    if e_match:
-                                        e_value = float(e_match.group(1))
+                                    e_value = extract_e(loop_line)
+                                    if e_value is not None:
                                         new_e_value = e_value * extrusion_factor * bricklayers_extrusion_multiplier
-                                        loop_line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', loop_line)
-                                modified_lines.append(loop_line)
+                                        loop_line = replace_e(loop_line, new_e_value)
+                                write_and_track(output_buffer, loop_line, recent_output_lines)
                             
                             # Reset Z
-                            modified_lines.append(f"G1 Z{current_z:.3f} ; Reset Z\n")
+                            write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
                         
                         else:
                             # Base block (non-shifted)
@@ -1860,43 +1992,41 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 # Pass 1: Print at base layer Z
                                 if pre_block_e_value is not None:
-                                    modified_lines.append(f"G1 Z{pass1_z:.3f} E{pre_block_e_value:.5f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n")
+                                    write_and_track(output_buffer, f"G1 Z{pass1_z:.3f} E{pre_block_e_value:.5f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n", recent_output_lines)
                                 else:
-                                    modified_lines.append(f"G1 Z{pass1_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n")
+                                    write_and_track(output_buffer, f"G1 Z{pass1_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n", recent_output_lines)
                                 
                                 # Reset E after Z move so extrusion values start fresh
-                                modified_lines.append("G92 E0\n")
+                                write_and_track(output_buffer, "G92 E0\n", recent_output_lines)
                                 
                                 # Output all extrusion moves with adjusted E values (0.75x height)
                                 for line in extrusion_moves:
-                                    e_match = re.search(r'E([-\d.]+)', line)
-                                    if e_match:
-                                        e_value = float(e_match.group(1))
+                                    e_value = extract_e(line)
+                                    if e_value is not None:
                                         new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
-                                        line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', line)
-                                    modified_lines.append(line)
+                                        line = replace_e(line, new_e_value)
+                                    write_and_track(output_buffer, line, recent_output_lines)
                                 
                                 # Pass 2: Travel to start, raise Z, print same moves
-                                modified_lines.append("G92 E0 ; Reset extruder for pass 2\n")
+                                write_and_track(output_buffer, "G92 E0 ; Reset extruder for pass 2\n", recent_output_lines)
                                 if start_x is not None and start_y is not None:
-                                    modified_lines.append(f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n")
-                                modified_lines.append(f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n")
+                                    write_and_track(output_buffer, f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n", recent_output_lines)
+                                write_and_track(output_buffer, f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n", recent_output_lines)
                                 
                                 # Output same extrusion moves again at higher Z
                                 for line in extrusion_moves:
-                                    e_match = re.search(r'E([-\d.]+)', line)
-                                    if e_match:
-                                        e_value = float(e_match.group(1))
+                                    e_value = extract_e(line)
+                                    if e_value is not None:
                                         new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
-                                        line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', line)
-                                    modified_lines.append(line)
+                                        line = replace_e(line, new_e_value)
+                                    write_and_track(output_buffer, line, recent_output_lines)
                                 
                                 # Output non-extrusion commands once (M107, WIDTH, G92, retraction, travel, etc.)
                                 for cmd in non_extrusion_commands:
-                                    modified_lines.append(cmd)
+                                    write_and_track(output_buffer, cmd, recent_output_lines)
                                 
                                 # Reset Z back to layer height
-                                modified_lines.append(f"G1 Z{current_z:.3f} ; Reset Z\n")
+                                write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
                             else:
                                 # Non-base layers: Single pass at Z + 0.5h (sits on previous layer's shifted block)
                                 # On top layers, use 0.75x height for flat top
@@ -1908,24 +2038,23 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
                                     actual_layer_max_z[current_layer] = adjusted_z
                                 
-                                modified_lines.append(f"G0 Z{adjusted_z:.3f} ; Bricklayers base block #{perimeter_block_count}\n")
+                                write_and_track(output_buffer, f"G0 Z{adjusted_z:.3f} ; Bricklayers base block #{perimeter_block_count}\n", recent_output_lines)
                                 logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base at Z={adjusted_z:.3f} (extrusion: {extrusion_factor}x)")
                                 
                                 for loop_line in loop_lines:
                                     if "E" in loop_line:
-                                        e_match = re.search(r'E([-\d.]+)', loop_line)
-                                        if e_match:
-                                            e_value = float(e_match.group(1))
+                                        e_value = extract_e(loop_line)
+                                        if e_value is not None:
                                             new_e_value = e_value * extrusion_factor * bricklayers_extrusion_multiplier
-                                            loop_line = re.sub(r'E[-\d.]+', f'E{new_e_value:.5f}', loop_line)
-                                    modified_lines.append(loop_line)
+                                            loop_line = replace_e(loop_line, new_e_value)
+                                    write_and_track(output_buffer, loop_line, recent_output_lines)
                                 
                                 # Reset Z
-                                modified_lines.append(f"G1 Z{current_z:.3f} ; Reset Z\n")
+                                write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
                     
                     else:
                         # Non-extrusion line (comments, etc)
-                        modified_lines.append(current_line)
+                        write_and_track(output_buffer, current_line, recent_output_lines)
                         j += 1
                 
                 continue
@@ -1933,7 +2062,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # ========== NON-PLANAR INFILL: Process infill with Z modulation ==========
         elif enable_nonplanar and (";TYPE:Internal infill" in line):
             in_infill = True
-            modified_lines.append(line)
+            write_and_track(output_buffer, line, recent_output_lines)
             i += 1
             
             # Save the current layer Z before applying non-planar modulation
@@ -1950,7 +2079,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     in_infill = False
                     # Restore Z before the new layer begins
                     if last_infill_z != layer_z:
-                        modified_lines.append(f"G1 Z{layer_z:.3f} F8400 ; Restore layer Z after non-planar infill\n")
+                        write_and_track(output_buffer, f"G1 Z{layer_z:.3f} F8400 ; Restore layer Z after non-planar infill\n", recent_output_lines)
                         current_z = float(f"{layer_z:.3f}")
                         actual_output_z = current_z
                         old_z = current_z - current_layer_height
@@ -1963,7 +2092,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     in_infill = False
                     # CRITICAL: Restore proper Z height after infill with non-planar modulation
                     if last_infill_z != layer_z:
-                        modified_lines.append(f"G1 Z{layer_z:.3f} F8400 ; Restore layer Z after non-planar infill\n")
+                        write_and_track(output_buffer, f"G1 Z{layer_z:.3f} F8400 ; Restore layer Z after non-planar infill\n", recent_output_lines)
                         # Update runtime Z trackers so subsequent processing uses the restored layer Z
                         current_z = float(f"{layer_z:.3f}")
                         actual_output_z = current_z
@@ -1986,15 +2115,28 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             feedrate = float(f_match.group(1)) * nonplanar_feedrate_multiplier
                         
                         # Get the next X,Y from the NEXT line with X,Y,E (extrusion move)
-                        # Skip over M117 commands that might be in between
+                        # CRITICAL: Only connect points in same continuous extrusion sequence
+                        # Stop at retractions or travel moves (G0) to avoid connecting separate segments
                         x2, y2 = None, None
-                        for j in range(i + 1, min(i + 5, len(lines))):  # Look ahead up to 5 lines
+                        for j in range(i + 1, min(i + 20, len(lines))):  # Look ahead up to 20 lines
                             next_line = lines[j]
-                            # Skip M117 (display messages) and other non-movement commands
-                            if next_line.startswith('M117'):
-                                continue
-                            # Only match if line is an extrusion move (has E)
+                            # STOP CONDITIONS: Don't cross these boundaries
+                            if next_line.startswith(';TYPE:') or next_line.startswith(';LAYER'):
+                                break  # Different feature or layer
+                            if next_line.startswith('G0'):
+                                break  # Travel move = end of continuous extrusion
+                            # Check for retraction (negative E or E less than current)
                             if next_line.startswith('G1') and 'E' in next_line:
+                                e_check = re.search(r'E([-+]?\d*\.?\d+)', next_line)
+                                if e_check:
+                                    next_e = float(e_check.group(1))
+                                    if next_e < e_end:  # Retraction detected
+                                        break  # End of continuous extrusion
+                            # Skip non-movement commands
+                            if next_line.startswith('M') or next_line.startswith('G92'):
+                                continue
+                            # Only match if line is an extrusion move with XY (has X or Y AND E)
+                            if next_line.startswith('G1') and 'E' in next_line and ('X' in next_line or 'Y' in next_line):
                                 next_match = re.search(r'X([-+]?\d*\.?\d+)\s*Y([-+]?\d*\.?\d+)', next_line)
                                 if next_match:
                                     x2, y2 = map(float, next_match.groups())
@@ -2162,7 +2304,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # Add a comment once per layer when adaptive extrusion is being applied
                                 if applied_adaptive_extrusion and not adaptive_comment_added:
                                     total_multiplier = adjusted_e_for_segment / base_e_for_segment if base_e_for_segment > 0 else 1.0
-                                    modified_lines.append(f"; Adaptive E: {total_multiplier:.2f}x (z_lift={z_lift:.3f}mm, local_z_min={local_z_min:.2f}, layer_z={layer_z:.2f})\n")
+                                    write_and_track(output_buffer, f"; Adaptive E: {total_multiplier:.2f}x (z_lift={z_lift:.3f}mm, local_z_min={local_z_min:.2f}, layer_z={layer_z:.2f})\n", recent_output_lines)
                                     adaptive_comment_added = True
                                 
                                 # Save current segment position for next iteration
@@ -2170,29 +2312,28 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 # Output with Z modulation, adjusted E, and boosted feedrate
                                 if feedrate is not None:
-                                    modified_lines.append(
-                                        f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(feedrate)}\n"
+                                    write_and_track(output_buffer, 
+                                        f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(feedrate)}\n", recent_output_lines
                                     )
                                 else:
-                                    modified_lines.append(
-                                        f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f}\n"
+                                    write_and_track(output_buffer, 
+                                        f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f}\n", recent_output_lines
                                     )
                             i += 1
                             continue
                 
                 # Boost feedrate for standalone F commands (e.g., "G1 F3600")
                 if current_line.startswith('G1') and 'F' in current_line and 'X' not in current_line and 'Y' not in current_line and 'E' not in current_line:
-                    f_match = re.search(r'F(\d+\.?\d*)', current_line)
-                    if f_match:
-                        original_feedrate = float(f_match.group(1))
+                    original_feedrate = extract_f(current_line)
+                    if original_feedrate is not None:
                         boosted_feedrate = int(original_feedrate * nonplanar_feedrate_multiplier)
-                        boosted_line = re.sub(r'F\d+\.?\d*', f'F{boosted_feedrate}', current_line)
-                        modified_lines.append(boosted_line)
+                        boosted_line = replace_f(current_line, boosted_feedrate)
+                        write_and_track(output_buffer, boosted_line, recent_output_lines)
                         i += 1
                         continue
                 
                 # If we get here, the line wasn't processed - append as-is
-                modified_lines.append(current_line)
+                write_and_track(output_buffer, current_line, recent_output_lines)
                 i += 1
             
             continue
@@ -2246,9 +2387,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 retract_feedrate = int(f_match.group(1))
                                 break
                     
-                    modified_lines.append(f"G1 E{current_e:.5f} F{retract_feedrate} ; Unretract after Z-hop\n")
+                    write_and_track(output_buffer, f"G1 E{current_e:.5f} F{retract_feedrate} ; Unretract after Z-hop\n", recent_output_lines)
                 
-                modified_lines.append(f"G0 Z{working_z:.3f} F8400 ; Drop back to working Z\n")
+                write_and_track(output_buffer, f"G0 Z{working_z:.3f} F8400 ; Drop back to working Z\n", recent_output_lines)
                 current_travel_z = working_z
                 is_hopped = False
             
@@ -2256,7 +2397,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             if ('X' in line or 'Y' in line) and 'F' in line and not is_extrusion:
                 # Skip Z-hops for travel moves within bridge infill (tracked via TYPE markers)
                 if in_bridge_infill:
-                    modified_lines.append(line)
+                    write_and_track(output_buffer, line, recent_output_lines)
                     i += 1
                     continue
                 
@@ -2290,37 +2431,39 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         # Only add retraction if slicer didn't already do it
                         if not slicer_already_retracted:
                             retracted_e = current_e - z_hop_retraction
-                            modified_lines.append(f"G1 E{retracted_e:.5f} F{retract_feedrate} ; Retract before Z-hop\n")
+                            write_and_track(output_buffer, f"G1 E{retracted_e:.5f} F{retract_feedrate} ; Retract before Z-hop\n", recent_output_lines)
                             current_e = retracted_e  # Update E position after retraction
                         
-                        modified_lines.append(f"G0 Z{safe_z:.3f} F8400 ; Safe Z-hop\n")
+                        write_and_track(output_buffer, f"G0 Z{safe_z:.3f} F8400 ; Safe Z-hop\n", recent_output_lines)
                         # Do the travel move (without Z since we just set it)
                         # Remove Z from the travel line if it exists
-                        travel_line = re.sub(r'Z[-\d.]+\s*', '', line)
-                        modified_lines.append(travel_line)
+                        travel_line = REGEX_Z_SUB.sub('', line)
+                        write_and_track(output_buffer, travel_line, recent_output_lines)
                         current_travel_z = safe_z
                         is_hopped = True  # Mark that we're hopped up
                         i += 1
                         continue
             
             # Not a travel move or no Z-hop needed - just output as is
-            modified_lines.append(line)
+            write_and_track(output_buffer, line, recent_output_lines)
             i += 1
             continue
         
         else:
-            # Track ANY TYPE marker to prevent mis-detecting as orphan
-            if ";TYPE:" in line:
-                last_type_seen = line.strip()
-            
-            modified_lines.append(line)
+            write_and_track(output_buffer, line, recent_output_lines)
             i += 1
 
     # Write the modified G-code
     print(f"\n[OK] Processed {current_layer} layers")
     print(f"Writing modified G-code to: {os.path.basename(output_file)}...")
+    
+    # Get the complete output from StringIO buffer
+    modified_gcode = output_buffer.getvalue()
+    output_buffer.close()
+    
+    # Write to file
     with open(output_file, 'w') as outfile:
-        outfile.writelines(modified_lines)
+        outfile.write(modified_gcode)
 
     logging.info("\n" + "="*70)
     logging.info("G-code processing completed successfully")
@@ -2331,7 +2474,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     print("  [OK] SILKSTEEL POST-PROCESSING COMPLETE")
     print("=" * 70)
     print(f"  Total layers: {current_layer}")
-    print(f"  Output lines: {len(modified_lines)}")
+    print(f"  Output size: {len(modified_gcode)} bytes")
     print(f"  Output file: {output_file}")
     print("=" * 70 + "\n")
 
