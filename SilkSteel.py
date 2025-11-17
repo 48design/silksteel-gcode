@@ -780,14 +780,26 @@ def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_re
             z_offset = amplitude * noise_val
             z_mod = layer_z + z_offset
             
+            # Check if this cell has infill extrusions
+            cell_key = (gx, gy, layer_num)
+            infill_crossings = 0
+            if cell_key in solid_at_grid:
+                infill_crossings = solid_at_grid[cell_key].get('infill_crossings', 0)
+            
             # Color scheme:
-            # - Grayscale: Regular noise (z >= layer_z)
-            # - Green: Valleys (z < layer_z)
-            if z_mod < layer_z:
-                # Valley: green channel only
+            # - GREEN channel only: valley (z < layer_z) AND single infill crossing
+            # - RED channel only: valley (z < layer_z) AND multiple infill crossings
+            # - Grayscale: everything else (no infill, or not a valley)
+            is_valley = z_mod < layer_z
+            
+            if is_valley and infill_crossings > 1:
+                # Valley with multiple crossings: red channel only
+                color = (intensity, 0, 0)
+            elif is_valley and infill_crossings == 1:
+                # Valley with single infill extrusion: green channel only
                 color = (0, intensity, 0)
             else:
-                # Regular: grayscale
+                # Everything else: grayscale
                 color = (intensity, intensity, intensity)
             
             # Draw filled rectangle for this grid cell
@@ -1037,15 +1049,25 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             print(f"[DEBUG] Found {total_layers} layers")
         
         # Second pass: Mark which grid cells have solid infill at each layer
-        logging.info("\nScanning solid infill to build occupancy grid...")
+        # UNIFIED GRID STRUCTURE:
+        # solid_at_grid[(gx, gy, layer)] = {
+        #   'solid': bool,              # True if solid material exists (perimeters, solid infill, etc.)
+        #   'infill_crossings': int     # Number of times internal infill crosses this cell (0 = none, 1 = once, 2+ = multiple crossings)
+        # }
+        # This replaces the old separate solid_at_grid (bool) and infill_traversal_at_grid (int) dictionaries.
+        logging.info("\nScanning solid infill AND internal infill to build occupancy grid...")
         logging.info(f"  Processing {len(lines)} lines...")
+        solid_at_grid = {}  # (gx, gy, layer) -> {'solid': bool, 'infill_crossings': int}
         temp_z = 0.0
         prev_layer_z = 0.0
         current_layer_height = base_layer_height  # Default
         current_layer_num = -1  # Will be set from ;LAYER: marker
         in_solid_infill = False
+        in_internal_infill = False
         last_solid_pos = None  # Track last position to mark all cells along line
         last_solid_coords = None  # Track actual X,Y coordinates for DDA
+        last_infill_pos = None  # Track last position for infill
+        last_infill_coords = None  # Track actual X,Y coordinates for infill
         debug_line_count = 0
         debug_cells_marked = 0
         type_markers_seen = set()  # Track all TYPE markers we encounter
@@ -1060,6 +1082,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     current_layer_num = int(layer_match.group(1))
                     last_solid_pos = None  # Reset on layer change
                     last_solid_coords = None
+                    last_infill_pos = None
+                    last_infill_coords = None
                     # Calculate layer height for this layer
                     if current_layer_num in z_layer_map:
                         current_z = z_layer_map[current_layer_num]
@@ -1072,6 +1096,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 current_layer_num += 1  # Fallback for non-standard markers
                 last_solid_pos = None  # Reset on layer change
                 last_solid_coords = None
+                last_infill_pos = None
+                last_infill_coords = None
                 # Calculate layer height for this layer
                 if current_layer_num in z_layer_map:
                     current_z = z_layer_map[current_layer_num]
@@ -1091,18 +1117,31 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                ';TYPE:External perimeter' in line or ';TYPE:Internal perimeter' in line or ';TYPE:Perimeter' in line:
 
                 in_solid_infill = True
+                in_internal_infill = False
                 last_solid_pos = None  # Reset when entering solid infill or perimeter
                 last_solid_coords = None
+                last_infill_pos = None
+                last_infill_coords = None
                 if temp_z not in solid_infill_heights:
                     solid_infill_heights.append(temp_z)
+            elif ';TYPE:Internal infill' in line:
+                in_internal_infill = True
+                in_solid_infill = False
+                last_solid_pos = None
+                last_solid_coords = None
+                last_infill_pos = None
+                last_infill_coords = None
             elif ';TYPE:' in line:
                 # Track all TYPE markers for debugging
                 type_match = re.search(r';TYPE:([^\n]+)', line)
                 if type_match:
                     type_markers_seen.add(type_match.group(1))
                 in_solid_infill = False
+                in_internal_infill = False
                 last_solid_pos = None  # Reset when exiting solid infill or perimeter
                 last_solid_coords = None
+                last_infill_pos = None
+                last_infill_coords = None
             
             # Track position during solid infill (both G0 and G1 moves)
             if in_solid_infill:
@@ -1195,8 +1234,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 # Grid resolution is sized to match extrusion width, so just mark center cells
                                 for _ in range(max_iterations + 10):  # Safety margin
-                                    # Mark current cell as solid (metadata will be added in backfill pass)
-                                    solid_at_grid[(current_cell_x, current_cell_y, current_layer_num)] = True
+                                    # Mark current cell as solid
+                                    cell_key = (current_cell_x, current_cell_y, current_layer_num)
+                                    if cell_key not in solid_at_grid:
+                                        solid_at_grid[cell_key] = {'solid': True, 'infill_crossings': 0}
+                                    else:
+                                        solid_at_grid[cell_key]['solid'] = True
                                     cells_marked += 1
                                     
                                     # Check if we've reached the target
@@ -1219,7 +1262,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     print(f"[DEBUG] Line {debug_line_count}: ({last_gx},{last_gy}) -> ({gx},{gy}) marked {cells_marked} cells (voxel traversal)")
                             else:
                                 # First point - just mark the cell
-                                solid_at_grid[(gx, gy, current_layer_num)] = True
+                                cell_key = (gx, gy, current_layer_num)
+                                if cell_key not in solid_at_grid:
+                                    solid_at_grid[cell_key] = {'solid': True, 'infill_crossings': 0}
+                                else:
+                                    solid_at_grid[cell_key]['solid'] = True
                             
                             # Save actual coordinates for next iteration
                             last_solid_coords = (x, y)
@@ -1227,11 +1274,120 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # Update last position for next line (for continuity)
                             last_solid_pos = (gx, gy)
             
+            # Track position during INTERNAL infill (to count valley crossings)
+            if in_internal_infill:
+                # Reset tracking on ANY G0 travel move (breaks continuity)
+                if line.startswith('G0'):
+                    last_infill_pos = None
+                    last_infill_coords = None
+                
+                # Reset tracking on retraction (NEGATIVE E value only)
+                if line.startswith('G1') and 'E' in line:
+                    e_check = REGEX_E.search(line)
+                    if e_check:
+                        e_val = float(e_check.group(1))
+                        if e_val < 0:
+                            last_infill_pos = None
+                            last_infill_coords = None
+                
+                # Process G1 moves with XY coordinates
+                if line.startswith('G1') and ('X' in line or 'Y' in line):
+                    x = extract_x(line)
+                    y = extract_y(line)
+                    
+                    if x is None and last_infill_coords is not None:
+                        x = last_infill_coords[0]
+                    if y is None and last_infill_coords is not None:
+                        y = last_infill_coords[1]
+                    
+                    if x is not None and y is not None:
+                        gx = int(x / grid_resolution)
+                        gy = int(y / grid_resolution)
+                        
+                        e_value = extract_e(line)
+                        has_extrusion = e_value is not None and e_value >= 0
+                        
+                        if has_extrusion:
+                            # Mark all grid cells from last position to current position
+                            if last_infill_pos is not None:
+                                last_gx, last_gy = last_infill_pos
+                                last_x, last_y = last_infill_coords
+                                
+                                # Use same voxel traversal as solid
+                                dx = x - last_x
+                                dy = y - last_y
+                                
+                                step_x = 1 if dx > 0 else (-1 if dx < 0 else 0)
+                                step_y = 1 if dy > 0 else (-1 if dy < 0 else 0)
+                                
+                                t_delta_x = abs(grid_resolution / dx) if dx != 0 else float('inf')
+                                t_delta_y = abs(grid_resolution / dy) if dy != 0 else float('inf')
+                                
+                                current_cell_x = int(last_x / grid_resolution)
+                                current_cell_y = int(last_y / grid_resolution)
+                                
+                                if dx > 0:
+                                    t_max_x = ((current_cell_x + 1) * grid_resolution - last_x) / dx
+                                elif dx < 0:
+                                    t_max_x = (current_cell_x * grid_resolution - last_x) / dx
+                                else:
+                                    t_max_x = float('inf')
+                                
+                                if dy > 0:
+                                    t_max_y = ((current_cell_y + 1) * grid_resolution - last_y) / dy
+                                elif dy < 0:
+                                    t_max_y = (current_cell_y * grid_resolution - last_y) / dy
+                                else:
+                                    t_max_y = float('inf')
+                                
+                                target_cell_x = int(x / grid_resolution)
+                                target_cell_y = int(y / grid_resolution)
+                                
+                                max_iterations = abs(target_cell_x - current_cell_x) + abs(target_cell_y - current_cell_y) + 1
+                                
+                                for _ in range(max_iterations + 10):
+                                    cell_key = (current_cell_x, current_cell_y, current_layer_num)
+                                    # Increment crossing count for this cell
+                                    if cell_key not in solid_at_grid:
+                                        solid_at_grid[cell_key] = {'solid': False, 'infill_crossings': 1}
+                                    else:
+                                        solid_at_grid[cell_key]['infill_crossings'] += 1
+                                    
+                                    if current_cell_x == target_cell_x and current_cell_y == target_cell_y:
+                                        break
+                                    
+                                    if t_max_x < t_max_y:
+                                        current_cell_x += step_x
+                                        t_max_x += t_delta_x
+                                    else:
+                                        current_cell_y += step_y
+                                        t_max_y += t_delta_y
+                            else:
+                                # First point - just increment count
+                                cell_key = (gx, gy, current_layer_num)
+                                if cell_key not in solid_at_grid:
+                                    solid_at_grid[cell_key] = {'solid': False, 'infill_crossings': 1}
+                                else:
+                                    solid_at_grid[cell_key]['infill_crossings'] += 1
+                            
+                            # Save coordinates for next iteration
+                            last_infill_coords = (x, y)
+                            last_infill_pos = (gx, gy)
+            
             # Track previous line for debugging
             prev_line = line
         
         logging.info(f"Total solid infill layers: {len(solid_infill_heights)}")
-        logging.info(f"Grid cells marked with solid: {len(solid_at_grid)}")
+        logging.info(f"Grid cells marked: {len(solid_at_grid)}")
+        
+        # Count solid vs infill cells
+        solid_count = sum(1 for cell in solid_at_grid.values() if cell['solid'])
+        infill_count = sum(1 for cell in solid_at_grid.values() if cell['infill_crossings'] > 0)
+        max_crossings = max((cell['infill_crossings'] for cell in solid_at_grid.values()), default=0)
+        
+        logging.info(f"  Cells with solid material: {solid_count}")
+        logging.info(f"  Cells with infill crossings: {infill_count}")
+        logging.info(f"  Maximum crossings at any cell: {max_crossings}")
         
         # Build infill_at_grid: Mark INFILL layers (safezones) with first/last metadata
         logging.info("\nBuilding infill grid with first/last safezone markers...")
@@ -1240,10 +1396,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         # Build inverted index for faster lookup (will be reused for safe_z calculation)
         grid_to_layers = {}
-        for (gx, gy, layer) in solid_at_grid.keys():
-            if (gx, gy) not in grid_to_layers:
-                grid_to_layers[(gx, gy)] = []
-            grid_to_layers[(gx, gy)].append(layer)
+        for cell_key, cell_data in solid_at_grid.items():
+            gx, gy, layer = cell_key
+            if cell_data.get('solid', False):  # Only index solid cells
+                if (gx, gy) not in grid_to_layers:
+                    grid_to_layers[(gx, gy)] = []
+                grid_to_layers[(gx, gy)].append(layer)
         
         # Sort layers for each position
         for key in grid_to_layers:
@@ -1290,11 +1448,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         }
                         last_of_safezone_count += 1
         
-        # Convert all solid_at_grid True values to empty dicts
-        for key in list(solid_at_grid.keys()):
-            if solid_at_grid[key] is True:
-                solid_at_grid[key] = {}
-        
         logging.info(f"  Built infill grid with {len(infill_at_grid)} infill cells")
         logging.info(f"  Marked {first_of_safezone_count} 'first of safezone' cells (adaptive extrusion)")
         logging.info(f"  Marked {last_of_safezone_count} 'last of safezone' cells (valley filling)")
@@ -1306,13 +1459,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             print(f"\n[DEBUG] All TYPE markers seen in G-code: {sorted(type_markers_seen)}")
             
             # Show which layers have solid infill
-            layers_with_solid = sorted(set(layer for _, _, layer in solid_at_grid.keys()))
+            layers_with_solid = sorted(set(layer for (gx, gy, layer), cell_data in solid_at_grid.items() if cell_data.get('solid', False)))
             print(f"[DEBUG] Layers with solid infill: {layers_with_solid[:30]}..." if len(layers_with_solid) > 30 else f"[DEBUG] Layers with solid infill: {layers_with_solid}")
             
             # Show coverage per layer for first few layers
             print(f"\n[DEBUG] Grid cell coverage for first 10 layers:")
             for layer in layers_with_solid[:10]:
-                cells_at_layer = [(gx, gy) for (gx, gy, lay) in solid_at_grid.keys() if lay == layer]
+                cells_at_layer = [(gx, gy) for (gx, gy, lay), cell_data in solid_at_grid.items() if lay == layer and cell_data.get('solid', False)]
                 layer_z = z_layer_map.get(layer, "unknown")
                 print(f"  Layer {layer} (Z={layer_z}): {len(cells_at_layer)} cells marked")
                 if len(cells_at_layer) < 20:  # If few cells, show them
@@ -1451,9 +1604,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         img = Image.new('RGB', (img_width, img_height), color='black')
                         draw = ImageDraw.Draw(img)
                         
-                        # Draw grid cells with solid material
-                        for (gx, gy, lay) in solid_at_grid.keys():
-                            if lay == layer:
+                        # Draw grid cells with solid material (white only)
+                        for cell_key, cell_data in solid_at_grid.items():
+                            gx, gy, lay = cell_key
+                            if lay == layer and cell_data.get('solid', False):
                                 # Convert to image coordinates (flip Y axis)
                                 img_x = (gx - grid_x_min) * scale
                                 img_y = (grid_y_max - gy) * scale  # Flip Y
@@ -1475,8 +1629,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 print(f"[DEBUG] PIL/Pillow not available - skipping PNG generation")
                 print(f"[DEBUG] Install with: pip install Pillow")
         
-        # Get all layers that have solid infill anywhere (for visualization)
-        all_solid_layers = sorted(set(layer for _, _, layer in solid_at_grid.keys()))
+        # Get all layers that have solid or infill material anywhere (for visualization)
+        all_solid_layers = sorted(set(layer for (gx, gy, layer) in solid_at_grid.keys()))
         if debug >= 1:
             print(f"[DEBUG] Found solid infill on {len(all_solid_layers)} layers: {all_solid_layers[:10]}..." if len(all_solid_layers) > 10 else f"[DEBUG] Found solid infill on {len(all_solid_layers)} layers: {all_solid_layers}")
         
@@ -2599,7 +2753,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         check_gx = gx + dx
                                         check_gy = gy + dy
                                         # Check if this cell has solid at current layer
-                                        if (check_gx, check_gy, current_layer) in solid_at_grid:
+                                        cell_key = (check_gx, check_gy, current_layer)
+                                        if cell_key in solid_at_grid and solid_at_grid[cell_key].get('solid', False):
                                             # Calculate distance to this solid cell center
                                             solid_x = check_gx * grid_resolution
                                             solid_y = check_gy * grid_resolution
