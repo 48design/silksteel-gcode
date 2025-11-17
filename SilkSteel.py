@@ -463,6 +463,52 @@ def calculate_grid_bounds(solid_at_grid):
     
     return (grid_x_min, grid_x_max, grid_y_min, grid_y_max, grid_width, grid_height)
 
+def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_layer_height):
+    """
+    Determine which safezone (gap between solid regions) the current layer is in,
+    and return the floor and ceiling Z values for that safezone.
+    
+    Args:
+        gx, gy: Grid coordinates
+        current_layer: Current layer number
+        grid_cell_solid_regions: Dictionary mapping (gx, gy) to list of solid regions
+        base_layer_height: Layer height in mm
+    
+    Returns:
+        Tuple of (z_min, z_max, layers_until_ceiling, height_until_ceiling):
+        - z_min: Floor Z (top of solid region below, or -999 if none)
+        - z_max: Ceiling Z (bottom of solid region above minus one layer, or 999 if none)
+        - layers_until_ceiling: Number of layers until solid starts above (0 if none)
+        - height_until_ceiling: Remaining height in mm from current layer to ceiling (layers_until_ceiling × layer_height)
+    """
+    local_z_min = -999  # Floor (top of solid below)
+    local_z_max = 999   # Ceiling (bottom of solid above)
+    layers_until_ceiling = 0
+    
+    if (gx, gy) in grid_cell_solid_regions:
+        for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
+            # Check if this solid region is BELOW our current layer
+            if region_end < current_layer:
+                # This solid is below - use its top as our floor
+                local_z_min = max(local_z_min, z_top)
+            
+            # Check if this solid region is ON or ABOVE our current layer
+            elif region_start >= current_layer:
+                # This solid is on same layer or above - use its bottom minus layer height as ceiling
+                # (infill must stay in the layer BELOW the solid)
+                candidate_ceiling = z_bottom - base_layer_height
+                if local_z_max == 999:  # Take the LOWEST ceiling
+                    local_z_max = candidate_ceiling
+                    layers_until_ceiling = region_start - current_layer
+                elif candidate_ceiling < local_z_max:
+                    local_z_max = candidate_ceiling
+                    layers_until_ceiling = region_start - current_layer
+    
+    # Calculate remaining height until ceiling (how much safezone is left above current layer)
+    height_until_ceiling = layers_until_ceiling * base_layer_height
+    
+    return (local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling)
+
 def generate_fractal_noise_3d(shape, res, octaves=1, persistence=0.5, seed=None):
     """
     Generate 3D fractal Perlin noise with multiple octaves.
@@ -1192,22 +1238,22 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         infill_at_grid = {}  # (gx, gy, layer) -> metadata for INFILL layers
         
-        # Build inverted index for faster lookup
-        grid_to_layers_temp = {}
+        # Build inverted index for faster lookup (will be reused for safe_z calculation)
+        grid_to_layers = {}
         for (gx, gy, layer) in solid_at_grid.keys():
-            if (gx, gy) not in grid_to_layers_temp:
-                grid_to_layers_temp[(gx, gy)] = []
-            grid_to_layers_temp[(gx, gy)].append(layer)
+            if (gx, gy) not in grid_to_layers:
+                grid_to_layers[(gx, gy)] = []
+            grid_to_layers[(gx, gy)].append(layer)
         
         # Sort layers for each position
-        for key in grid_to_layers_temp:
-            grid_to_layers_temp[key].sort()
+        for key in grid_to_layers:
+            grid_to_layers[key].sort()
         
         # Mark infill layers in gaps between solid regions
         first_of_safezone_count = 0
         last_of_safezone_count = 0
         
-        for (gx, gy), solid_layers in grid_to_layers_temp.items():
+        for (gx, gy), solid_layers in grid_to_layers.items():
             if len(solid_layers) < 2:
                 continue  # Need at least 2 solid regions to have gaps
             
@@ -1243,12 +1289,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             'next_solid_layer': solid_start
                         }
                         last_of_safezone_count += 1
-                    
-                    # Mark middle layers as normal infill (no special treatment)
-                    for infill_layer in range(infill_start + 1, infill_end):
-                        key_middle = (gx, gy, infill_layer)
-                        if key_middle not in infill_at_grid:
-                            infill_at_grid[key_middle] = {}
         
         # Convert all solid_at_grid True values to empty dicts
         for key in list(solid_at_grid.keys()):
@@ -1284,18 +1324,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # z_max = Z of next solid layer seen at this cell (top of safe range)
         logging.info("\nCalculating safe Z ranges per grid cell...")
         
-        # OPTIMIZATION: Build inverted index (gx, gy) -> [layers] to avoid O(N²) scanning
-        # This converts the nested loop from O(N²) to O(N)
-        grid_to_layers = {}
-        for (gx, gy, layer) in solid_at_grid.keys():
-            if (gx, gy) not in grid_to_layers:
-                grid_to_layers[(gx, gy)] = []
-            grid_to_layers[(gx, gy)].append(layer)
-        
-        # Sort layers for each grid cell
-        for key in grid_to_layers:
-            grid_to_layers[key].sort()
-        
+        # OPTIMIZATION: Reuse grid_to_layers index from infill_at_grid building
+        # (already built and sorted above - no need to rebuild!)
         all_grid_positions = sorted(grid_to_layers.keys())
         logging.info(f"  Processing {len(all_grid_positions)} unique grid positions...")
         
@@ -1595,18 +1625,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         grid_visualization_gcode.append(f"G0 X{x_draw:.2f} Y{y_draw:.2f} Z{first_z:.2f} F6000\n")
                         grid_visualization_gcode.append(f"G1 X{x_draw:.2f} Y{y_draw + 0.2:.2f} Z{first_z:.2f} E{grid_e:.5f} F300\n")
                         grid_e += 0.001
-            
-            if debug >= 1:
-                msg = f"XZ cross-section: found {xz_cells_count} solid cells at gy={center_gy}"
-                print(f"[DEBUG] {msg}")
-                logging.info(f"[DEBUG] {msg}")
-                # Show which X positions have cells on layer 0
-                layer0_cells = [(gx, gy, layer) for (gx, gy, layer) in solid_at_grid.keys() if gy == center_gy and layer == 0]
-                if layer0_cells:
-                    x_positions = sorted(set([gx for gx, _, _ in layer0_cells]))
-                    msg = f"Layer 0 X positions at gy={center_gy}: {x_positions}"
-                    print(f"[DEBUG] {msg}")
-                    logging.info(f"[DEBUG] {msg}")
             
             grid_visualization_gcode.append(f"G92 E0 ; Reset extruder after grid visualization\n")
             grid_visualization_gcode.append("; === End of grid visualization ===\n\n")
@@ -2614,41 +2632,19 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 z_offset = amplitude * taper_factor * noise_value
                                 z_mod = layer_z + z_offset
                                 
-                                # PER-CELL CLAMPING using solid regions
-                                # Check if z_mod would collide with any solid region in this cell
-                                local_z_min = -999  # Floor (top of solid below)
-                                local_z_max = 999   # Ceiling (bottom of solid above)
-                                
-                                if (gx, gy) in grid_cell_solid_regions:
-                                    for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
-                                        # Check if this solid region is BELOW our current layer
-                                        if region_end < current_layer:
-                                            # This solid is below - use its top as our floor
-                                            local_z_min = max(local_z_min, z_top)
-                                        # Check if this solid region is ON or ABOVE our current layer
-                                        elif region_start >= current_layer:
-                                            # This solid is on same layer or above - use its bottom minus layer height as ceiling
-                                            # (infill must stay in the layer BELOW the solid)
-                                            if local_z_max == 999:  # Take the LOWEST ceiling
-                                                local_z_max = z_bottom - base_layer_height
-                                            else:
-                                                local_z_max = min(local_z_max, z_bottom - base_layer_height)
-                                
-                                # DEBUG output for first segment only (when debug flag is enabled)
-                                if debug and idx == 1 and current_layer <= 3 and current_layer % 1 == 0:
-                                    print(f"[Layer {current_layer}] Z={layer_z:.2f}, cell=({gx},{gy}), range=[{local_z_min:.2f}, {local_z_max:.2f}], z_mod: {z_mod:.3f} -> ", end='')
+                                # Get safezone bounds for this grid cell
+                                local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
+                                    gx, gy, current_layer, grid_cell_solid_regions, base_layer_height
+                                )
                                 
                                 # Clamp Z to safe range
                                 z_mod_original = z_mod
                                 if local_z_min > -999:  # Valid z_min
                                     z_mod = max(local_z_min, z_mod)
                                 if local_z_max < 999:  # Valid z_max
+                                    #z_mod = min(local_z_max - (layers_until_ceiling * base_layer_height), z_mod)
                                     z_mod = min(local_z_max, z_mod)
-                                
-                                if debug and idx == 1 and current_layer <= 3 and current_layer % 1 == 0:
-                                    clamped = z_mod != z_mod_original
-                                    print(f"{z_mod:.3f} {'(CLAMPED)' if clamped else ''}")
-                                
+
                                 last_infill_z = z_mod
                                 
                                 # Track actual max Z for this layer (for safe Z-hop)
