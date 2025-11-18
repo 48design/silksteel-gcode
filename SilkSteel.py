@@ -1618,6 +1618,25 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     fill='white'
                                 )
                         
+                        # Draw infill lines (very dark grey, minimalistic)
+                        # Check cells that have infill crossings
+                        for cell_key, cell_data in solid_at_grid.items():
+                            gx, gy, lay = cell_key
+                            if lay == layer:
+                                infill_crossings = cell_data.get('infill_crossings', 0)
+                                if infill_crossings > 0:
+                                    # Convert to image coordinates (flip Y axis)
+                                    img_x = (gx - grid_x_min) * scale
+                                    img_y = (grid_y_max - gy) * scale  # Flip Y
+                                    
+                                    # Draw very dark grey overlay (RGB 30,30,30 = very dark)
+                                    # Only draw if not already solid (white)
+                                    if not cell_data.get('solid', False):
+                                        draw.rectangle(
+                                            [img_x, img_y, img_x + scale - 1, img_y + scale - 1],
+                                            fill=(30, 30, 30)
+                                        )
+                        
                         # Save image
                         layer_z = z_layer_map.get(layer, 0)
                         img_filename = os.path.join(script_dir, f"layer_{layer:03d}_z{layer_z:.2f}.png")
@@ -1730,13 +1749,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Draw individual dots for each layer that has solid material
             x_section_x_base = (grid_x_max + 3) * grid_resolution  # Base X position to the right of grid
             z_scale = 1.0  # Use 1:1 scale for Z
-            grid_visualization_gcode.append(f"\n; Cross-section YZ plane (looking from +X, through X={center_gx})\n")
+            grid_visualization_gcode.append(f"\n; Cross-section YZ plane (looking from +X, through X={center_gx * grid_resolution:.1f}mm)\n")
             grid_visualization_gcode.append(f"; Each dot = solid material at that Y,Z position\n")
             
             # Draw solid cells as individual markers
             yz_cells_count = 0
-            for (gx, gy, layer) in solid_at_grid.keys():
-                if gx == center_gx:  # Only cells on the center slice
+            for cell_key, cell_data in solid_at_grid.items():
+                gx, gy, layer = cell_key
+                if gx == center_gx and cell_data.get('solid', False):  # Only solid cells on the center slice
                     yz_cells_count += 1
                     if layer in z_layer_map:
                         layer_z = z_layer_map[layer]
@@ -1748,27 +1768,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         grid_visualization_gcode.append(f"G1 X{x_draw + 0.2:.2f} Y{y_draw:.2f} Z{first_z:.2f} E{grid_e:.5f} F300\n")
                         grid_e += 0.001
             
-            if debug >= 1:
-                msg = f"YZ cross-section: found {yz_cells_count} solid cells at gx={center_gx}"
-                print(f"[DEBUG] {msg}")
-                logging.info(f"[DEBUG] {msg}")
-                # Show which Y positions have cells on layer 0
-                layer0_cells = [(gy, gx, layer) for (gx, gy, layer) in solid_at_grid.keys() if gx == center_gx and layer == 0]
-                if layer0_cells:
-                    y_positions = sorted(set([gy for gy, _, _ in layer0_cells]))
-                    msg = f"Layer 0 Y positions at gx={center_gx}: {y_positions}"
-                    print(f"[DEBUG] {msg}")
-                    logging.info(f"[DEBUG] {msg}")
-            
             # Cross-section 2: XZ plane (view from +Y direction) - shows X vs Z
             y_section_y_base = (grid_y_max + 3) * grid_resolution  # Base Y position below grid
-            grid_visualization_gcode.append(f"\n; Cross-section XZ plane (looking from +Y, through Y={center_gy})\n")
+            grid_visualization_gcode.append(f"\n; Cross-section XZ plane (looking from +Y, through Y={center_gy * grid_resolution:.1f}mm)\n")
             grid_visualization_gcode.append(f"; Each dot = solid material at that X,Z position\n")
             
             # Draw solid cells as individual markers
             xz_cells_count = 0
-            for (gx, gy, layer) in solid_at_grid.keys():
-                if gy == center_gy:  # Only cells on the center slice
+            for cell_key, cell_data in solid_at_grid.items():
+                gx, gy, layer = cell_key
+                if gy == center_gy and cell_data.get('solid', False):  # Only solid cells on the center slice
                     xz_cells_count += 1
                     if layer in z_layer_map:
                         layer_z = z_layer_map[layer]
@@ -2029,9 +2038,41 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     recent_output_lines = []
     max_recent_output = 50
     
+    # Global position tracker - updated with EVERY line we read from input
+    # This tracks where the nozzle IS (the starting position for the NEXT move)
+    # Uses a dict so it can be modified inside the helper function
+    position = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'e': 0.0}
+    
+    def update_position(line_str):
+        """Update global position tracker from a G-code line.
+        Call this EVERY time you read a line from the input, regardless of processing mode."""
+        if line_str.startswith("G1") or line_str.startswith("G0"):
+            # Extract ANY coordinate updates from this line
+            x_match = re.search(r'X([-+]?\d*\.?\d+)', line_str)
+            y_match = re.search(r'Y([-+]?\d*\.?\d+)', line_str)
+            z_match = re.search(r'Z([-+]?\d*\.?\d+)', line_str)
+            e_match = re.search(r'E([-+]?\d*\.?\d+)', line_str)
+            
+            if x_match:
+                position['x'] = float(x_match.group(1))
+            if y_match:
+                position['y'] = float(y_match.group(1))
+            if z_match:
+                position['z'] = float(z_match.group(1))
+            if e_match:
+                position['e'] = float(e_match.group(1))
+        elif line_str.startswith("G92"):
+            # G92 resets positions (usually E0)
+            e_reset_match = re.search(r'E([-+]?\d*\.?\d+)', line_str)
+            if e_reset_match:
+                position['e'] = float(e_reset_match.group(1))
+    
     while i < total_lines:
         line = lines[i]
         line_count_processed += 1
+        
+        # Update global position tracker FIRST (before any processing logic)
+        update_position(line)
         
         # Track TYPE markers for Z-hop exclusion logic
         if ";TYPE:" in line:
@@ -2193,6 +2234,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Include WIPE moves and everything up to the next TYPE marker
             while i < len(lines):
                 current_line = lines[i]
+                
+                # Update global position tracker
+                update_position(current_line)
                 
                 # Stop at layer boundary to prevent crossing layers
                 if ";LAYER_CHANGE" in current_line:
@@ -2377,6 +2421,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 while i < len(lines):
                     current_line = lines[i]
                     
+                    # Update global position tracker
+                    update_position(current_line)
+                    
                     # Stop collecting at next TYPE marker OR layer change
                     if ";TYPE:" in current_line or ";LAYER_CHANGE" in current_line:
                         break
@@ -2503,7 +2550,21 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 extrusion_moves = []
                                 non_extrusion_commands = []
                                 fan_commands = []  # Collect all fan commands separately
+                                
+                                # CRITICAL: Extract start position from BEFORE the loop (where nozzle is positioned)
+                                # Look back through recent output to find last XY position
                                 start_x, start_y = None, None
+                                for recent_line in reversed(recent_output_lines[-20:]):
+                                    if start_x is None and 'X' in recent_line:
+                                        x_match = re.search(r'X([-\d.]+)', recent_line)
+                                        if x_match:
+                                            start_x = float(x_match.group(1))
+                                    if start_y is None and 'Y' in recent_line:
+                                        y_match = re.search(r'Y([-\d.]+)', recent_line)
+                                        if y_match:
+                                            start_y = float(y_match.group(1))
+                                    if start_x is not None and start_y is not None:
+                                        break
                                 
                                 for loop_line in loop_lines:
                                     # Check if this is an extrusion move
@@ -2513,13 +2574,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     
                                     if is_extrusion:
                                         extrusion_moves.append(loop_line)
-                                        # Extract start position from first extrusion move
-                                        if start_x is None:
-                                            x_match = re.search(r'X([-\d.]+)', loop_line)
-                                            y_match = re.search(r'Y([-\d.]+)', loop_line)
-                                            if x_match and y_match:
-                                                start_x = float(x_match.group(1))
-                                                start_y = float(y_match.group(1))
                                     elif is_fan_command:
                                         # Collect fan commands separately
                                         fan_commands.append(loop_line)
@@ -2612,6 +2666,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         # ========== NON-PLANAR INFILL: Process infill with Z modulation ==========
         elif enable_nonplanar and (";TYPE:Internal infill" in line):
+            logging.info(f"[INFILL] Entering infill section at line {i}, line content: {line.strip()}")
             in_infill = True
             write_and_track(output_buffer, line, recent_output_lines)
             i += 1
@@ -2620,6 +2675,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             layer_z = current_z
             last_infill_z = layer_z  # Track last Z used in infill
             adaptive_comment_added = False  # Track if we've added the adaptive E comment for this layer
+            
+            # Initialize infill position tracking from global position tracker
+            # The global tracker is updated with EVERY line, so it knows exactly where the nozzle is NOW
+            infill_current_x = position['x']
+            infill_current_y = position['y']
+            infill_current_e = position['e']
+            
+            logging.info(f"[INFILL] Starting position: X={infill_current_x:.3f}, Y={infill_current_y:.3f}, E={infill_current_e:.5f}")
             
             # Valley filling tracking
             # Valley filling is applied PER-CELL based on infill_at_grid metadata
@@ -2632,6 +2695,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Process infill lines
             while i < len(lines):
                 current_line = lines[i]
+                
+                # Update global position tracker for this line
+                update_position(current_line)
                 
                 # CRITICAL: Check for layer change FIRST - restore Z before new layer starts!
                 if current_line.startswith(";LAYER_CHANGE") or current_line.startswith(";LAYER:"):
@@ -2649,6 +2715,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 
                 if ";TYPE:" in current_line:
                     in_infill = False
+                    logging.info(f"[INFILL] Exiting infill section at line {i}, line content: {current_line.strip()}")
                     # CRITICAL: Restore proper Z height after infill with non-planar modulation
                     if last_infill_z != layer_z:
                         write_and_track(output_buffer, f"G1 Z{layer_z:.3f} F8400 ; Restore layer Z after non-planar infill\n", recent_output_lines)
@@ -2660,293 +2727,309 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         #logging.info(f"  [NON-PLANAR INFILL] Restoring Z from {last_infill_z:.3f} to {layer_z:.3f} at TYPE change")
                     break
                 
-                # Process infill extrusion moves
-                if i not in processed_infill_indices and current_line.startswith('G1') and 'E' in current_line:
-                    processed_infill_indices.add(i)
+                # Process infill extrusion moves: G1 with X, Y, and E all present
+                # CRITICAL: Use SAME logic as grid building for detecting extrusions
+                if i not in processed_infill_indices and current_line.startswith('G1'):
+                    
+                    # Parse X, Y, E from current line
                     match = re.search(r'X([-+]?\d*\.?\d+)\s*Y([-+]?\d*\.?\d+)\s*E([-+]?\d*\.?\d+)', current_line)
                     if match:
-                        x1, y1, e_end = map(float, match.groups())
+                        x2, y2, e_end = map(float, match.groups())  # End point is THIS line
                         
-                        # Extract feedrate from current line if present
-                        feedrate = None
-                        f_match = re.search(r'F(\d+\.?\d*)', current_line)
-                        if f_match:
-                            feedrate = float(f_match.group(1)) * nonplanar_feedrate_multiplier
-                        
-                        # Get the next X,Y from the NEXT line with X,Y,E (extrusion move)
-                        # CRITICAL: Only connect points in same continuous extrusion sequence
-                        # Stop at retractions or travel moves (G0) to avoid connecting separate segments
-                        x2, y2 = None, None
-                        for j in range(i + 1, min(i + 20, len(lines))):  # Look ahead up to 20 lines
-                            next_line = lines[j]
-                            # STOP CONDITIONS: Don't cross these boundaries
-                            if next_line.startswith(';TYPE:') or next_line.startswith(';LAYER'):
-                                break  # Different feature or layer
-                            if next_line.startswith('G0'):
-                                break  # Travel move = end of continuous extrusion
-                            # Check for retraction (negative E or E less than current)
-                            if next_line.startswith('G1') and 'E' in next_line:
-                                e_check = re.search(r'E([-+]?\d*\.?\d+)', next_line)
-                                if e_check:
-                                    next_e = float(e_check.group(1))
-                                    if next_e < e_end:  # Retraction detected
-                                        break  # End of continuous extrusion
-                            # Skip non-movement commands
-                            if next_line.startswith('M') or next_line.startswith('G92'):
-                                continue
-                            # Only match if line is an extrusion move with XY (has X or Y AND E)
-                            if next_line.startswith('G1') and 'E' in next_line and ('X' in next_line or 'Y' in next_line):
-                                next_match = re.search(r'X([-+]?\d*\.?\d+)\s*Y([-+]?\d*\.?\d+)', next_line)
-                                if next_match:
-                                    x2, y2 = map(float, next_match.groups())
-                                    break  # Found next point, stop looking
-                        
-                        if x2 is not None and y2 is not None:
-                            # Get the starting E value from previous line
-                            e_start = 0.0
-                            for j in range(i - 1, max(0, i - 10), -1):
-                                prev_e_match = re.search(r'E([-+]?\d*\.?\d+)', lines[j])
-                                if prev_e_match:
-                                    e_start = float(prev_e_match.group(1))
-                                    break
-                            
-                            # Calculate total extrusion for this move
+                        # BULLETPROOF extrusion detection: Check if E value is non-negative
+                        # This matches the grid building logic and correctly identifies:
+                        # - Extrusions: E >= 0
+                        # - Retractions: E < 0 (skip these)
+                        # Travel moves without E won't match the regex above
+                        if e_end < 0:
+                            # This is a retraction - skip it, update E tracking, output as-is
+                            infill_current_e = e_end
+                            # Don't update X/Y for retractions
+                            # Fall through to output as-is (don't continue, let it reach the bottom)
+                        else:
+                            # This is an extrusion or unretraction
+                            # Calculate delta for this move
+                            x1 = infill_current_x
+                            y1 = infill_current_y
+                            e_start = infill_current_e
                             e_delta = e_end - e_start
                             
-                            segments = segment_line(x1, y1, x2, y2, segment_length)
+                            # CRITICAL: Detect G92 E0 resets (negative delta but positive e_end)
+                            # When E resets (e.g., 7.12 -> 1.75), e_delta is negative but e_end is positive
+                            # Grid building would INCLUDE this (checks e_end >= 0)
+                            # Processing must do the same!
+                            if e_delta < 0 and e_end >= 0:
+                                # G92 E0 reset detected - reset tracking and treat as new extrusion start
+                                logging.info(f"[INFILL] Line {i}: G92 E0 reset detected (e_delta={e_delta:.5f}, e_end={e_end:.5f}), resetting tracking")
+                                infill_current_e = 0  # Reset to 0 to match G92 E0
+                                e_start = 0  # Recalculate from 0
+                                e_delta = e_end - e_start  # Now positive!
                             
-                            # Calculate total XY distance for the move
-                            total_xy_distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-                            
-                            # Calculate base E per mm of XY distance
-                            # This ensures consistent extrusion regardless of segment count
-                            e_per_mm = e_delta / total_xy_distance if total_xy_distance > 0 else 0
-                            
-                            current_e = e_start
-                            prev_segment = None
-                            
-                            # STEP 2: Add Z modulation using LUT with wall-proximity tapering
-                            # Reduce modulation near walls/perimeters to prevent visible artifacts
-                            
-                            for idx, (sx, sy) in enumerate(segments):
-                                # Calculate XY distance for THIS segment
-                                if prev_segment is not None:
-                                    seg_distance = math.sqrt((sx - prev_segment[0])**2 + (sy - prev_segment[1])**2)
-                                else:
-                                    # First segment - distance from original start point
-                                    seg_distance = math.sqrt((sx - x1)**2 + (sy - y1)**2)
+                            # Only subdivide if delta is positive (actual extrusion, not travel or retraction)
+                            if e_delta > 0:
+                                # Extract feedrate from current line if present
+                                feedrate = None
+                                f_match = re.search(r'F(\d+\.?\d*)', current_line)
+                                if f_match:
+                                    feedrate = float(f_match.group(1)) * nonplanar_feedrate_multiplier
                                 
-                                # Base extrusion for this segment based on XY distance
-                                base_e_for_segment = seg_distance * e_per_mm
+                                logging.info(f"[INFILL] Line {i}: SUBDIVIDING from ({x1:.2f},{y1:.2f}) to ({x2:.2f},{y2:.2f}), e_delta={e_delta:.5f}")
+                                # Mark as processed ONLY when we actually process it
+                                processed_infill_indices.add(i)
+                                # Simple subdivision: from where we are (x1, y1) to where we're going (x2, y2)
+                                segments = segment_line(x1, y1, x2, y2, segment_length)
+                                logging.info(f"[INFILL] Created {len(segments)} segments")
                                 
-                                # Calculate distance to nearest perimeter/solid to taper modulation
-                                # Check surrounding grid cells for solid material at current layer
-                                # Use floor division to match grid building method
-                                gx = int(sx / grid_resolution)
-                                gy = int(sy / grid_resolution)
+                                # Calculate total XY distance for the move
+                                total_xy_distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
                                 
-                                # Find minimum distance to any solid cell at this layer
-                                min_dist_to_solid = float('inf')
-                                search_radius = 5  # Check cells within 5mm
-                                for dx in range(-search_radius, search_radius + 1):
-                                    for dy in range(-search_radius, search_radius + 1):
-                                        check_gx = gx + dx
-                                        check_gy = gy + dy
-                                        # Check if this cell has solid at current layer
-                                        cell_key = (check_gx, check_gy, current_layer)
-                                        if cell_key in solid_at_grid and solid_at_grid[cell_key].get('solid', False):
-                                            # Calculate distance to this solid cell center
-                                            solid_x = check_gx * grid_resolution
-                                            solid_y = check_gy * grid_resolution
-                                            dist = ((sx - solid_x)**2 + (sy - solid_y)**2)**0.5
-                                            min_dist_to_solid = min(min_dist_to_solid, dist)
+                                # Calculate base E per mm of XY distance
+                                # This ensures consistent extrusion regardless of segment count
+                                e_per_mm = e_delta / total_xy_distance if total_xy_distance > 0 else 0
                                 
-                                # Calculate tapering factor based on distance to walls
-                                # Within 2mm of wall: taper to 0
-                                # Beyond 3mm from wall: full modulation
-                                taper_distance_start = 2.0  # Start tapering at 2mm from wall
-                                taper_distance_full = 3.0   # Full modulation beyond 3mm
+                                current_e = e_start
+                                prev_segment = None
                                 
-                                if min_dist_to_solid < taper_distance_start:
-                                    # Very close to wall - no modulation
-                                    taper_factor = 0.0
-                                elif min_dist_to_solid > taper_distance_full:
-                                    # Far from wall - full modulation
-                                    taper_factor = 1.0
-                                else:
-                                    # Transition zone - smooth interpolation
-                                    # Linear interpolation between start and full distances
-                                    t = (min_dist_to_solid - taper_distance_start) / (taper_distance_full - taper_distance_start)
-                                    # Smooth using cosine for gentler transition
-                                    taper_factor = (1.0 - math.cos(t * math.pi)) / 2.0
+                                # STEP 2: Add Z modulation using LUT with wall-proximity tapering
+                                # Reduce modulation near walls/perimeters to prevent visible artifacts
                                 
-                                # Sample 3D noise at this point
-                                noise_value = sample_3d_noise_lut(noise_lut, sx, sy, layer_z)
-                                
-                                # Apply amplitude with wall-proximity tapering
-                                z_offset = amplitude * taper_factor * noise_value
-                                z_mod = layer_z + z_offset
-                                
-                                # Get safezone bounds for this grid cell
-                                local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
-                                    gx, gy, current_layer, grid_cell_solid_regions, base_layer_height
-                                )
-                                
-                                # Clamp Z to safe range
-                                z_mod_original = z_mod
-                                if local_z_min > -999:  # Valid z_min
-                                    z_mod = max(local_z_min, z_mod)
-                                if local_z_max < 999:  # Valid z_max
-                                    #z_mod = min(local_z_max - (layers_until_ceiling * base_layer_height), z_mod)
-                                    z_mod = min(local_z_max, z_mod)
-
-                                last_infill_z = z_mod
-                                
-                                # Track actual max Z for this layer (for safe Z-hop)
-                                if current_layer not in actual_layer_max_z or z_mod > actual_layer_max_z[current_layer]:
-                                    actual_layer_max_z[current_layer] = z_mod
-                                
-                                # Calculate E multiplier based on Z lift (only when going UP and if enabled)
-                                # This adds extra material that droops down to bond with layer below
-                                # ONLY apply on first infill layer (when solid is directly below)
-                                # CRITICAL: Start with base extrusion (XY distance), ADD extra for Z lift
-                                adjusted_e_for_segment = base_e_for_segment  # Always extrude for XY distance!
-                                applied_adaptive_extrusion = False  # Track if we actually apply it
-                                
-                                if enable_adaptive_extrusion:
-                                    # Check if this CELL is marked as 'first of safezone' (benefits from adaptive extrusion)
-                                    is_first_infill_layer = False
+                                # Process all segments starting from the first
+                                for idx, (sx, sy) in enumerate(segments):
+                                    # Calculate XY distance for THIS segment from previous segment
+                                    if idx == 0:
+                                        # First segment - distance from start point (x1, y1) to first segment point
+                                        # This is where we start extrusion (distance > 0 from entry point to first segment)
+                                        seg_distance = math.sqrt((sx - x1)**2 + (sy - y1)**2)
+                                    else:
+                                        # Subsequent segments - distance from previous segment point
+                                        seg_distance = math.sqrt((sx - prev_segment[0])**2 + (sy - prev_segment[1])**2)
                                     
+                                    # Base extrusion for this segment based on XY distance
+                                    base_e_for_segment = seg_distance * e_per_mm
+                                    
+                                    # Calculate distance to nearest perimeter/solid to taper modulation
+                                    # Check surrounding grid cells for solid material at current layer
+                                    # Use floor division to match grid building method
+                                    gx = int(sx / grid_resolution)
+                                    gy = int(sy / grid_resolution)
+                                    
+                                    # Find minimum distance to any solid cell at this layer
+                                    min_dist_to_solid = float('inf')
+                                    search_radius = 5  # Check cells within 5mm
+                                    for dx in range(-search_radius, search_radius + 1):
+                                        for dy in range(-search_radius, search_radius + 1):
+                                            check_gx = gx + dx
+                                            check_gy = gy + dy
+                                            # Check if this cell has solid at current layer
+                                            cell_key = (check_gx, check_gy, current_layer)
+                                            if cell_key in solid_at_grid and solid_at_grid[cell_key].get('solid', False):
+                                                # Calculate distance to this solid cell center
+                                                solid_x = check_gx * grid_resolution
+                                                solid_y = check_gy * grid_resolution
+                                                dist = ((sx - solid_x)**2 + (sy - solid_y)**2)**0.5
+                                                min_dist_to_solid = min(min_dist_to_solid, dist)
+                                    
+                                    # Calculate tapering factor based on distance to walls
+                                    # Within 2mm of wall: taper to 0
+                                    # Beyond 3mm from wall: full modulation
+                                    taper_distance_start = 2.0  # Start tapering at 2mm from wall
+                                    taper_distance_full = 3.0   # Full modulation beyond 3mm
+                                    
+                                    if min_dist_to_solid < taper_distance_start:
+                                        # Very close to wall - no modulation
+                                        taper_factor = 0.0
+                                    elif min_dist_to_solid > taper_distance_full:
+                                        # Far from wall - full modulation
+                                        taper_factor = 1.0
+                                    else:
+                                        # Transition zone - smooth interpolation
+                                        # Linear interpolation between start and full distances
+                                        t = (min_dist_to_solid - taper_distance_start) / (taper_distance_full - taper_distance_start)
+                                        # Smooth using cosine for gentler transition
+                                        taper_factor = (1.0 - math.cos(t * math.pi)) / 2.0
+                                    
+                                    # Sample 3D noise at this point
+                                    noise_value = sample_3d_noise_lut(noise_lut, sx, sy, layer_z)
+                                    
+                                    # Apply amplitude with wall-proximity tapering
+                                    z_offset = amplitude * taper_factor * noise_value
+                                    z_mod = layer_z + z_offset
+                                    
+                                    # Get safezone bounds for this grid cell
+                                    local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
+                                        gx, gy, current_layer, grid_cell_solid_regions, base_layer_height
+                                    )
+                                    
+                                    # Clamp Z to safe range
+                                    z_mod_original = z_mod
+                                    if local_z_min > -999:  # Valid z_min
+                                        z_mod = max(local_z_min, z_mod)
+                                    if local_z_max < 999:  # Valid z_max
+                                        #z_mod = min(local_z_max - (layers_until_ceiling * base_layer_height), z_mod)
+                                        z_mod = min(local_z_max, z_mod)
+
+                                    last_infill_z = z_mod
+                                    
+                                    # Track actual max Z for this layer (for safe Z-hop)
+                                    if current_layer not in actual_layer_max_z or z_mod > actual_layer_max_z[current_layer]:
+                                        actual_layer_max_z[current_layer] = z_mod
+                                    
+                                    # Calculate E multiplier based on Z lift (only when going UP and if enabled)
+                                    # This adds extra material that droops down to bond with layer below
+                                    # ONLY apply on first infill layer (when solid is directly below)
+                                    # CRITICAL: Start with base extrusion (XY distance), ADD extra for Z lift
+                                    adjusted_e_for_segment = base_e_for_segment  # Always extrude for XY distance!
+                                    applied_adaptive_extrusion = False  # Track if we actually apply it
+                                    
+                                    if enable_adaptive_extrusion:
+                                        # Check if this CELL is marked as 'first of safezone' (benefits from adaptive extrusion)
+                                        is_first_infill_layer = False
+                                        
+                                        if (gx, gy, current_layer) in infill_at_grid:
+                                            cell_data = infill_at_grid[(gx, gy, current_layer)]
+                                            if isinstance(cell_data, dict):
+                                                is_first_infill_layer = cell_data.get('is_first_of_safezone', False)
+                                        
+                                        if is_first_infill_layer:
+                                            z_lift = z_mod - layer_z  # How much above base layer
+                                            
+                                            if z_lift > 0:  # Only when lifting UP
+                                                # ADD extra material proportional to lift
+                                                # Formula: base_e + (base_e * (z_lift / layer_height) * multiplier)
+                                                lift_in_layers = z_lift / base_layer_height
+                                                extra_e = base_e_for_segment * lift_in_layers * adaptive_extrusion_multiplier
+                                                adjusted_e_for_segment += extra_e  # ADD to base!
+                                                applied_adaptive_extrusion = True
+                                    
+                                    # Update current E position
+                                    current_e += adjusted_e_for_segment
+                                    
+                                    # Add a comment once per layer when adaptive extrusion is being applied
+                                    if applied_adaptive_extrusion and not adaptive_comment_added:
+                                        total_multiplier = adjusted_e_for_segment / base_e_for_segment if base_e_for_segment > 0 else 1.0
+                                        write_and_track(output_buffer, f"; Adaptive E: {total_multiplier:.2f}x (z_lift={z_lift:.3f}mm, local_z_min={local_z_min:.2f}, layer_z={layer_z:.2f})\n", recent_output_lines)
+                                        adaptive_comment_added = True
+                                    
+                                    # Save current segment position for next iteration
+                                    prev_segment = (sx, sy)
+                                    
+                                    # ========== VALLEY FILLING ==========
+                                    # Check if this CELL is marked as 'last of safezone' (needs valley filling)
+                                    # This is per-cell, not per-layer!
+                                    cell_needs_valley_fill = False
                                     if (gx, gy, current_layer) in infill_at_grid:
                                         cell_data = infill_at_grid[(gx, gy, current_layer)]
                                         if isinstance(cell_data, dict):
-                                            is_first_infill_layer = cell_data.get('is_first_of_safezone', False)
+                                            cell_needs_valley_fill = cell_data.get('is_last_of_safezone', False)
                                     
-                                    if is_first_infill_layer:
-                                        z_lift = z_mod - layer_z  # How much above base layer
+                                    # If Z drops below layer_z, collect segments and fill when valley ends
+                                    valley_threshold = 0.05  # 0.05mm below layer_z to trigger valley filling
+                                    
+                                    # Detect valley entry (only if this CELL needs it)
+                                    if cell_needs_valley_fill and not in_valley and z_mod < layer_z - valley_threshold:
+                                        in_valley = True
+                                        valley_segments = []
+                                        valley_start_e = current_e - adjusted_e_for_segment
+                                        write_and_track(output_buffer, f"; Valley ENTER at segment {idx} (cell {gx},{gy} is last of safezone)\n", recent_output_lines)
+                                    
+                                    # Collect segments while in valley
+                                    if in_valley:
+                                        valley_segments.append({
+                                            'x': sx,
+                                            'y': sy,
+                                            'z': z_mod,
+                                            'e_delta': adjusted_e_for_segment,
+                                            'feedrate': feedrate
+                                        })
+                                    
+                                    # Detect valley exit
+                                    valley_exit = False
+                                    if in_valley and z_mod >= layer_z - valley_threshold:
+                                        valley_exit = True
+                                    
+                                    # Process valley exit
+                                    if valley_exit:
+                                        write_and_track(output_buffer, f"; Valley EXIT - filling {len(valley_segments)} segments\n", recent_output_lines)
                                         
-                                        if z_lift > 0:  # Only when lifting UP
-                                            # ADD extra material proportional to lift
-                                            # Formula: base_e + (base_e * (z_lift / layer_height) * multiplier)
-                                            lift_in_layers = z_lift / base_layer_height
-                                            extra_e = base_e_for_segment * lift_in_layers * adaptive_extrusion_multiplier
-                                            adjusted_e_for_segment += extra_e  # ADD to base!
-                                            applied_adaptive_extrusion = True
-                                
-                                # Update current E position
-                                current_e += adjusted_e_for_segment
-                                
-                                # Add a comment once per layer when adaptive extrusion is being applied
-                                if applied_adaptive_extrusion and not adaptive_comment_added:
-                                    total_multiplier = adjusted_e_for_segment / base_e_for_segment if base_e_for_segment > 0 else 1.0
-                                    write_and_track(output_buffer, f"; Adaptive E: {total_multiplier:.2f}x (z_lift={z_lift:.3f}mm, local_z_min={local_z_min:.2f}, layer_z={layer_z:.2f})\n", recent_output_lines)
-                                    adaptive_comment_added = True
-                                
-                                # Save current segment position for next iteration
-                                prev_segment = (sx, sy)
-                                
-                                # ========== VALLEY FILLING ==========
-                                # Check if this CELL is marked as 'last of safezone' (needs valley filling)
-                                # This is per-cell, not per-layer!
-                                cell_needs_valley_fill = False
-                                if (gx, gy, current_layer) in infill_at_grid:
-                                    cell_data = infill_at_grid[(gx, gy, current_layer)]
-                                    if isinstance(cell_data, dict):
-                                        cell_needs_valley_fill = cell_data.get('is_last_of_safezone', False)
-                                
-                                # If Z drops below layer_z, collect segments and fill when valley ends
-                                valley_threshold = 0.05  # 0.05mm below layer_z to trigger valley filling
-                                
-                                # Detect valley entry (only if this CELL needs it)
-                                if cell_needs_valley_fill and not in_valley and z_mod < layer_z - valley_threshold:
-                                    in_valley = True
-                                    valley_segments = []
-                                    valley_start_e = current_e - adjusted_e_for_segment
-                                    write_and_track(output_buffer, f"; Valley ENTER at segment {idx} (cell {gx},{gy} is last of safezone)\n", recent_output_lines)
-                                
-                                # Collect segments while in valley
-                                if in_valley:
-                                    valley_segments.append({
-                                        'x': sx,
-                                        'y': sy,
-                                        'z': z_mod,
-                                        'e_delta': adjusted_e_for_segment,
-                                        'feedrate': feedrate
-                                    })
-                                
-                                # Detect valley exit
-                                valley_exit = False
-                                if in_valley and z_mod >= layer_z - valley_threshold:
-                                    valley_exit = True
-                                
-                                # Process valley exit
-                                if valley_exit:
-                                    write_and_track(output_buffer, f"; Valley EXIT - filling {len(valley_segments)} segments\n", recent_output_lines)
+                                        # Output all valley segments at their original Z (the valley path)
+                                        for seg in valley_segments:
+                                            if seg['feedrate'] is not None:
+                                                write_and_track(output_buffer,
+                                                    f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{seg['z']:.3f} E{valley_start_e + seg['e_delta']:.5f} F{int(seg['feedrate'])}\n", recent_output_lines
+                                                )
+                                            else:
+                                                write_and_track(output_buffer,
+                                                    f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{seg['z']:.3f} E{valley_start_e + seg['e_delta']:.5f}\n", recent_output_lines
+                                                )
+                                            valley_start_e += seg['e_delta']
+                                        
+                                        # FILL THE VALLEY - go back and forth to build up to layer_z
+                                        min_z = min(seg['z'] for seg in valley_segments)
+                                        valley_depth = layer_z - min_z
+                                        num_fill_passes = max(1, int(valley_depth / 0.1))  # 0.1mm increments
+                                        
+                                        for fill_pass in range(num_fill_passes):
+                                            fill_z_offset = (fill_pass + 1) * (valley_depth / num_fill_passes)
+                                            current_fill_z = min_z + fill_z_offset
+                                            
+                                            # Filter segments that need filling at this height
+                                            segments_to_fill = [seg for seg in valley_segments if seg['z'] < current_fill_z - 0.01]
+                                            
+                                            if len(segments_to_fill) == 0:
+                                                break
+                                            
+                                            # Alternate direction: odd passes go forward, even passes go reverse
+                                            if fill_pass % 2 == 0:
+                                                # Even passes: REVERSE direction
+                                                for seg in reversed(segments_to_fill):
+                                                    valley_start_e += seg['e_delta'] * 0.5  # 50% extrusion for fill
+                                                    write_and_track(output_buffer,
+                                                        f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
+                                                    )
+                                            else:
+                                                # Odd passes: FORWARD direction
+                                                for seg in segments_to_fill:
+                                                    valley_start_e += seg['e_delta'] * 0.5  # 50% extrusion for fill
+                                                    write_and_track(output_buffer,
+                                                        f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
+                                                    )
+                                        
+                                        # Reset valley tracking
+                                        in_valley = False
+                                        valley_segments = []
+                                        current_e = valley_start_e  # Sync current_e with valley fill
                                     
-                                    # Output all valley segments at their original Z (the valley path)
-                                    for seg in valley_segments:
-                                        if seg['feedrate'] is not None:
-                                            write_and_track(output_buffer,
-                                                f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{seg['z']:.3f} E{valley_start_e + seg['e_delta']:.5f} F{int(seg['feedrate'])}\n", recent_output_lines
+                                    # Update prev_z for next iteration
+                                    prev_z = z_mod
+                                    
+                                    # Output segment only if NOT in valley (valley segments are output during fill)
+                                    if not in_valley:
+                                        # Output with Z modulation, adjusted E, and boosted feedrate
+                                        if feedrate is not None:
+                                            write_and_track(output_buffer, 
+                                                f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(feedrate)}\n", recent_output_lines
                                             )
                                         else:
-                                            write_and_track(output_buffer,
-                                                f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{seg['z']:.3f} E{valley_start_e + seg['e_delta']:.5f}\n", recent_output_lines
+                                            write_and_track(output_buffer, 
+                                                f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f}\n", recent_output_lines
                                             )
-                                        valley_start_e += seg['e_delta']
-                                    
-                                    # FILL THE VALLEY - go back and forth to build up to layer_z
-                                    min_z = min(seg['z'] for seg in valley_segments)
-                                    valley_depth = layer_z - min_z
-                                    num_fill_passes = max(1, int(valley_depth / 0.1))  # 0.1mm increments
-                                    
-                                    for fill_pass in range(num_fill_passes):
-                                        fill_z_offset = (fill_pass + 1) * (valley_depth / num_fill_passes)
-                                        current_fill_z = min_z + fill_z_offset
-                                        
-                                        # Filter segments that need filling at this height
-                                        segments_to_fill = [seg for seg in valley_segments if seg['z'] < current_fill_z - 0.01]
-                                        
-                                        if len(segments_to_fill) == 0:
-                                            break
-                                        
-                                        # Alternate direction: odd passes go forward, even passes go reverse
-                                        if fill_pass % 2 == 0:
-                                            # Even passes: REVERSE direction
-                                            for seg in reversed(segments_to_fill):
-                                                valley_start_e += seg['e_delta'] * 0.5  # 50% extrusion for fill
-                                                write_and_track(output_buffer,
-                                                    f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
-                                                )
-                                        else:
-                                            # Odd passes: FORWARD direction
-                                            for seg in segments_to_fill:
-                                                valley_start_e += seg['e_delta'] * 0.5  # 50% extrusion for fill
-                                                write_and_track(output_buffer,
-                                                    f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
-                                                )
-                                    
-                                    # Reset valley tracking
-                                    in_valley = False
-                                    valley_segments = []
-                                    current_e = valley_start_e  # Sync current_e with valley fill
                                 
-                                # Update prev_z for next iteration
-                                prev_z = z_mod
+                                # CRITICAL: Update tracking positions to END of this move!
+                                # Use the ACTUAL final position after all segments were output
+                                # current_e might differ from e_end due to adaptive extrusion/valley filling
+                                infill_current_x = x2
+                                infill_current_y = y2
+                                infill_current_e = current_e  # Use actual E after segments, not original e_end
                                 
-                                # Output segment only if NOT in valley (valley segments are output during fill)
-                                if not in_valley:
-                                    # Output with Z modulation, adjusted E, and boosted feedrate
-                                    if feedrate is not None:
-                                        write_and_track(output_buffer, 
-                                            f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(feedrate)}\n", recent_output_lines
-                                        )
-                                    else:
-                                        write_and_track(output_buffer, 
-                                            f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f}\n", recent_output_lines
-                                        )
-                            i += 1
-                            continue
+                                i += 1
+                                continue
+                            else:
+                                # e_delta <= 0: could be travel (e_delta==0) or unretraction
+                                # Update E tracking but don't subdivide
+                                logging.info(f"[INFILL-SKIP] Line {i}: e_delta={e_delta:.5f} (e_start={e_start:.5f}, e_end={e_end:.5f})")
+                                infill_current_x = x2
+                                infill_current_y = y2
+                                infill_current_e = e_end
                 
                 # Boost feedrate for standalone F commands (e.g., "G1 F3600")
                 if current_line.startswith('G1') and 'F' in current_line and 'X' not in current_line and 'Y' not in current_line and 'E' not in current_line:
@@ -2958,7 +3041,24 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         i += 1
                         continue
                 
-                # If we get here, the line wasn't processed - append as-is
+                # If we get here, the line wasn't processed - append as-is  
+                # Update position tracking for ANY unprocessed G1 line
+                if current_line.startswith('G1') and i not in processed_infill_indices:
+                    # Update X position if present
+                    x_match = re.search(r'X([-+]?\d*\.?\d+)', current_line)
+                    if x_match:
+                        infill_current_x = float(x_match.group(1))
+                    
+                    # Update Y position if present
+                    y_match = re.search(r'Y([-+]?\d*\.?\d+)', current_line)
+                    if y_match:
+                        infill_current_y = float(y_match.group(1))
+                    
+                    # Update E position if present
+                    e_match = re.search(r'E([-+]?\d*\.?\d+)', current_line)
+                    if e_match:
+                        infill_current_e = float(e_match.group(1))
+                
                 write_and_track(output_buffer, current_line, recent_output_lines)
                 i += 1
             
