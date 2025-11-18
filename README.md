@@ -15,6 +15,7 @@ SilkSteel is an advanced G-code post-processing tool that applies multiple optim
 - **Smoothificator**: Splits thick external perimeters into multiple ultra-thin passes for glass-smooth surfaces
 - **Bricklayers**: Z-shifts alternating internal perimeters to create interlocking "brick pattern" for superior layer adhesion
 - **Non-planar Infill**: Modulates Z height during infill printing to mechanically interlock with adjacent layers
+- **Valley Filling**: Intelligently fills gaps between infill layers to prevent air pockets and improve strength
 - **Safe Z-hop**: Intelligently lifts the nozzle during travel moves to prevent collisions with already-printed geometry
 
 The result? Prints with **silk-smooth exteriors** and **steel-strong interiors**.
@@ -68,6 +69,17 @@ Modulates Z height during infill printing to create 3D wave patterns:
 - Significantly improves infill-to-perimeter bonding
 
 **Best for:** Large flat surfaces, parts with sparse infill, structural components
+
+### 🏔️ Valley Filling (Automatic with Non-planar Infill)
+Intelligently fills the gaps (valleys) created by non-planar infill:
+- Detects when infill dips below the current layer height
+- Automatically fills valleys with multiple passes, building back up to layer height
+- Creates gaps at infill crossing points to prevent over-extrusion
+- Only the last crossing gets filled to minimize collisions
+- Uses 50% extrusion rate for gradual valley filling
+- Dramatically improves strength by eliminating air pockets between layers
+
+**Best for:** Automatically enabled with non-planar infill - no configuration needed!
 
 ### 🛡️ Safe Z-hop (Enabled by Default)
 Prevents nozzle collisions during travel moves:
@@ -296,10 +308,15 @@ python SilkSteel.py model.gcode -o output.gcode -full
    - Calculates safe Z ranges (gaps between solid layers)
    - Stores min/max safe Z per grid cell to prevent collisions
 
-3. **Pass 3: Process Infill with Z Modulation**
+3. **Pass 3: Process Infill with Z Modulation & Valley Filling**
    - Subdivides infill lines into small segments
    - Applies sine wave or Perlin noise pattern to calculate target Z
    - Clamps Z values to safe range for each grid cell
+   - **Valley Detection**: When Z drops below layer height, enters valley mode
+   - **Valley Filling**: Collects all segments in valley, then fills with multiple passes
+   - **Crossing Detection**: Skips valley fill at infill crossing points (except last one)
+   - **Smart Gaps**: Creates gaps where infill lines cross to prevent collisions
+   - **Crossing Countdown**: Decrements crossing count after each valley passes through
    - Updates E values proportionally to actual 3D line length
    - Boosts feedrate for non-planar moves
 
@@ -342,6 +359,12 @@ python SilkSteel.py model.gcode -o output.gcode -full
 
 ### Issue: Non-planar infill colliding with walls
 **Solution**: Reduce amplitude or check grid detection with `-debug-full` flag to visualize solid occupancy
+
+### Issue: Valleys not filling properly / Air pockets in print
+**Solution**: Valley filling is automatic with non-planar infill - ensure you're using `-enableNonPlanar` or `-full`
+
+### Issue: Over-extrusion at infill crossings
+**Solution**: This is now prevented by the crossing detection system - gaps are automatically created at crossing points except the last one
 
 ### Issue: Grid shows solid where there shouldn't be any
 **Solution**: This was fixed - script now detects retractions (E < 0.01) and breaks tracking across travel moves

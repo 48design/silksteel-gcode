@@ -1045,7 +1045,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         total_layers = max(z_layer_map.keys()) if z_layer_map else 0
         logging.info(f"  Print: X[{x_min:.1f}, {x_max:.1f}], Y[{y_min:.1f}, {y_max:.1f}], {total_layers} layers")
         logging.info(f"  Found {len(z_layer_map)} unique Z heights")
-        if debug >= 1:
+        if debug >= 3:
             print(f"[DEBUG] Found {total_layers} layers")
         
         # Second pass: Mark which grid cells have solid infill at each layer
@@ -1068,6 +1068,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         last_solid_coords = None  # Track actual X,Y coordinates for DDA
         last_infill_pos = None  # Track last position for infill
         last_infill_coords = None  # Track actual X,Y coordinates for infill
+        grid_build_pos = {'x': 0.0, 'y': 0.0}  # Track global position during grid building
         debug_line_count = 0
         debug_cells_marked = 0
         type_markers_seen = set()  # Track all TYPE markers we encounter
@@ -1076,6 +1077,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         for line in lines:
             line_number += 1
+            
+            # Update global position tracker for grid building
+            if line.startswith('G1') or line.startswith('G0'):
+                x_match = REGEX_X.search(line)
+                y_match = REGEX_Y.search(line)
+                if x_match:
+                    grid_build_pos['x'] = float(x_match.group(1))
+                if y_match:
+                    grid_build_pos['y'] = float(y_match.group(1))
+            
             if ';LAYER:' in line:
                 layer_match = re.search(r';LAYER:(\d+)', line)
                 if layer_match:
@@ -1118,8 +1129,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
 
                 in_solid_infill = True
                 in_internal_infill = False
-                last_solid_pos = None  # Reset when entering solid infill or perimeter
-                last_solid_coords = None
+                # Initialize solid tracking from current global position
+                last_solid_coords = (grid_build_pos['x'], grid_build_pos['y'])
+                last_solid_pos = (int(grid_build_pos['x'] / grid_resolution), int(grid_build_pos['y'] / grid_resolution))
                 last_infill_pos = None
                 last_infill_coords = None
                 if temp_z not in solid_infill_heights:
@@ -1129,8 +1141,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 in_solid_infill = False
                 last_solid_pos = None
                 last_solid_coords = None
-                last_infill_pos = None
-                last_infill_coords = None
+                # Initialize infill tracking from current global position
+                last_infill_coords = (grid_build_pos['x'], grid_build_pos['y'])
+                last_infill_pos = (int(grid_build_pos['x'] / grid_resolution), int(grid_build_pos['y'] / grid_resolution))
             elif ';TYPE:' in line:
                 # Track all TYPE markers for debugging
                 type_match = re.search(r';TYPE:([^\n]+)', line)
@@ -1258,7 +1271,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 debug_cells_marked += cells_marked
                                 
                                 # Debug output for first few lines
-                                if debug >= 1 and debug_line_count <= 10:
+                                if debug >= 3 and debug_line_count <= 10:
                                     print(f"[DEBUG] Line {debug_line_count}: ({last_gx},{last_gy}) -> ({gx},{gy}) marked {cells_marked} cells (voxel traversal)")
                             else:
                                 # First point - just mark the cell
@@ -1280,6 +1293,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 if line.startswith('G0'):
                     last_infill_pos = None
                     last_infill_coords = None
+                    
+                    # BUT track position from G0 travel for next extrusion start
+                    if 'X' in line or 'Y' in line:
+                        x = extract_x(line)
+                        y = extract_y(line)
+                        if x is not None and y is not None:
+                            last_infill_coords = (x, y)
+                            last_infill_pos = (int(x / grid_resolution), int(y / grid_resolution))
                 
                 # Reset tracking on retraction (NEGATIVE E value only)
                 if line.startswith('G1') and 'E' in line:
@@ -1369,10 +1390,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     solid_at_grid[cell_key] = {'solid': False, 'infill_crossings': 1}
                                 else:
                                     solid_at_grid[cell_key]['infill_crossings'] += 1
-                            
-                            # Save coordinates for next iteration
-                            last_infill_coords = (x, y)
-                            last_infill_pos = (gx, gy)
+                        
+                        # ALWAYS save coordinates for next iteration (even for travel moves)
+                        # This ensures next extrusion knows where it's starting from
+                        last_infill_coords = (x, y)
+                        last_infill_pos = (gx, gy)
             
             # Track previous line for debugging
             prev_line = line
@@ -1452,24 +1474,25 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info(f"  Marked {first_of_safezone_count} 'first of safezone' cells (adaptive extrusion)")
         logging.info(f"  Marked {last_of_safezone_count} 'last of safezone' cells (valley filling)")
         
-        if debug >= 1:
+        if debug >= 3:
             print(f"[DEBUG] Marked {len(solid_at_grid)} grid cells with solid")
             print(f"[DEBUG] Processed {debug_line_count} line segments, avg {debug_cells_marked/max(1,debug_line_count):.1f} cells per line")
             print(f"[DEBUG] Built infill grid with {len(infill_at_grid)} cells ({first_of_safezone_count} first + {last_of_safezone_count} last)")
             print(f"\n[DEBUG] All TYPE markers seen in G-code: {sorted(type_markers_seen)}")
             
-            # Show which layers have solid infill
-            layers_with_solid = sorted(set(layer for (gx, gy, layer), cell_data in solid_at_grid.items() if cell_data.get('solid', False)))
-            print(f"[DEBUG] Layers with solid infill: {layers_with_solid[:30]}..." if len(layers_with_solid) > 30 else f"[DEBUG] Layers with solid infill: {layers_with_solid}")
-            
-            # Show coverage per layer for first few layers
-            print(f"\n[DEBUG] Grid cell coverage for first 10 layers:")
-            for layer in layers_with_solid[:10]:
-                cells_at_layer = [(gx, gy) for (gx, gy, lay), cell_data in solid_at_grid.items() if lay == layer and cell_data.get('solid', False)]
-                layer_z = z_layer_map.get(layer, "unknown")
-                print(f"  Layer {layer} (Z={layer_z}): {len(cells_at_layer)} cells marked")
-                if len(cells_at_layer) < 20:  # If few cells, show them
-                    print(f"    Cells: {sorted(cells_at_layer)}")
+            # Show which layers have solid infill (only in high debug mode)
+            if debug >= 3:
+                layers_with_solid = sorted(set(layer for (gx, gy, layer), cell_data in solid_at_grid.items() if cell_data.get('solid', False)))
+                print(f"[DEBUG] Layers with solid infill: {layers_with_solid[:30]}..." if len(layers_with_solid) > 30 else f"[DEBUG] Layers with solid infill: {layers_with_solid}")
+                
+                # Show coverage per layer for first few layers
+                print(f"\n[DEBUG] Grid cell coverage for first 10 layers:")
+                for layer in layers_with_solid[:10]:
+                    cells_at_layer = [(gx, gy) for (gx, gy, lay), cell_data in solid_at_grid.items() if lay == layer and cell_data.get('solid', False)]
+                    layer_z = z_layer_map.get(layer, "unknown")
+                    print(f"  Layer {layer} (Z={layer_z}): {len(cells_at_layer)} cells marked")
+                    if len(cells_at_layer) < 20:  # If few cells, show them
+                        print(f"    Cells: {sorted(cells_at_layer)}")
         
         # Third pass: Calculate safe Z range PER GRID CELL
         # For each grid cell (gx, gy), track the safe Z range between solid layers
@@ -1557,7 +1580,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         total_safe_ranges = sum(len(ranges) for ranges in grid_cell_safe_z.values())
         logging.info(f"  Total safe range entries: {total_safe_ranges}")
         
-        if debug >= 1:
+        if debug >= 3:
             print(f"[DEBUG] Calculated safe Z ranges for {len(all_grid_positions)} unique grid cells")
             print(f"[DEBUG] Identified {sum(len(regions) for regions in grid_cell_solid_regions.values())} solid regions")
             total_safe_ranges = sum(len(ranges) for ranges in grid_cell_safe_z.values())
@@ -1583,7 +1606,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     print(f"    Layer {layer_num} (Z={layer_z:.2f}): safe range [{z_min:.2f}, {z_max:.2f}]")
                 if len(ranges) > 3:
                     print(f"    ... and {len(ranges) - 3} more ranges")
-            
+        
+        if debug >= 2:
             # Generate debug PNG images for all layers
             print(f"\n[DEBUG] Generating layer visualization PNGs...")
             if HAS_PIL:
@@ -1650,7 +1674,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         # Get all layers that have solid or infill material anywhere (for visualization)
         all_solid_layers = sorted(set(layer for (gx, gy, layer) in solid_at_grid.keys()))
-        if debug >= 1:
+        if debug >= 3:
             print(f"[DEBUG] Found solid infill on {len(all_solid_layers)} layers: {all_solid_layers[:10]}..." if len(all_solid_layers) > 10 else f"[DEBUG] Found solid infill on {len(all_solid_layers)} layers: {all_solid_layers}")
         
         # Cache grid bounds (optimization: calculate once, reuse everywhere)
@@ -1737,7 +1761,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             center_gx = (grid_x_min + grid_x_max) // 2
             center_gy = (grid_y_min + grid_y_max) // 2
             
-            if debug >= 1:
+            if debug >= 3:
                 msg = f"Cross-section center: gx={center_gx} (X={center_gx * grid_resolution:.1f}mm), gy={center_gy} (Y={center_gy * grid_resolution:.1f}mm)"
                 print(f"[DEBUG] {msg}")
                 logging.info(f"[DEBUG] {msg}")
@@ -2666,7 +2690,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         # ========== NON-PLANAR INFILL: Process infill with Z modulation ==========
         elif enable_nonplanar and (";TYPE:Internal infill" in line):
-            logging.info(f"[INFILL] Entering infill section at line {i}, line content: {line.strip()}")
+            if debug >= 3:
+                logging.info(f"[INFILL] Entering infill section at line {i}, line content: {line.strip()}")
             in_infill = True
             write_and_track(output_buffer, line, recent_output_lines)
             i += 1
@@ -2682,7 +2707,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             infill_current_y = position['y']
             infill_current_e = position['e']
             
-            logging.info(f"[INFILL] Starting position: X={infill_current_x:.3f}, Y={infill_current_y:.3f}, E={infill_current_e:.5f}")
+            if debug >= 1:
+                logging.info(f"[INFILL] Starting position: X={infill_current_x:.3f}, Y={infill_current_y:.3f}, E={infill_current_e:.5f}")
             
             # Valley filling tracking
             # Valley filling is applied PER-CELL based on infill_at_grid metadata
@@ -2715,7 +2741,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 
                 if ";TYPE:" in current_line:
                     in_infill = False
-                    logging.info(f"[INFILL] Exiting infill section at line {i}, line content: {current_line.strip()}")
+                    if debug >= 3:
+                        logging.info(f"[INFILL] Exiting infill section at line {i}, line content: {current_line.strip()}")
                     # CRITICAL: Restore proper Z height after infill with non-planar modulation
                     if last_infill_z != layer_z:
                         write_and_track(output_buffer, f"G1 Z{layer_z:.3f} F8400 ; Restore layer Z after non-planar infill\n", recent_output_lines)
@@ -2760,7 +2787,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # Processing must do the same!
                             if e_delta < 0 and e_end >= 0:
                                 # G92 E0 reset detected - reset tracking and treat as new extrusion start
-                                logging.info(f"[INFILL] Line {i}: G92 E0 reset detected (e_delta={e_delta:.5f}, e_end={e_end:.5f}), resetting tracking")
+                                if debug >= 3:
+                                    logging.info(f"[INFILL] Line {i}: G92 E0 reset detected (e_delta={e_delta:.5f}, e_end={e_end:.5f}), resetting tracking")
                                 infill_current_e = 0  # Reset to 0 to match G92 E0
                                 e_start = 0  # Recalculate from 0
                                 e_delta = e_end - e_start  # Now positive!
@@ -2773,12 +2801,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 if f_match:
                                     feedrate = float(f_match.group(1)) * nonplanar_feedrate_multiplier
                                 
-                                logging.info(f"[INFILL] Line {i}: SUBDIVIDING from ({x1:.2f},{y1:.2f}) to ({x2:.2f},{y2:.2f}), e_delta={e_delta:.5f}")
+                                if debug >= 3:
+                                    logging.info(f"[INFILL] Line {i}: SUBDIVIDING from ({x1:.2f},{y1:.2f}) to ({x2:.2f},{y2:.2f}), e_delta={e_delta:.5f}")
                                 # Mark as processed ONLY when we actually process it
                                 processed_infill_indices.add(i)
                                 # Simple subdivision: from where we are (x1, y1) to where we're going (x2, y2)
                                 segments = segment_line(x1, y1, x2, y2, segment_length)
-                                logging.info(f"[INFILL] Created {len(segments)} segments")
+                                if debug >= 3:
+                                    logging.info(f"[INFILL] Created {len(segments)} segments")
                                 
                                 # Calculate total XY distance for the move
                                 total_xy_distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
@@ -2930,7 +2960,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         in_valley = True
                                         valley_segments = []
                                         valley_start_e = current_e - adjusted_e_for_segment
-                                        write_and_track(output_buffer, f"; Valley ENTER at segment {idx} (cell {gx},{gy} is last of safezone)\n", recent_output_lines)
+                                        if debug >= 2:
+                                            write_and_track(output_buffer, f"; Valley ENTER at segment {idx} (cell {gx},{gy} is last of safezone)\n", recent_output_lines)
                                     
                                     # Collect segments while in valley
                                     if in_valley:
@@ -2949,7 +2980,19 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     
                                     # Process valley exit
                                     if valley_exit:
-                                        write_and_track(output_buffer, f"; Valley EXIT - filling {len(valley_segments)} segments\n", recent_output_lines)
+                                        if debug >= 2:
+                                            write_and_track(output_buffer, f"; Valley EXIT - filling {len(valley_segments)} segments\n", recent_output_lines)
+                                        
+                                        # Collect all unique crossing cells touched by this valley (for later decrement)
+                                        cells_touched_by_valley = set()
+                                        for seg in valley_segments:
+                                            seg_gx = int(seg['x'] / grid_resolution)
+                                            seg_gy = int(seg['y'] / grid_resolution)
+                                            cell_key = (seg_gx, seg_gy, current_layer)
+                                            
+                                            # Track cells with crossings
+                                            if cell_key in solid_at_grid and solid_at_grid[cell_key].get('infill_crossings', 0) > 0:
+                                                cells_touched_by_valley.add(cell_key)
                                         
                                         # Output all valley segments at their original Z (the valley path)
                                         for seg in valley_segments:
@@ -2981,18 +3024,98 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                             # Alternate direction: odd passes go forward, even passes go reverse
                                             if fill_pass % 2 == 0:
                                                 # Even passes: REVERSE direction
+                                                prev_point = None
                                                 for seg in reversed(segments_to_fill):
-                                                    valley_start_e += seg['e_delta'] * 0.5  # 50% extrusion for fill
-                                                    write_and_track(output_buffer,
-                                                        f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
-                                                    )
+                                                    # For REVERSE direction, segment goes FROM seg TO prev_point (or end)
+                                                    # Check if segment crosses a crossing cell
+                                                    seg_gx = int(seg['x'] / grid_resolution)
+                                                    seg_gy = int(seg['y'] / grid_resolution)
+                                                    end_cell = (seg_gx, seg_gy, current_layer)
+                                                    
+                                                    # Check if we should skip this segment
+                                                    should_skip = False
+                                                    if prev_point is not None:
+                                                        prev_gx = int(prev_point[0] / grid_resolution)
+                                                        prev_gy = int(prev_point[1] / grid_resolution)
+                                                        start_cell = (prev_gx, prev_gy, current_layer)
+                                                        
+                                                        # Check if EITHER endpoint is in a crossing cell with count > 1
+                                                        if start_cell in solid_at_grid:
+                                                            crossing_count = solid_at_grid[start_cell].get('infill_crossings', 0)
+                                                            if crossing_count > 1:
+                                                                should_skip = True
+                                                        if end_cell in solid_at_grid:
+                                                            crossing_count = solid_at_grid[end_cell].get('infill_crossings', 0)
+                                                            if crossing_count > 1:
+                                                                should_skip = True
+                                                    
+                                                    if should_skip:
+                                                        # Skip extrusion (travel only)
+                                                        if debug >= 2:
+                                                            write_and_track(output_buffer,
+                                                                f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} ; Skip fill (crossing)\n", recent_output_lines
+                                                            )
+                                                        else:
+                                                            write_and_track(output_buffer,
+                                                                f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f}\n", recent_output_lines
+                                                            )
+                                                    else:
+                                                        # Extrude normally
+                                                        valley_start_e += seg['e_delta'] * 0.5
+                                                        write_and_track(output_buffer,
+                                                            f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
+                                                        )
+                                                    prev_point = (seg['x'], seg['y'])
                                             else:
                                                 # Odd passes: FORWARD direction
+                                                prev_point = None
                                                 for seg in segments_to_fill:
-                                                    valley_start_e += seg['e_delta'] * 0.5  # 50% extrusion for fill
-                                                    write_and_track(output_buffer,
-                                                        f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
-                                                    )
+                                                    # For FORWARD direction, segment goes FROM prev_point TO seg
+                                                    # Check if segment crosses a crossing cell
+                                                    seg_gx = int(seg['x'] / grid_resolution)
+                                                    seg_gy = int(seg['y'] / grid_resolution)
+                                                    end_cell = (seg_gx, seg_gy, current_layer)
+                                                    
+                                                    # Check if we should skip this segment
+                                                    should_skip = False
+                                                    if prev_point is not None:
+                                                        prev_gx = int(prev_point[0] / grid_resolution)
+                                                        prev_gy = int(prev_point[1] / grid_resolution)
+                                                        start_cell = (prev_gx, prev_gy, current_layer)
+                                                        
+                                                        # Check if EITHER endpoint is in a crossing cell with count > 1
+                                                        if start_cell in solid_at_grid:
+                                                            crossing_count = solid_at_grid[start_cell].get('infill_crossings', 0)
+                                                            if crossing_count > 1:
+                                                                should_skip = True
+                                                        if end_cell in solid_at_grid:
+                                                            crossing_count = solid_at_grid[end_cell].get('infill_crossings', 0)
+                                                            if crossing_count > 1:
+                                                                should_skip = True
+                                                    
+                                                    if should_skip:
+                                                        # Skip extrusion (travel only)
+                                                        if debug >= 2:
+                                                            write_and_track(output_buffer,
+                                                                f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} ; Skip fill (crossing)\n", recent_output_lines
+                                                            )
+                                                        else:
+                                                            write_and_track(output_buffer,
+                                                                f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f}\n", recent_output_lines
+                                                            )
+                                                    else:
+                                                        # Extrude normally
+                                                        valley_start_e += seg['e_delta'] * 0.5
+                                                        write_and_track(output_buffer,
+                                                            f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
+                                                        )
+                                                    prev_point = (seg['x'], seg['y'])
+                                        
+                                        # DECREMENT crossing count for each unique cell touched by this valley
+                                        # This ensures next valley will have one less crossing to skip
+                                        for cell_key in cells_touched_by_valley:
+                                            if cell_key in solid_at_grid and solid_at_grid[cell_key].get('infill_crossings', 0) > 0:
+                                                solid_at_grid[cell_key]['infill_crossings'] -= 1
                                         
                                         # Reset valley tracking
                                         in_valley = False
