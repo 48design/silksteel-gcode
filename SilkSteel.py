@@ -56,7 +56,12 @@ except ImportError:
         print(f"  To enable, manually install with: pip install Pillow")
         pass  # PIL is optional - only needed for debug PNG generation
 
-# Pre-compile regex patterns for performance (compiled once, used thousands of times)
+# =============================================================================
+# PRE-COMPILED REGEX PATTERNS (for performance)
+# =============================================================================
+# These patterns are compiled ONCE at startup and reused thousands of times.
+# Using pre-compiled patterns is ~2-3x faster than re.search() with inline patterns.
+# Always use these via the extract_x/y/z/e/f() functions or parse_gcode_line().
 REGEX_X = re.compile(r'X([-\d.]+)')
 REGEX_Y = re.compile(r'Y([-\d.]+)')
 REGEX_Z = re.compile(r'Z([-\d.]+)')
@@ -65,9 +70,13 @@ REGEX_F = re.compile(r'F(\d+)')
 REGEX_E_SUB = re.compile(r'E[-\d.]+')
 REGEX_Z_SUB = re.compile(r'Z[-\d.]+\s*')
 
-# Helper functions for fast regex operations
+# =============================================================================
+# GCODE PARSING HELPER FUNCTIONS
+# =============================================================================
+# Use these functions instead of manual re.search() calls for consistency and performance.
+
 def extract_x(line):
-    """Extract X coordinate from G-code line"""
+    """Extract X coordinate from G-code line using pre-compiled regex"""
     match = REGEX_X.search(line)
     return float(match.group(1)) if match else None
 
@@ -102,6 +111,44 @@ def replace_f(line, new_f):
 def remove_z(line):
     """Remove Z parameter from G-code line"""
     return REGEX_Z_SUB.sub('', line)
+
+def parse_gcode_line(line):
+    """
+    Parse a G-code line and extract all parameters in one pass.
+    Returns a dict with keys: x, y, z, e, f (values are None if not present in line).
+    This is more efficient than calling extract_x/y/z/e/f separately.
+    
+    Example:
+        params = parse_gcode_line("G1 X10.5 Y20.3 E0.5 F3600")
+        # Returns: {'x': 10.5, 'y': 20.3, 'z': None, 'e': 0.5, 'f': 3600}
+        
+        # Use to update position only if parameter exists:
+        if params['x'] is not None:
+            current_x = params['x']
+    """
+    result = {'x': None, 'y': None, 'z': None, 'e': None, 'f': None}
+    
+    x_match = REGEX_X.search(line)
+    if x_match:
+        result['x'] = float(x_match.group(1))
+    
+    y_match = REGEX_Y.search(line)
+    if y_match:
+        result['y'] = float(y_match.group(1))
+    
+    z_match = REGEX_Z.search(line)
+    if z_match:
+        result['z'] = float(z_match.group(1))
+    
+    e_match = REGEX_E.search(line)
+    if e_match:
+        result['e'] = float(e_match.group(1))
+    
+    f_match = REGEX_F.search(line)
+    if f_match:
+        result['f'] = int(f_match.group(1))
+    
+    return result
 
 def write_line(buffer, line):
     """Write a line to output buffer, ensuring it has a newline"""
@@ -157,6 +204,13 @@ DEFAULT_EXTRUSION_WIDTH = 0.45  # Default extrusion width in mm (typical value)
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
 DEFAULT_SAFE_Z_HOP_MARGIN = 0.5  # mm - safety margin above max Z in layer
 DEFAULT_Z_HOP_RETRACTION = 3.0  # mm - retraction distance during Z-hop to prevent stringing
+
+# Bridge densifier constants
+DEFAULT_ENABLE_BRIDGE_DENSIFIER = False  # Disabled by default (experimental feature)
+DEFAULT_BRIDGE_MIN_LENGTH = 2.0  # mm - Only densify lines longer than this (filters out short bridges)
+DEFAULT_BRIDGE_MAX_SPACING = 0.6  # mm - Maximum spacing between parallel lines to add intermediate (typical bridge line width is 0.4-0.45mm)
+DEFAULT_BRIDGE_MAX_GAP = 3  # Maximum number of connector lines allowed between parallel long lines (for curves)
+DEFAULT_BRIDGE_CONNECTOR_MAX_LENGTH = 0.9  # mm - Fallback value (will be set to 2× actual extrusion width from G-code)
 
 def get_layer_height(gcode_lines):
     """Extract layer height from G-code header comments"""
@@ -394,6 +448,21 @@ def is_in_safezone(gx, gy, layer, grid_cell_solid_regions):
         if region_end_below < layer < region_start_above:
             return True
     return False
+
+def add_inline_comment(gcode_line, comment):
+    """
+    Helper function to add an inline comment to a G-code line.
+    
+    Args:
+        gcode_line: The G-code line (should end with \n)
+        comment: The comment text to append
+    
+    Returns:
+        G-code line with inline comment appended
+    """
+    # Remove trailing newline, add comment, add newline back
+    line = gcode_line.rstrip('\n')
+    return f"{line} ; {comment}\n"
 
 def is_first_of_safezone(gx, gy, layer, infill_at_grid):
     """
@@ -820,6 +889,937 @@ def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_re
         logging.error(f"Error generating LUT visualization for layer {layer_num}: {e}")
         return False
 
+def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_y, connector_max_length, logging, debug=False):
+    """
+    Process a buffered bridge section and densify it by inserting intermediate lines between parallel bridges.
+    
+    Algorithm:
+    1. Parse all extrusion moves, filter by length (keep only long bridge lines)
+    2. For each consecutive pair of long lines, check if parallel
+    3. Calculate perpendicular spacing between them
+    4. If spacing < threshold, insert ONE intermediate line between them
+    5. Use average length and extrusion rate for intermediate
+    
+    Args:
+        buffered_lines: List of G-code lines from the bridge section
+        current_z: Current Z height
+        current_e: Current E position at start of bridge
+        start_x: Current X position at start of bridge (BEFORE first extrusion)
+        start_y: Current Y position at start of bridge (BEFORE first extrusion)
+        connector_max_length: Maximum length of connectors to skip (typically 2× extrusion width)
+        logging: Logger instance
+        debug: If True, add inline comments to output lines
+    
+    Returns:
+        Tuple of (processed_lines, final_e, final_pos) where processed_lines is the densified G-code, 
+        final_e is the updated E position, and final_pos is (x, y) tuple of final position
+    """
+    import math
+    
+    # Helper function to conditionally add comments based on debug mode
+    def comment_if_debug(gcode_line, comment):
+        """Add inline comment only if debug mode is enabled."""
+        if debug:
+            return add_inline_comment(gcode_line, comment)
+        else:
+            return gcode_line
+    
+    # Track E mode to avoid redundant M82/M83 commands
+    # Assume we start in absolute mode (M82)
+    current_e_mode = 'absolute'
+    
+    def set_e_mode(target_mode):
+        """Helper to output E mode changes only when needed."""
+        nonlocal current_e_mode
+        if current_e_mode != target_mode:
+            if target_mode == 'absolute':
+                output.append(f"M82 ; Absolute E mode\n")
+            else:
+                output.append(f"M83 ; Relative E mode\n")
+            current_e_mode = target_mode
+    
+    # Step 1: Parse all extrusion moves
+    # IMPORTANT: prev_x and prev_y start at the position BEFORE the bridge section started!
+    moves = []
+    prev_x, prev_y, prev_e = start_x, start_y, current_e
+    
+    for i, line in enumerate(buffered_lines):
+        if line.startswith("G1") and "X" in line and "Y" in line:
+            x = extract_x(line)
+            y = extract_y(line)
+            e = extract_e(line)
+            
+            if x is not None and y is not None and prev_x is not None and prev_y is not None:
+                dx = x - prev_x
+                dy = y - prev_y
+                length = math.sqrt(dx*dx + dy*dy)
+                
+                e_delta = 0.0
+                if e is not None:
+                    e_delta = e - prev_e
+                
+                # Only keep extrusion moves (positive E)
+                if e_delta > 0:
+                    moves.append({
+                        'x1': prev_x, 'y1': prev_y,
+                        'x2': x, 'y2': y,
+                        'e_start': prev_e,
+                        'e_end': e,
+                        'e_delta': e_delta,
+                        'length': length,
+                        'line_index': i,
+                        'dx': dx,
+                        'dy': dy
+                    })
+                
+                if e is not None:
+                    prev_e = e
+            
+            if x is not None:
+                prev_x = x
+            if y is not None:
+                prev_y = y
+    
+    if len(moves) < 2:
+        # Single move - create edges on both sides and output as serpentine
+        logging.info(f"[BRIDGE] Only {len(moves)} move(s) - creating edges for densification")
+        
+        if len(moves) == 1:
+            move = moves[0]
+            
+            # Calculate perpendicular vector
+            perp_x = -move['dy'] / move['length']
+            perp_y = move['dx'] / move['length']
+            
+            # Use extrusion width (0.4mm) as spacing
+            spacing = 0.4
+            offset = spacing / 2.0
+            
+            # Create three parallel lines: LEFT, MIDDLE (original), RIGHT
+            left_start = (move['x1'] - perp_x * offset, move['y1'] - perp_y * offset)
+            left_end = (move['x2'] - perp_x * offset, move['y2'] - perp_y * offset)
+            
+            right_start = (move['x1'] + perp_x * offset, move['y1'] + perp_y * offset)
+            right_end = (move['x2'] + perp_x * offset, move['y2'] + perp_y * offset)
+            
+            # Calculate E values for edges (same extrusion rate as original)
+            e_per_mm = move['e_delta'] / move['length']
+            edge_e_delta = move['length'] * e_per_mm
+            
+            # Build output with serpentine pattern: LEFT → MIDDLE → RIGHT
+            output = []
+            
+            # Find first G1 line in buffered_lines
+            first_g1_index = 0
+            for idx, line in enumerate(buffered_lines):
+                if line.startswith("G1") and "X" in line and "Y" in line:
+                    first_g1_index = idx
+                    break
+            
+            # Output metadata lines (TYPE, WIDTH, HEIGHT, etc.)
+            for i in range(first_g1_index):
+                output.append(buffered_lines[i])
+            
+            # Start from initial position (start_x, start_y)
+            current_pos = (start_x, start_y)
+            
+            # Calculate distances to LEFT endpoints
+            dist_to_left_start = math.sqrt((left_start[0] - current_pos[0])**2 + (left_start[1] - current_pos[1])**2)
+            dist_to_left_end = math.sqrt((left_end[0] - current_pos[0])**2 + (left_end[1] - current_pos[1])**2)
+            
+            if debug:
+                output.append(f"; [Bridge Densifier] Single line densification (3 parallel lines, spacing={spacing:.3f}mm)\n")
+            set_e_mode('relative')
+            
+            # Draw LEFT edge (choose closest endpoint)
+            if dist_to_left_start < dist_to_left_end:
+                if dist_to_left_start > 0.001:
+                    output.append(comment_if_debug(
+                        f"G0 X{left_start[0]:.3f} Y{left_start[1]:.3f} F8400\n",
+                        f"Connector to LEFT edge {dist_to_left_start:.2f}mm"
+                    ))
+                output.append(comment_if_debug(
+                    f"G1 X{left_end[0]:.3f} Y{left_end[1]:.3f} E{edge_e_delta:.5f} F1800\n",
+                    f"LEFT edge fwd, offset={offset:.2f}mm"
+                ))
+                current_pos = left_end
+            else:
+                if dist_to_left_end > 0.001:
+                    output.append(comment_if_debug(
+                        f"G0 X{left_end[0]:.3f} Y{left_end[1]:.3f} F8400\n",
+                        f"Connector to LEFT edge {dist_to_left_end:.2f}mm"
+                    ))
+                output.append(comment_if_debug(
+                    f"G1 X{left_start[0]:.3f} Y{left_start[1]:.3f} E{edge_e_delta:.5f} F1800\n",
+                    f"LEFT edge rev, offset={offset:.2f}mm"
+                ))
+                current_pos = left_start
+            
+            # Draw MIDDLE (original line) - choose closest endpoint
+            dist_to_mid_start = math.sqrt((move['x1'] - current_pos[0])**2 + (move['y1'] - current_pos[1])**2)
+            dist_to_mid_end = math.sqrt((move['x2'] - current_pos[0])**2 + (move['y2'] - current_pos[1])**2)
+            
+            if dist_to_mid_start < dist_to_mid_end:
+                if dist_to_mid_start > 0.001:
+                    output.append(add_inline_comment(
+                        f"G0 X{move['x1']:.3f} Y{move['y1']:.3f} F8400\n",
+                        f"Connector to MIDDLE {dist_to_mid_start:.2f}mm"
+                    ))
+                output.append(add_inline_comment(
+                    f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{move['e_delta']:.5f} F1800\n",
+                    f"MIDDLE (original) fwd"
+                ))
+                current_pos = (move['x2'], move['y2'])
+            else:
+                if dist_to_mid_end > 0.001:
+                    output.append(add_inline_comment(
+                        f"G0 X{move['x2']:.3f} Y{move['y2']:.3f} F8400\n",
+                        f"Connector to MIDDLE {dist_to_mid_end:.2f}mm"
+                    ))
+                output.append(add_inline_comment(
+                    f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{move['e_delta']:.5f} F1800\n",
+                    f"MIDDLE (original) rev"
+                ))
+                current_pos = (move['x1'], move['y1'])
+            
+            # Draw RIGHT edge - choose closest endpoint
+            dist_to_right_start = math.sqrt((right_start[0] - current_pos[0])**2 + (right_start[1] - current_pos[1])**2)
+            dist_to_right_end = math.sqrt((right_end[0] - current_pos[0])**2 + (right_end[1] - current_pos[1])**2)
+            
+            if dist_to_right_start < dist_to_right_end:
+                if dist_to_right_start > 0.001:
+                    output.append(add_inline_comment(
+                        f"G0 X{right_start[0]:.3f} Y{right_start[1]:.3f} F8400\n",
+                        f"Connector to RIGHT edge {dist_to_right_start:.2f}mm"
+                    ))
+                output.append(add_inline_comment(
+                    f"G1 X{right_end[0]:.3f} Y{right_end[1]:.3f} E{edge_e_delta:.5f} F1800\n",
+                    f"RIGHT edge fwd, offset={offset:.2f}mm"
+                ))
+                current_pos = right_end
+            else:
+                if dist_to_right_end > 0.001:
+                    output.append(add_inline_comment(
+                        f"G0 X{right_end[0]:.3f} Y{right_end[1]:.3f} F8400\n",
+                        f"Connector to RIGHT edge {dist_to_right_end:.2f}mm"
+                    ))
+                output.append(add_inline_comment(
+                    f"G1 X{right_start[0]:.3f} Y{right_start[1]:.3f} E{edge_e_delta:.5f} F1800\n",
+                    f"RIGHT edge rev, offset={offset:.2f}mm"
+                ))
+                current_pos = right_start
+            
+            # Switch back to absolute mode at the end
+            set_e_mode('absolute')
+            
+            # Calculate final E (original E + 2 edges)
+            final_e = move['e_end'] + (2 * edge_e_delta)
+            
+            return output, final_e, current_pos
+        else:
+            # Zero moves - just return buffered lines
+            logging.warning(f"[BRIDGE] No moves found in bridge section!")
+            final_e = current_e
+            return buffered_lines, final_e, (start_x, start_y)
+    
+    # Step 2: Filter by length - keep only long bridge lines (> minimum length threshold)
+    long_moves = [m for m in moves if m['length'] >= DEFAULT_BRIDGE_MIN_LENGTH]
+    
+    logging.info(f"[BRIDGE] Parsed {len(moves)} total moves, filtered to {len(long_moves)} long lines (>= {DEFAULT_BRIDGE_MIN_LENGTH}mm)")
+    
+    # Even if there are no "long" lines, we still want to process short bridge sections
+    # So don't return early - continue with densification logic
+    
+    # Step 3: Mark each move with whether it's a "long" line and calculate intermediates
+    # We'll build a list of what to insert after each line
+    for move in moves:
+        move['is_long'] = move['length'] >= DEFAULT_BRIDGE_MIN_LENGTH
+        move['intermediate_after'] = None  # Will store intermediate data if needed
+        move['is_connector_to_skip'] = False  # Mark short connectors between parallel lines
+    
+    # Step 4: Find pairs of parallel long lines and mark intermediates
+    long_move_indices = [i for i, m in enumerate(moves) if m['is_long']]
+    
+    for i, long_idx in enumerate(long_move_indices):
+        long_move = moves[long_idx]
+        
+        # Look ahead for parallel lines (within gap limit)
+        for lookahead in range(1, min(DEFAULT_BRIDGE_MAX_GAP + 1, len(long_move_indices) - i)):
+            next_long_idx = long_move_indices[i + lookahead]
+            next_move = moves[next_long_idx]
+            
+            # Skip if we already created an intermediate for this long_move
+            if long_move['intermediate_after'] is not None:
+                break
+            
+            # Check if there are ANY moves between these two long lines
+            # If the indices are consecutive in the moves array AND close in space,
+            # they're definitely part of the same pattern (even if no explicit connector)
+            moves_between = next_long_idx - long_idx - 1
+            
+            # If they're far apart in the buffer (many moves between), require a connector
+            # This prevents pairing lines from different bridge sections that overlap spatially
+            if moves_between > 3:
+                # Check if there's at least ONE short connector between them
+                has_connector = False
+                for conn_idx in range(long_idx + 1, next_long_idx):
+                    if moves[conn_idx]['length'] <= connector_max_length:
+                        has_connector = True
+                        break
+                
+                # If no connector found and many moves apart, skip (separate sections)
+                if not has_connector:
+                    continue
+            
+            # Check parallel
+            len1 = long_move['length']
+            len2 = next_move['length']
+            
+            if len1 > 0.01 and len2 > 0.01:
+                dot_product = (long_move['dx'] * next_move['dx'] + long_move['dy'] * next_move['dy']) / (len1 * len2)
+                
+                if abs(dot_product) > 0.8:  # Parallel
+                    # Calculate spacing
+                    perp_x = -long_move['dy'] / len1
+                    perp_y = long_move['dx'] / len1
+                    
+                    vec_x = next_move['x1'] - long_move['x1']
+                    vec_y = next_move['y1'] - long_move['y1']
+                    
+                    spacing = abs(vec_x * perp_x + vec_y * perp_y)
+                    
+                    if spacing < DEFAULT_BRIDGE_MAX_SPACING:
+                        # Mark short connectors between THESE parallel lines to skip (we'll create optimized connections)
+                        # Only skip connectors that are very short (about 2× extrusion width)
+                        for conn_idx in range(long_idx + 1, next_long_idx):
+                            conn_move = moves[conn_idx]
+                            if conn_move['length'] <= connector_max_length:
+                                conn_move['is_connector_to_skip'] = True
+                        
+                        # Calculate intermediate
+                        dist1_start = math.sqrt((long_move['x2'] - (long_move['x2'] + next_move['x1'])/2.0)**2 + 
+                                               (long_move['y2'] - (long_move['y2'] + next_move['y1'])/2.0)**2)
+                        dist2_start = math.sqrt((long_move['x2'] - (long_move['x1'] + next_move['x1'])/2.0)**2 + 
+                                               (long_move['y2'] - (long_move['y1'] + next_move['y1'])/2.0)**2)
+                        
+                        if dist1_start <= dist2_start:
+                            inter_x1 = (long_move['x2'] + next_move['x1']) / 2.0
+                            inter_y1 = (long_move['y2'] + next_move['y1']) / 2.0
+                            inter_x2 = (long_move['x1'] + next_move['x2']) / 2.0
+                            inter_y2 = (long_move['y1'] + next_move['y2']) / 2.0
+                        else:
+                            inter_x1 = (long_move['x1'] + next_move['x1']) / 2.0
+                            inter_y1 = (long_move['y1'] + next_move['y1']) / 2.0
+                            inter_x2 = (long_move['x2'] + next_move['x2']) / 2.0
+                            inter_y2 = (long_move['y2'] + next_move['y2']) / 2.0
+                        
+                        inter_dx = inter_x2 - inter_x1
+                        inter_dy = inter_y2 - inter_y1
+                        inter_length = math.sqrt(inter_dx*inter_dx + inter_dy*inter_dy)
+                        
+                        e_per_mm = (long_move['e_delta']/len1 + next_move['e_delta']/len2) / 2.0
+                        inter_e_delta = inter_length * e_per_mm
+                        
+                        # Store intermediate to insert AFTER long_move
+                        long_move['intermediate_after'] = {
+                            'start': (inter_x1, inter_y1),
+                            'end': (inter_x2, inter_y2),
+                            'e_delta': inter_e_delta,
+                            'spacing': spacing,
+                            'length': inter_length,
+                            'next_start': (next_move['x1'], next_move['y1']),
+                            'paired_idx': next_long_idx  # Remember which line we paired with
+                        }
+                        
+                        # Mark the NEXT line to know it was paired with a previous line
+                        if 'paired_with_prev' not in next_move:
+                            next_move['paired_with_prev'] = long_idx
+                        
+                        # Found a pair, stop looking
+                        break
+    
+    # Step 4.5: Handle single unpaired long lines - add edge intermediates on BOTH sides
+    for long_idx in long_move_indices:
+        long_move = moves[long_idx]
+        
+        # Check if this line is unpaired (no intermediate after it, and not paired with previous)
+        is_unpaired = (long_move.get('intermediate_after') is None and 
+                      long_move.get('paired_with_prev') is None)
+        
+        if is_unpaired:
+            logging.info(f"[BRIDGE] Found single unpaired long line at index {long_idx}: ({long_move['x1']:.3f},{long_move['y1']:.3f}) → ({long_move['x2']:.3f},{long_move['y2']:.3f})")
+            
+            # Use the default spacing (half the max spacing threshold)
+            spacing = DEFAULT_BRIDGE_MAX_SPACING / 2.0
+            
+            # Calculate perpendicular vector
+            perp_x = -long_move['dy'] / long_move['length']
+            perp_y = long_move['dx'] / long_move['length']
+            
+            # Create edge intermediates on BOTH sides
+            e_per_mm = long_move['e_delta'] / long_move['length']
+            edge_e_delta = long_move['length'] * e_per_mm
+            
+            # Store both edges in a special field
+            long_move['single_line_edges'] = {
+                'left': {
+                    'start': (long_move['x1'] + perp_x * (spacing / 2.0), long_move['y1'] + perp_y * (spacing / 2.0)),
+                    'end': (long_move['x2'] + perp_x * (spacing / 2.0), long_move['y2'] + perp_y * (spacing / 2.0)),
+                    'e_delta': edge_e_delta,
+                    'spacing': spacing / 2.0
+                },
+                'right': {
+                    'start': (long_move['x1'] - perp_x * (spacing / 2.0), long_move['y1'] - perp_y * (spacing / 2.0)),
+                    'end': (long_move['x2'] - perp_x * (spacing / 2.0), long_move['y2'] - perp_y * (spacing / 2.0)),
+                    'e_delta': edge_e_delta,
+                    'spacing': spacing / 2.0
+                }
+            }
+            
+            logging.info(f"[BRIDGE] Created edge intermediates on both sides (spacing={spacing:.3f}mm)")
+    
+    # Special case: If there are NO long lines but there IS at least one move, 
+    # treat the longest move as a "single line" and add edges to it
+    if len(long_move_indices) == 0 and len(moves) > 0:
+        logging.info(f"[BRIDGE] No long lines found, but {len(moves)} moves exist - finding longest move")
+        
+        # Find the longest move
+        longest_move = max(moves, key=lambda m: m['length'])
+        longest_idx = moves.index(longest_move)
+        
+        if longest_move['length'] > 1.0:  # At least 1mm to be worth densifying
+            logging.info(f"[BRIDGE] Treating longest move as single line: index {longest_idx}, length {longest_move['length']:.2f}mm")
+            
+            spacing = DEFAULT_BRIDGE_MAX_SPACING / 2.0
+            perp_x = -longest_move['dy'] / longest_move['length']
+            perp_y = longest_move['dx'] / longest_move['length']
+            
+            e_per_mm = longest_move['e_delta'] / longest_move['length']
+            edge_e_delta = longest_move['length'] * e_per_mm
+            
+            longest_move['single_line_edges'] = {
+                'left': {
+                    'start': (longest_move['x1'] + perp_x * (spacing / 2.0), longest_move['y1'] + perp_y * (spacing / 2.0)),
+                    'end': (longest_move['x2'] + perp_x * (spacing / 2.0), longest_move['y2'] + perp_y * (spacing / 2.0)),
+                    'e_delta': edge_e_delta,
+                    'spacing': spacing / 2.0
+                },
+                'right': {
+                    'start': (longest_move['x1'] - perp_x * (spacing / 2.0), longest_move['y1'] - perp_y * (spacing / 2.0)),
+                    'end': (longest_move['x2'] - perp_x * (spacing / 2.0), longest_move['y2'] - perp_y * (spacing / 2.0)),
+                    'e_delta': edge_e_delta,
+                    'spacing': spacing / 2.0
+                }
+            }
+            
+            logging.info(f"[BRIDGE] Created edge intermediates for longest move (spacing={spacing:.3f}mm)")
+    
+    # Step 5: Calculate edge intermediates for first and last long lines
+    # ONLY if they actually have intermediates paired with them
+    edge_before_first = None
+    edge_after_last = None
+    
+    if len(long_move_indices) >= 1:
+        first_long = moves[long_move_indices[0]]
+        last_long = moves[long_move_indices[-1]]
+        
+        # Only add edge BEFORE first line if the first line HAS an intermediate after it
+        # OR if it has single_line_edges (unpaired single line)
+        # AND there's no travel move (G0) between first and second line (continuous section)
+        if first_long.get('intermediate_after') is not None or first_long.get('single_line_edges') is not None:
+            # Check for travel moves between first line and its paired line
+            paired_idx = first_long['intermediate_after'].get('paired_idx')
+            has_travel = False
+            if paired_idx is not None:
+                # Check all lines in buffer between the two long lines
+                first_line_idx = first_long['line_index']
+                paired_line_idx = moves[paired_idx]['line_index']
+                for buf_idx in range(first_line_idx, paired_line_idx):
+                    if buffered_lines[buf_idx].startswith("G0"):
+                        has_travel = True
+                        break
+            
+            # Only create edge intermediate if no travel move (continuous section)
+            if not has_travel:
+                # Check if this is a paired line (has intermediate_after) or single line (has single_line_edges)
+                if first_long.get('intermediate_after') is not None:
+                    # Use the intermediate's data to calculate the edge
+                    inter = first_long['intermediate_after']
+                    spacing = inter['spacing']
+                    paired_idx = inter.get('paired_idx')
+                    
+                    logging.info(f"[BRIDGE] ===== CALCULATING EDGE BEFORE (paired line) =====")
+                    logging.info(f"[BRIDGE] Starting position (where we're coming from): ({start_x:.3f}, {start_y:.3f})")
+                    logging.info(f"[BRIDGE] First long line: ({first_long['x1']:.3f},{first_long['y1']:.3f}) → ({first_long['x2']:.3f},{first_long['y2']:.3f})")
+                    logging.info(f"[BRIDGE] Intermediate start: {inter['start']}, end: {inter['end']}")
+                    logging.info(f"[BRIDGE] Intermediate spacing: {spacing:.3f}mm")
+                    
+                    # Get the second long line (the one paired with the first)
+                    if paired_idx is not None:
+                        second_long = moves[paired_idx]
+                        logging.info(f"[BRIDGE] Second long line (paired): ({second_long['x1']:.3f},{second_long['y1']:.3f}) → ({second_long['x2']:.3f},{second_long['y2']:.3f})")
+                    else:
+                        second_long = None
+                        logging.warning(f"[BRIDGE] No paired second line found!")
+                    
+                    # Calculate perpendicular vector to the first long line
+                    perp_x = -first_long['dy'] / first_long['length']
+                    perp_y = first_long['dx'] / first_long['length']
+                    
+                    logging.info(f"[BRIDGE] Perpendicular vector: ({perp_x:.3f}, {perp_y:.3f})")
+                    
+                    # Determine which side of the first long line the SECOND line is on
+                    # The intermediate goes BETWEEN them, so edge BEFORE should be on the OPPOSITE side
+                    if second_long is not None:
+                        # Use the start point of the second line to determine which side it's on
+                        cross_second = first_long['dx'] * (second_long['y1'] - first_long['y1']) - first_long['dy'] * (second_long['x1'] - first_long['x1'])
+                        
+                        # The edge BEFORE should be on the OPPOSITE side from the second line
+                        if cross_second > 0:
+                            # Second line is on the "left" side, so edge BEFORE goes on the "right" side
+                            edge_offset_x = -perp_x * (spacing / 2.0)
+                            edge_offset_y = -perp_y * (spacing / 2.0)
+                            logging.info(f"[BRIDGE] Second line on LEFT (cross={cross_second:.3f}), edge BEFORE on RIGHT (-perp)")
+                        else:
+                            # Second line is on the "right" side, so edge BEFORE goes on the "left" side
+                            edge_offset_x = perp_x * (spacing / 2.0)
+                            edge_offset_y = perp_y * (spacing / 2.0)
+                            logging.info(f"[BRIDGE] Second line on RIGHT (cross={cross_second:.3f}), edge BEFORE on LEFT (+perp)")
+                    else:
+                        # Fallback: use starting position
+                        cross_start = first_long['dx'] * (start_y - first_long['y1']) - first_long['dy'] * (start_x - first_long['x1'])
+                        if cross_start > 0:
+                            edge_offset_x = perp_x * (spacing / 2.0)
+                            edge_offset_y = perp_y * (spacing / 2.0)
+                        else:
+                            edge_offset_x = -perp_x * (spacing / 2.0)
+                            edge_offset_y = -perp_y * (spacing / 2.0)
+                        logging.info(f"[BRIDGE] Fallback: using start_pos (cross={cross_start:.3f})")
+                    
+                    logging.info(f"[BRIDGE] Edge offset: ({edge_offset_x:.3f}, {edge_offset_y:.3f})")
+                    
+                    e_per_mm = first_long['e_delta'] / first_long['length']
+                    edge_e_delta = first_long['length'] * e_per_mm
+                    
+                    edge_before_first = {
+                        'start': (first_long['x1'] + edge_offset_x, first_long['y1'] + edge_offset_y),
+                        'end': (first_long['x2'] + edge_offset_x, first_long['y2'] + edge_offset_y),
+                        'e_delta': edge_e_delta,
+                        'spacing': spacing / 2.0
+                    }
+                    
+                    logging.info(f"[BRIDGE] Edge BEFORE calculated: start={edge_before_first['start']}, end={edge_before_first['end']}")
+                
+                elif first_long.get('single_line_edges') is not None:
+                    # Single unpaired line - use the 'left' edge as edge BEFORE
+                    edges = first_long['single_line_edges']
+                    spacing = edges['left']['spacing']
+                    
+                    logging.info(f"[BRIDGE] ===== CALCULATING EDGE BEFORE (single line) =====")
+                    logging.info(f"[BRIDGE] Using LEFT edge from single_line_edges")
+                    
+                    edge_before_first = {
+                        'start': edges['left']['start'],
+                        'end': edges['left']['end'],
+                        'e_delta': edges['left']['e_delta'],
+                        'spacing': spacing
+                    }
+                    
+                    logging.info(f"[BRIDGE] Edge BEFORE calculated: start={edge_before_first['start']}, end={edge_before_first['end']}")
+        
+        # Only add edge AFTER last line if any line before it has an intermediate
+        # (meaning there's a densified section ending with last_long)
+        has_any_intermediate = any(m.get('intermediate_after') is not None for m in moves)
+        
+        if has_any_intermediate:
+            # Find the last line that has an intermediate (might be second-to-last or earlier)
+            last_with_intermediate = None
+            for idx in reversed(long_move_indices):
+                if moves[idx].get('intermediate_after') is not None:
+                    last_with_intermediate = moves[idx]
+                    break
+            
+            if last_with_intermediate is not None:
+                inter = last_with_intermediate['intermediate_after']
+                spacing = inter['spacing']
+                
+                # Calculate perpendicular offset in opposite direction
+                perp_x = -last_long['dy'] / last_long['length']
+                perp_y = last_long['dx'] / last_long['length']
+                
+                # Determine offset direction (same side as intermediate)
+                cross = last_long['dx'] * (inter['start'][1] - last_long['y1']) - last_long['dy'] * (inter['start'][0] - last_long['x1'])
+                edge_offset_x = -perp_x * (spacing / 2.0) if cross > 0 else perp_x * (spacing / 2.0)
+                edge_offset_y = -perp_y * (spacing / 2.0) if cross > 0 else perp_y * (spacing / 2.0)
+                
+                e_per_mm = last_long['e_delta'] / last_long['length']
+                edge_e_delta = last_long['length'] * e_per_mm
+                
+                edge_after_last = {
+                    'start': (last_long['x1'] + edge_offset_x, last_long['y1'] + edge_offset_y),
+                    'end': (last_long['x2'] + edge_offset_x, last_long['y2'] + edge_offset_y),
+                    'e_delta': edge_e_delta,
+                    'spacing': spacing / 2.0
+                }
+    
+    # Step 6: Output - iterate through all moves and insert intermediates where marked
+    output = []
+    
+    # Find first G1 line in buffered_lines
+    first_g1_index = 0
+    for idx, line in enumerate(buffered_lines):
+        if line.startswith("G1") and "X" in line and "Y" in line:
+            first_g1_index = idx
+            break
+    
+    # Output metadata lines (TYPE, WIDTH, HEIGHT, etc.)
+    for i in range(first_g1_index):
+        output.append(buffered_lines[i])
+    
+    # Initialize current position at the start of the first move in this section
+    current_pos = (moves[0]['x1'], moves[0]['y1'])
+    logging.info(f"[BRIDGE] Initial current_pos: {current_pos}")
+    
+    # Output all moves in continuous serpentine loop
+    # BUT: detect when buffer order doesn't match spatial order and add travel moves
+    first_long_drawn = False  # Track if we've drawn the first long line
+    edge_before_drawn = False  # Track if we've drawn the edge BEFORE
+    
+    for move_idx, move in enumerate(moves):
+        # Skip old connectors - we create our own continuous path
+        if move['is_connector_to_skip']:
+            continue
+        
+        # Insert edge BEFORE right before we draw the first LONG line
+        if not edge_before_drawn and edge_before_first and move.get('is_long') and not first_long_drawn:
+            logging.info(f"[BRIDGE] ===== INSERTING EDGE BEFORE =====")
+            logging.info(f"[BRIDGE] Current position: {current_pos}")
+            logging.info(f"[BRIDGE] About to draw first long line: ({move['x1']:.3f},{move['y1']:.3f}) → ({move['x2']:.3f},{move['y2']:.3f})")
+            logging.info(f"[BRIDGE] Edge BEFORE start: {edge_before_first['start']}")
+            logging.info(f"[BRIDGE] Edge BEFORE end: {edge_before_first['end']}")
+            
+            # Find which endpoint of edge BEFORE is closer to current position
+            dist_to_start = math.sqrt((edge_before_first['start'][0] - current_pos[0])**2 + 
+                                     (edge_before_first['start'][1] - current_pos[1])**2)
+            dist_to_end = math.sqrt((edge_before_first['end'][0] - current_pos[0])**2 + 
+                                   (edge_before_first['end'][1] - current_pos[1])**2)
+            
+            logging.info(f"[BRIDGE] Distance from current_pos to edge start: {dist_to_start:.3f}mm")
+            logging.info(f"[BRIDGE] Distance from current_pos to edge end: {dist_to_end:.3f}mm")
+            
+            if debug:
+                output.append(f"; [Bridge Densifier] Edge intermediate BEFORE first long line (spacing={edge_before_first['spacing']:.3f}mm)\n")
+            set_e_mode('relative')
+            
+            if dist_to_start < dist_to_end:
+                # Closer to start - travel to start, then draw start->end
+                if dist_to_start > 0.001:  # Only if we're not already there
+                    output.append(add_inline_comment(
+                        f"G0 X{edge_before_first['start'][0]:.3f} Y{edge_before_first['start'][1]:.3f} F8400\n",
+                        f"Edge BEFORE connector {dist_to_start:.2f}mm"
+                    ))
+                logging.info(f"[BRIDGE] Drawing edge BEFORE: start->end")
+                output.append(add_inline_comment(
+                    f"G1 X{edge_before_first['end'][0]:.3f} Y{edge_before_first['end'][1]:.3f} E{edge_before_first['e_delta']:.5f} F1800\n",
+                    f"Edge BEFORE start->end, spacing={edge_before_first['spacing']:.3f}mm"
+                ))
+                current_pos = (edge_before_first['end'][0], edge_before_first['end'][1])
+            else:
+                # Closer to end - travel to end, then draw end->start
+                if dist_to_end > 0.001:  # Only if we're not already there
+                    output.append(add_inline_comment(
+                        f"G0 X{edge_before_first['end'][0]:.3f} Y{edge_before_first['end'][1]:.3f} F8400\n",
+                        f"Edge BEFORE connector {dist_to_end:.2f}mm"
+                    ))
+                logging.info(f"[BRIDGE] Drawing edge BEFORE: end->start")
+                output.append(add_inline_comment(
+                    f"G1 X{edge_before_first['start'][0]:.3f} Y{edge_before_first['start'][1]:.3f} E{edge_before_first['e_delta']:.5f} F1800\n",
+                    f"Edge BEFORE end->start, spacing={edge_before_first['spacing']:.3f}mm"
+                ))
+                current_pos = (edge_before_first['start'][0], edge_before_first['start'][1])
+            
+            set_e_mode('absolute')
+            logging.info(f"[BRIDGE] After edge BEFORE, current_pos: {current_pos}")
+            edge_before_drawn = True
+        
+        # CRITICAL: Check if this line is "out of sequence"
+        # If the PREVIOUS long line has an intermediate paired with THIS line,
+        # we can continue serpentine. Otherwise, we need to travel/restart.
+        is_continuation = False
+        is_first_long = False
+        
+        if move.get('is_long'):
+            # Check if this is the very first long line
+            if not first_long_drawn and move_idx == long_move_indices[0]:
+                is_first_long = True
+                first_long_drawn = True
+            
+            # Check continuation for non-first lines
+            if not is_first_long and move_idx > 0:
+                # Look back to find the previous long line
+                for prev_idx in range(move_idx - 1, -1, -1):
+                    if moves[prev_idx].get('is_long'):
+                        prev_long = moves[prev_idx]
+                        # Check if previous line's intermediate was paired with us
+                        if prev_long.get('intermediate_after') and prev_long['intermediate_after'].get('paired_idx') == move_idx:
+                            is_continuation = True
+                        break
+        
+        # If not a continuation AND not the first line, we need to travel to the original position
+        if not is_continuation and not is_first_long and move_idx > 0 and move.get('is_long'):
+            # Find where the original G-code expects us to be (from buffered_lines)
+            expected_x, expected_y = move['x1'], move['y1']
+            dist_to_expected = math.sqrt((expected_x - current_pos[0])**2 + (expected_y - current_pos[1])**2)
+            
+            if dist_to_expected > 0.5:  # If we're more than 0.5mm away, add travel
+                output.append(f"G0 X{expected_x:.3f} Y{expected_y:.3f} F8400 ; [Bridge Densifier] Restart serpentine\n")
+                current_pos = (expected_x, expected_y)
+        
+        # Choose optimal direction for this line (minimize distance from current position)
+        # EXCEPT for the first long line with edge BEFORE - use natural connection
+        if is_first_long and edge_before_first:
+            # Force direction that connects naturally from edge BEFORE
+            # current_pos is already where edge ended, so use whichever endpoint is closer
+            dist_to_start = math.sqrt((move['x1'] - current_pos[0])**2 + (move['y1'] - current_pos[1])**2)
+            dist_to_end = math.sqrt((move['x2'] - current_pos[0])**2 + (move['y2'] - current_pos[1])**2)
+        else:
+            # Normal direction optimization
+            dist_to_start = math.sqrt((move['x1'] - current_pos[0])**2 + (move['y1'] - current_pos[1])**2)
+            dist_to_end = math.sqrt((move['x2'] - current_pos[0])**2 + (move['y2'] - current_pos[1])**2)
+        
+        set_e_mode('relative')
+        
+        # Define a threshold for "long jump" - if connector is longer than this, use travel instead
+        LONG_JUMP_THRESHOLD = 5.0  # mm - anything longer is a separate bridge section
+        
+        # Determine optimal direction (choose closest endpoint)
+        # This is the core of serpentine optimization
+        if dist_to_start <= dist_to_end:
+            # Draw connector to start, then start → end
+            if dist_to_start > 0.001:  # Only if not already at start
+                if dist_to_start > LONG_JUMP_THRESHOLD:
+                    # Long connector - use travel instead of extrusion
+                    set_e_mode('absolute')
+                    output.append(add_inline_comment(
+                        f"G0 X{move['x1']:.3f} Y{move['y1']:.3f} F8400\n",
+                        f"Long jump {dist_to_start:.2f}mm - new section"
+                    ))
+                    set_e_mode('relative')
+                else:
+                    # Normal short connector - extrude
+                    output.append(add_inline_comment(
+                        f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{dist_to_start * 0.04187:.5f} F1800\n",
+                        f"Connector {dist_to_start:.2f}mm"
+                    ))
+            
+            # Determine what type of bridge line this is for the comment
+            line_type = "isolated"  # Default
+            if move.get('intermediate_after') is not None:
+                line_type = "paired-has-intermediate"
+            elif move.get('paired_with_prev') is not None:
+                line_type = "paired-no-intermediate"
+            elif move.get('single_line_edges') is not None:
+                line_type = "single-with-edges"
+            elif move.get('is_long'):
+                line_type = "long-isolated-NO-DENSIFICATION"
+            
+            # Now draw the line itself (start → end)
+            output.append(add_inline_comment(
+                f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{move['e_delta']:.5f} F1800\n",
+                f"Bridge line #{move_idx} fwd, len={move['length']:.2f}mm [{line_type}]"
+            ))
+            current_pos = (move['x2'], move['y2'])
+        else:
+            # Draw connector to end, then end → start
+            if dist_to_end > 0.001:  # Only if not already at end
+                if dist_to_end > LONG_JUMP_THRESHOLD:
+                    # Long connector - use travel instead of extrusion
+                    set_e_mode('absolute')
+                    output.append(add_inline_comment(
+                        f"G0 X{move['x2']:.3f} Y{move['y2']:.3f} F8400\n",
+                        f"Long jump {dist_to_end:.2f}mm - new section"
+                    ))
+                    set_e_mode('relative')
+                else:
+                    # Normal short connector - extrude
+                    output.append(add_inline_comment(
+                        f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{dist_to_end * 0.04187:.5f} F1800\n",
+                        f"Connector {dist_to_end:.2f}mm"
+                    ))
+            
+            # Determine what type of bridge line this is for the comment
+            line_type = "isolated"  # Default
+            if move.get('intermediate_after') is not None:
+                line_type = "paired-has-intermediate"
+            elif move.get('paired_with_prev') is not None:
+                line_type = "paired-no-intermediate"
+            elif move.get('single_line_edges') is not None:
+                line_type = "single-with-edges"
+            elif move.get('is_long'):
+                line_type = "long-isolated-NO-DENSIFICATION"
+            
+            # Now draw the line itself (end → start)
+            output.append(add_inline_comment(
+                f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{move['e_delta']:.5f} F1800\n",
+                f"Bridge line #{move_idx} rev, len={move['length']:.2f}mm [{line_type}]"
+            ))
+            current_pos = (move['x1'], move['y1'])
+        
+        # Insert intermediate AFTER this line if marked
+        if move['intermediate_after']:
+            inter = move['intermediate_after']
+            
+            # Choose optimal direction for intermediate (minimize distance)
+            dist_to_inter_start = math.sqrt((inter['start'][0] - current_pos[0])**2 + (inter['start'][1] - current_pos[1])**2)
+            dist_to_inter_end = math.sqrt((inter['end'][0] - current_pos[0])**2 + (inter['end'][1] - current_pos[1])**2)
+            
+            if debug:
+                output.append(f"; [Bridge Densifier] Intermediate (spacing={inter['spacing']:.3f}mm, length={inter['length']:.3f}mm)\n")
+            set_e_mode('relative')
+            
+            LONG_JUMP_THRESHOLD = 5.0  # mm
+            
+            # Determine optimal direction (choose closest endpoint)
+            if dist_to_inter_start <= dist_to_inter_end:
+                # Draw connector to start, then start → end
+                if dist_to_inter_start > 0.001:
+                    if dist_to_inter_start > LONG_JUMP_THRESHOLD:
+                        # Long connector - use travel
+                        set_e_mode('absolute')
+                        output.append(add_inline_comment(
+                            f"G0 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} F8400\n",
+                            f"Inter long jump {dist_to_inter_start:.2f}mm"
+                        ))
+                        set_e_mode('relative')
+                    else:
+                        # Normal connector - extrude
+                        output.append(add_inline_comment(
+                            f"G1 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} E{dist_to_inter_start * 0.04187:.5f} F1800\n",
+                            f"Inter connector {dist_to_inter_start:.2f}mm"
+                        ))
+                # Draw the intermediate line itself (start → end)
+                output.append(add_inline_comment(
+                    f"G1 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} E{inter['e_delta']:.5f} F1800\n",
+                    f"Intermediate fwd, spacing={inter['spacing']:.2f}mm"
+                ))
+                current_pos = (inter['end'][0], inter['end'][1])
+            else:
+                # Draw connector to end, then end → start
+                if dist_to_inter_end > 0.001:
+                    if dist_to_inter_end > LONG_JUMP_THRESHOLD:
+                        # Long connector - use travel
+                        set_e_mode('absolute')
+                        output.append(add_inline_comment(
+                            f"G0 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} F8400\n",
+                            f"Inter long jump {dist_to_inter_end:.2f}mm"
+                        ))
+                        set_e_mode('relative')
+                    else:
+                        # Normal connector - extrude
+                        output.append(add_inline_comment(
+                            f"G1 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} E{dist_to_inter_end * 0.04187:.5f} F1800\n",
+                            f"Inter connector {dist_to_inter_end:.2f}mm"
+                        ))
+                # Draw the intermediate line itself (end → start)
+                output.append(add_inline_comment(
+                    f"G1 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} E{inter['e_delta']:.5f} F1800\n",
+                    f"Intermediate rev, spacing={inter['spacing']:.2f}mm"
+                ))
+                current_pos = (inter['start'][0], inter['start'][1])
+        
+        # Handle single unpaired line - add RIGHT edge (LEFT was already output as edge BEFORE)
+        if move.get('single_line_edges'):
+            edges = move['single_line_edges']
+            
+            logging.info(f"[BRIDGE] Outputting RIGHT edge for single unpaired line at index {move_idx}")
+            
+            # Only draw RIGHT edge (LEFT edge was already drawn as edge BEFORE)
+            right_edge = edges['right']
+            dist_to_right_start = math.sqrt((right_edge['start'][0] - current_pos[0])**2 + (right_edge['start'][1] - current_pos[1])**2)
+            dist_to_right_end = math.sqrt((right_edge['end'][0] - current_pos[0])**2 + (right_edge['end'][1] - current_pos[1])**2)
+            
+            if debug:
+                output.append(f"; [Bridge Densifier] Single line RIGHT edge (spacing={right_edge['spacing']:.3f}mm)\n")
+            set_e_mode('relative')
+            
+            if dist_to_right_start < dist_to_right_end:
+                if dist_to_right_start > 0.001:
+                    output.append(add_inline_comment(
+                        f"G1 X{right_edge['start'][0]:.3f} Y{right_edge['start'][1]:.3f} E{dist_to_right_start * 0.04187:.5f} F1800\n",
+                        f"Right edge connector {dist_to_right_start:.2f}mm"
+                    ))
+                output.append(add_inline_comment(
+                    f"G1 X{right_edge['end'][0]:.3f} Y{right_edge['end'][1]:.3f} E{right_edge['e_delta']:.5f} F1800\n",
+                    f"Single line RIGHT edge, spacing={right_edge['spacing']:.2f}mm"
+                ))
+                current_pos = (right_edge['end'][0], right_edge['end'][1])
+            else:
+                if dist_to_right_end > 0.001:
+                    output.append(add_inline_comment(
+                        f"G1 X{right_edge['end'][0]:.3f} Y{right_edge['end'][1]:.3f} E{dist_to_right_end * 0.04187:.5f} F1800\n",
+                        f"Right edge connector {dist_to_right_end:.2f}mm"
+                    ))
+                output.append(add_inline_comment(
+                    f"G1 X{right_edge['start'][0]:.3f} Y{right_edge['start'][1]:.3f} E{right_edge['e_delta']:.5f} F1800\n",
+                    f"Single line RIGHT edge, spacing={right_edge['spacing']:.2f}mm"
+                ))
+                current_pos = (right_edge['start'][0], right_edge['start'][1])
+        
+        # Insert edge intermediate AFTER last bridge line
+        if move_idx == long_move_indices[-1] and edge_after_last:
+            dist_to_edge_start = math.sqrt((edge_after_last['start'][0] - current_pos[0])**2 + (edge_after_last['start'][1] - current_pos[1])**2)
+            dist_to_edge_end = math.sqrt((edge_after_last['end'][0] - current_pos[0])**2 + (edge_after_last['end'][1] - current_pos[1])**2)
+            
+            if debug:
+                output.append(f"; [Bridge Densifier] Edge intermediate AFTER last line (spacing={edge_after_last['spacing']:.3f}mm)\n")
+            set_e_mode('relative')
+            
+            if dist_to_edge_start <= dist_to_edge_end:
+                # Draw connector to start, then start → end
+                output.append(add_inline_comment(
+                    f"G1 X{edge_after_last['start'][0]:.3f} Y{edge_after_last['start'][1]:.3f} E{dist_to_edge_start * 0.04187:.5f} F1800\n",
+                    f"Edge AFTER connector {dist_to_edge_start:.2f}mm"
+                ))
+                output.append(add_inline_comment(
+                    f"G1 X{edge_after_last['end'][0]:.3f} Y{edge_after_last['end'][1]:.3f} E{edge_after_last['e_delta']:.5f} F1800\n",
+                    f"Edge AFTER fwd, spacing={edge_after_last['spacing']:.2f}mm"
+                ))
+                current_pos = (edge_after_last['end'][0], edge_after_last['end'][1])
+            else:
+                # Draw connector to end, then end → start
+                output.append(add_inline_comment(
+                    f"G1 X{edge_after_last['end'][0]:.3f} Y{edge_after_last['end'][1]:.3f} E{dist_to_edge_end * 0.04187:.5f} F1800\n",
+                    f"Edge AFTER connector {dist_to_edge_end:.2f}mm"
+                ))
+                output.append(add_inline_comment(
+                    f"G1 X{edge_after_last['start'][0]:.3f} Y{edge_after_last['start'][1]:.3f} E{edge_after_last['e_delta']:.5f} F1800\n",
+                    f"Edge AFTER rev, spacing={edge_after_last['spacing']:.2f}mm"
+                ))
+                current_pos = (edge_after_last['start'][0], edge_after_last['start'][1])
+    
+    # Switch back to absolute mode at the end
+    set_e_mode('absolute')
+    
+    # Count statistics
+    intermediate_count = sum(1 for m in moves if m['intermediate_after'] is not None)
+    edge_count = (1 if edge_before_first else 0) + (1 if edge_after_last else 0)
+    connector_skip_count = sum(1 for m in moves if m['is_connector_to_skip'])
+    kept_count = len([m for m in moves if not m['is_connector_to_skip']])
+    
+    logging.info(f"[BRIDGE] Filtered {len(moves)} moves → {len(long_move_indices)} long bridge lines")
+    logging.info(f"[BRIDGE] Added {intermediate_count} intermediate lines + {edge_count} edge lines")
+    logging.info(f"[BRIDGE] Removed {connector_skip_count} old connectors, kept {kept_count} bridge lines (direction optimized)")
+    
+    # Calculate final E from original buffer (for comparison)
+    final_e = current_e
+    for line in buffered_lines:
+        e_match = REGEX_E.search(line)
+        if e_match:
+            final_e = float(e_match.group(1))
+    
+    # Return output, final E, and final XY position (where serpentine path ended)
+    return output, final_e, current_pos
+
 def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  enable_smoothificator=True,
                  enable_bricklayers=False, bricklayers_extrusion_multiplier=1.0,
@@ -830,6 +1830,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  adaptive_extrusion_multiplier=DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER,
                  enable_safe_z_hop=DEFAULT_ENABLE_SAFE_Z_HOP, safe_z_hop_margin=DEFAULT_SAFE_Z_HOP_MARGIN,
                  z_hop_retraction=DEFAULT_Z_HOP_RETRACTION,
+                 enable_bridge_densifier=DEFAULT_ENABLE_BRIDGE_DENSIFIER,
                  debug=False):
     
     # Determine output filename
@@ -854,6 +1855,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     logging.info(f"  - Bricklayers (Internal perimeters): {enable_bricklayers}")
     logging.info(f"  - Non-planar Infill: {enable_nonplanar}")
     logging.info(f"  - Safe Z-hop: {enable_safe_z_hop}")
+    logging.info(f"  - Bridge Densifier: {enable_bridge_densifier}")
     
     # Print to console for user visibility
     print("\n" + "=" * 70)
@@ -877,6 +1879,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         features.append("Non-planar Infill")
     if enable_safe_z_hop:
         features.append("Safe Z-hop")
+    if enable_bridge_densifier:
+        features.append("Bridge Densifier")
     print(", ".join(features) if features else "(None)")
     print("=" * 70)
     
@@ -950,6 +1954,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         print(f"                       adaptive extrusion = {'ON' if enable_adaptive_extrusion else 'OFF'}, multiplier = {adaptive_extrusion_multiplier:.2f}x")
     if enable_safe_z_hop:
         print(f"  • Safe Z-hop: margin = {safe_z_hop_margin:.2f}mm, retraction = {z_hop_retraction:.2f}mm")
+    if enable_bridge_densifier:
+        print(f"  • Bridge Densifier: min_length = {DEFAULT_BRIDGE_MIN_LENGTH}mm, max_spacing = {DEFAULT_BRIDGE_MAX_SPACING}mm")
     print()
     print("⏳ Processing G-code... This might take a while. Time for coffee? ☕")
     print("   (Or tea, if that's your thing. We don't judge.)")
@@ -987,6 +1993,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     in_bridge_infill = False  # Track when we're in bridge infill (skip Z-hops)
     processed_infill_indices = set()
     
+    # Bridge densifier variables
+    bridge_buffer = []  # Buffer to collect bridge section lines
+    bridge_start_e = 0.0  # E value at start of bridge section
+    bridge_start_x = 0.0  # X position at start of bridge section
+    bridge_start_y = 0.0  # Y position at start of bridge section
+    in_bridge_section = False  # Track when we're buffering a bridge section
+    
     # First pass: Build 3D grid showing which Z layers have solid at each XY position
     # Then for each layer, determine the safe Z range (space between solid layers)
     
@@ -997,6 +2010,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info(f"No extrusion_width found in G-code, using default: {extrusion_width}mm")
     else:
         logging.info(f"Detected extrusion_width from G-code: {extrusion_width}mm")
+    
+    # Update bridge connector max length based on actual extrusion width (2× extrusion width)
+    bridge_connector_max_length = extrusion_width * 2.0
+    if enable_bridge_densifier:
+        logging.info(f"Bridge densifier connector max length: {bridge_connector_max_length:.3f}mm (2× extrusion width)")
     
     # Set grid resolution to match extrusion width (no diagonal compensation)
     grid_resolution = extrusion_width * 1.4444  # 44% larger ensures diagonal coverage
@@ -1026,19 +2044,18 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             elif ';LAYER_CHANGE' in line:
                 current_layer_num += 1  # Fallback for non-standard markers
             if line.startswith('G1') and 'Z' in line:
-                z_match = re.search(r'Z([-+]?\d*\.?\d+)', line)
-                if z_match:
-                    temp_z = float(z_match.group(1))
+                temp_z_val = extract_z(line)
+                if temp_z_val is not None:
+                    temp_z = temp_z_val
                     if current_layer_num not in z_layer_map:
                         z_layer_map[current_layer_num] = temp_z
                         layer_z_map[temp_z] = current_layer_num
             if line.startswith('G1'):
-                x_match = re.search(r'X([-+]?\d*\.?\d+)', line)
-                y_match = re.search(r'Y([-+]?\d*\.?\d+)', line)
-                if x_match:
-                    x_coords.append(float(x_match.group(1)))
-                if y_match:
-                    y_coords.append(float(y_match.group(1)))
+                params = parse_gcode_line(line)
+                if params['x'] is not None:
+                    x_coords.append(params['x'])
+                if params['y'] is not None:
+                    y_coords.append(params['y'])
         
         x_min, x_max = min(x_coords), max(x_coords)
         y_min, y_max = min(y_coords), max(y_coords)
@@ -1118,9 +2135,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     else:
                         current_layer_height = base_layer_height  # First layer or fallback
             if line.startswith('G1') and 'Z' in line:
-                z_match = re.search(r'Z([-+]?\d*\.?\d+)', line)
-                if z_match:
-                    temp_z = float(z_match.group(1))
+                temp_z_val = extract_z(line)
+                if temp_z_val is not None:
+                    temp_z = temp_z_val
             
             # Detect solid infill AND perimeters (both block infill from below)
             if ';TYPE:Solid infill' in line or ';TYPE:Top solid infill' in line or ';TYPE:Bridge infill' in line or \
@@ -1908,8 +2925,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 if ";TYPE:" in check_line and not recent_travel:
                     type_before_travel = check_line.strip()
                 if "G1" in check_line and "F" in check_line and "E" not in check_line:
-                    f_match = re.search(r'F(\d+)', check_line)
-                    if f_match and float(f_match.group(1)) >= 7200:  # High speed travel
+                    f_val = extract_f(check_line)
+                    if f_val and f_val >= 7200:  # High speed travel
                         recent_travel = True
                         # Don't break - keep looking back for TYPE before travel
             
@@ -1934,15 +2951,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         break
                     
                     if "G1" in check_line and "X" in check_line and "Y" in check_line and "E" in check_line:
-                        x_match = re.search(r'X([-\d.]+)', check_line)
-                        y_match = re.search(r'Y([-\d.]+)', check_line)
-                        e_match = re.search(r'E([-\d.]+)', check_line)
-                        if x_match and y_match and e_match:
-                            x = float(x_match.group(1))
-                            y = float(y_match.group(1))
-                            e = float(e_match.group(1))
-                            candidate_path.append((x, y))
-                            e_values.append(e)
+                        params = parse_gcode_line(check_line)
+                        if params['x'] is not None and params['y'] is not None and params['e'] is not None:
+                            candidate_path.append((params['x'], params['y']))
+                            e_values.append(params['e'])
                     else:
                         # Non-extrusion move, stop collecting
                         break
@@ -2034,9 +3046,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Track any Z value in G1 commands
             if line.startswith("G1") and "Z" in line:
-                z_match = re.search(r'Z([-\d.]+)', line)
-                if z_match:
-                    z_value = float(z_match.group(1))
+                z_value = extract_z(line)
+                if z_value is not None:
                     if temp_layer not in layer_max_z or z_value > layer_max_z[temp_layer]:
                         layer_max_z[temp_layer] = z_value
         
@@ -2071,25 +3082,23 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         """Update global position tracker from a G-code line.
         Call this EVERY time you read a line from the input, regardless of processing mode."""
         if line_str.startswith("G1") or line_str.startswith("G0"):
-            # Extract ANY coordinate updates from this line
-            x_match = re.search(r'X([-+]?\d*\.?\d+)', line_str)
-            y_match = re.search(r'Y([-+]?\d*\.?\d+)', line_str)
-            z_match = re.search(r'Z([-+]?\d*\.?\d+)', line_str)
-            e_match = re.search(r'E([-+]?\d*\.?\d+)', line_str)
+            # Use parse_gcode_line for efficient parameter extraction
+            params = parse_gcode_line(line_str)
             
-            if x_match:
-                position['x'] = float(x_match.group(1))
-            if y_match:
-                position['y'] = float(y_match.group(1))
-            if z_match:
-                position['z'] = float(z_match.group(1))
-            if e_match:
-                position['e'] = float(e_match.group(1))
+            # Update position only for parameters that are present in the line
+            if params['x'] is not None:
+                position['x'] = params['x']
+            if params['y'] is not None:
+                position['y'] = params['y']
+            if params['z'] is not None:
+                position['z'] = params['z']
+            if params['e'] is not None:
+                position['e'] = params['e']
         elif line_str.startswith("G92"):
             # G92 resets positions (usually E0)
-            e_reset_match = re.search(r'E([-+]?\d*\.?\d+)', line_str)
-            if e_reset_match:
-                position['e'] = float(e_reset_match.group(1))
+            e_val = extract_e(line_str)
+            if e_val is not None:
+                position['e'] = e_val
     
     while i < total_lines:
         line = lines[i]
@@ -2098,14 +3107,206 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # Update global position tracker FIRST (before any processing logic)
         update_position(line)
         
-        # Track TYPE markers for Z-hop exclusion logic
+        # Track TYPE markers for Z-hop exclusion logic and bridge densifier
         if ";TYPE:" in line:
             current_type = line.strip()
-            # Track when we're in bridge infill (any kind)
+            
+            # BRIDGE DENSIFIER: Process buffered bridge section when exiting bridge
+            if enable_bridge_densifier and in_bridge_section:
+                # Check if we're leaving bridge infill (only "Bridge infill", NOT "Internal bridge infill")
+                if "Bridge infill" not in current_type or "Internal bridge infill" in current_type:
+                    # Process the buffered bridge section
+                    logging.info(f"[BRIDGE] Exiting bridge section, processing {len(bridge_buffer)} buffered lines")
+                    densified_lines, final_e, final_pos = process_bridge_section(
+                        bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug
+                    )
+                    
+                    # Output densified bridge lines
+                    for densified_line in densified_lines:
+                        write_and_track(output_buffer, densified_line, recent_output_lines)
+                    
+                    # Find where the original G-code expects to continue from (last XY move in bridge buffer)
+                    # Also look for un-retract command that needs to be preserved
+                    last_x, last_y = None, None
+                    unretract_line = None
+                    last_move_idx = -1
+                    
+                    for idx in range(len(bridge_buffer) - 1, -1, -1):
+                        buf_line = bridge_buffer[idx]
+                        if buf_line.startswith("G1") and "X" in buf_line and "Y" in buf_line:
+                            params = parse_gcode_line(buf_line)
+                            if params['x'] is not None:
+                                last_x = params['x']
+                            if params['y'] is not None:
+                                last_y = params['y']
+                            if last_x is not None and last_y is not None:
+                                last_move_idx = idx
+                                break
+                    
+                    # Look for un-retract command after the last move (E-only move with E >= 0)
+                    if last_move_idx >= 0:
+                        for idx in range(last_move_idx + 1, len(bridge_buffer)):
+                            buf_line = bridge_buffer[idx]
+                            if buf_line.startswith("G1") and "E" in buf_line and "X" not in buf_line and "Y" not in buf_line:
+                                params = parse_gcode_line(buf_line)
+                                if params['e'] is not None and params['e'] >= 0:
+                                    # This is an un-retract command
+                                    unretract_line = buf_line
+                                    logging.info(f"[BRIDGE] Found un-retract command: {buf_line.strip()}")
+                                    break
+                    
+                    # Check if densified path ended at a different position than expected
+                    if last_x is not None and last_y is not None:
+                        dist = math.sqrt((final_pos[0] - last_x)**2 + (final_pos[1] - last_y)**2)
+                        if dist > 0.01:  # More than 0.01mm away
+                            # Need to travel to expected position
+                            write_and_track(output_buffer, 
+                                add_inline_comment(f"G0 X{last_x:.3f} Y{last_y:.3f} F8400\n", 
+                                                 "[Bridge Densifier] Return to expected position"),
+                                recent_output_lines)
+                            position['x'] = last_x
+                            position['y'] = last_y
+                            logging.info(f"[BRIDGE] Added travel to expected position: X={last_x:.3f} Y={last_y:.3f}, distance={dist:.3f}mm")
+                        else:
+                            # Already at expected position
+                            position['x'] = final_pos[0]
+                            position['y'] = final_pos[1]
+                    else:
+                        # No last position found, use final position
+                        position['x'] = final_pos[0]
+                        position['y'] = final_pos[1]
+                    
+                    # Output un-retract command if found (BEFORE TYPE marker is output)
+                    if unretract_line:
+                        write_and_track(output_buffer, 
+                            add_inline_comment(unretract_line, "[Bridge Densifier] Preserved un-retract"),
+                            recent_output_lines)
+                        # Update E position
+                        params = parse_gcode_line(unretract_line)
+                        if params['e'] is not None:
+                            position['e'] = params['e']
+                            current_e = params['e']
+                    
+                    # Update E position after bridge
+                    position['e'] = final_e
+                    current_e = final_e
+                    
+                    # Clear buffer but keep TYPE marker if present
+                    bridge_buffer = []
+                    in_bridge_section = False
+                    logging.info(f"[BRIDGE] Bridge section processed, E={final_e:.5f}")
+            
+            # BRIDGE DENSIFIER: Start buffering when entering bridge (only "Bridge infill", NOT "Internal bridge infill")
+            if enable_bridge_densifier:
+                if "Bridge infill" in current_type and "Internal bridge infill" not in current_type:
+                    if not in_bridge_section:
+                        in_bridge_section = True
+                        bridge_buffer = []
+                        bridge_start_e = position['e']
+                        bridge_start_x = position['x']
+                        bridge_start_y = position['y']
+                        logging.info(f"[BRIDGE] Entering bridge section at X={bridge_start_x:.3f} Y={bridge_start_y:.3f} E={bridge_start_e:.5f}")
+            
+            # Track when we're in bridge infill (any kind) for Z-hop logic
             if "Bridge infill" in current_type or "Internal bridge infill" in current_type:
                 in_bridge_infill = True
             else:
                 in_bridge_infill = False
+        
+        # BRIDGE DENSIFIER: Buffer lines when in bridge section
+        if enable_bridge_densifier and in_bridge_section:
+            # Check if this line is a retraction (negative E move)
+            # If so, we've reached the end of this bridge section
+            is_retraction = False
+            if line.strip().startswith("G1") and "E" in line:
+                params = parse_gcode_line(line)
+                if params['e'] is not None and params['e'] < 0:
+                    is_retraction = True
+                    logging.info(f"[BRIDGE] Detected retraction during bridge buffering, will process bridge section")
+            
+            # Buffer this line BEFORE processing (retraction belongs to bridge section)
+            bridge_buffer.append(line)
+            
+            # If retraction detected, process the bridge section now
+            if is_retraction:
+                logging.info(f"[BRIDGE] Processing bridge section due to retraction, {len(bridge_buffer)} buffered lines")
+                densified_lines, final_e, final_pos = process_bridge_section(
+                    bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug
+                )
+                
+                # Output densified bridge lines
+                for densified_line in densified_lines:
+                    write_and_track(output_buffer, densified_line, recent_output_lines)
+                
+                # Find where the original G-code expects to continue from (last XY move in bridge buffer)
+                # Also look for un-retract command that needs to be preserved
+                last_x, last_y = None, None
+                unretract_line = None
+                last_move_idx = -1
+                
+                for idx in range(len(bridge_buffer) - 1, -1, -1):
+                    buf_line = bridge_buffer[idx]
+                    if buf_line.startswith("G1") and "X" in buf_line and "Y" in buf_line:
+                        params = parse_gcode_line(buf_line)
+                        if params['x'] is not None:
+                            last_x = params['x']
+                        if params['y'] is not None:
+                            last_y = params['y']
+                        if last_x is not None and last_y is not None:
+                            last_move_idx = idx
+                            break
+                
+                # Look for un-retract command after the last move (E-only move with E >= 0)
+                # BUT this won't exist yet since we just saw the retraction!
+                # The un-retract will come AFTER the travel move in subsequent lines
+                
+                # Check if densified path ended at a different position than expected
+                if last_x is not None and last_y is not None:
+                    dist = math.sqrt((final_pos[0] - last_x)**2 + (final_pos[1] - last_y)**2)
+                    if dist > 0.01:  # More than 0.01mm away
+                        # Need to travel to expected position
+                        write_and_track(output_buffer, 
+                            add_inline_comment(f"G0 X{last_x:.3f} Y{last_y:.3f} F8400\n", 
+                                             "[Bridge Densifier] Return to expected position"),
+                            recent_output_lines)
+                        position['x'] = last_x
+                        position['y'] = last_y
+                        logging.info(f"[BRIDGE] Added travel to expected position: X={last_x:.3f} Y={last_y:.3f}, distance={dist:.3f}mm")
+                    else:
+                        # Already at expected position
+                        position['x'] = final_pos[0]
+                        position['y'] = final_pos[1]
+                else:
+                    # No last position found, use final position
+                    position['x'] = final_pos[0]
+                    position['y'] = final_pos[1]
+                
+                # Update E position after bridge
+                position['e'] = final_e
+                current_e = final_e
+                
+                # Output the retraction command
+                write_and_track(output_buffer, 
+                    add_inline_comment(line, "[Bridge Densifier] Original retraction"),
+                    recent_output_lines)
+                
+                # Clear buffer and exit bridge mode
+                bridge_buffer = []
+                in_bridge_section = False
+                logging.info(f"[BRIDGE] Bridge section processed, E={final_e:.5f}")
+                
+                # Check if we should immediately re-enter bridge mode
+                # (We're still in Bridge infill TYPE, just had a retraction between bridge segments)
+                if "Bridge infill" in current_type and "Internal bridge infill" not in current_type:
+                    in_bridge_section = True
+                    bridge_buffer = []
+                    bridge_start_e = final_e  # Start from where we ended
+                    bridge_start_x = position['x']
+                    bridge_start_y = position['y']
+                    logging.info(f"[BRIDGE] Re-entering bridge section immediately after retraction at X={bridge_start_x:.3f} Y={bridge_start_y:.3f} E={bridge_start_e:.5f}")
+            
+            i += 1
+            continue
         
         # Progress logging every 10,000 lines
         if line_count_processed % 10000 == 0:
@@ -3384,6 +4585,9 @@ if __name__ == "__main__":
     parser.add_argument('-safeZHopMargin', '--safe-z-hop-margin', type=float, default=DEFAULT_SAFE_Z_HOP_MARGIN,
                        help=f'Safety margin in mm to add above max Z during travel (default: {DEFAULT_SAFE_Z_HOP_MARGIN})')
     
+    parser.add_argument('-enableBridgeDensifier', '--enable-bridge-densifier', action='store_true', default=False,
+                       help='Enable Bridge Densifier to add intermediate lines between bridge extrusions for better bridging (default: disabled, experimental)')
+    
     # Debug mode arguments
     debug_group = parser.add_mutually_exclusive_group()
     debug_group.add_argument('-debug', '--debug', dest='debug_level', action='store_const', const=0, default=-1,
@@ -3426,6 +4630,8 @@ if __name__ == "__main__":
             args.enable_bricklayers = True
         if not args.enable_non_planar:
             args.enable_non_planar = True
+        if not args.enable_bridge_densifier:
+            args.enable_bridge_densifier = True
         # Smoothificator and Safe Z-hop are already enabled by default
     
     try:
@@ -3447,6 +4653,7 @@ if __name__ == "__main__":
             frequency=args.frequency,
             enable_safe_z_hop=args.enable_safe_z_hop,
             safe_z_hop_margin=args.safe_z_hop_margin,
+            enable_bridge_densifier=args.enable_bridge_densifier,
             debug=debug
         )
     except Exception as e:

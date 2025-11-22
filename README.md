@@ -91,6 +91,18 @@ Prevents nozzle collisions during travel moves:
 
 **Best for:** All prints, especially with Z-shifting features enabled
 
+### 🌉 Bridge Densifier (Optional, `-enableBridgeDensifier`)
+Strengthens bridge sections by adding parallel extrusion lines:
+- Automatically detects bridge infill sections in G-code
+- Creates parallel edge lines along each bridge extrusion
+- Uses serpentine path optimization for minimal travel
+- Generates intermediate lines between long bridge pairs
+- Handles single isolated bridge lines by creating 3 parallel copies
+- Dramatically improves bridge strength and surface quality
+- Maintains proper E values and uses travel moves for long connectors
+
+**Best for:** Parts with long bridges or many overhangs
+
 ---
 
 ## 📦 Installation
@@ -153,9 +165,10 @@ input_file              Input G-code file (required)
 
 ### Feature Toggles
 ```
--full, --enable-all                Enable all features (Bricklayers + Non-planar)
+-full, --enable-all                Enable all features (Bricklayers + Non-planar + Bridge Densifier)
 -enableBricklayers                 Enable Bricklayers Z-shifting (default: disabled)
 -enableNonPlanar                   Enable non-planar infill (default: disabled)
+-enableBridgeDensifier             Enable bridge densifier (default: disabled)
 -disableSmoothificator             Disable Smoothificator (default: enabled)
 -disableSafeZHop                   Disable safe Z-hop (default: enabled)
 ```
@@ -204,6 +217,13 @@ input_file              Input G-code file (required)
 -safeZHopMargin FLOAT              Safety margin above max Z in mm (default: 0.5)
 ```
 
+### Bridge Densifier Settings
+```
+-bridgeMinLength FLOAT             Minimum bridge line length to densify in mm (default: 2.0)
+-bridgeMaxSpacing FLOAT            Maximum spacing between parallel bridge lines in mm (default: 0.9)
+-bridgeConnectorMaxLength FLOAT    Maximum connector length before using travel move in mm (default: 5.0)
+```
+
 ### Debug Options
 ```
 -debug                             Enable basic debug mode: console output only
@@ -228,6 +248,7 @@ input_file              Input G-code file (required)
 3. For Smoothificator: Set external perimeter extrusion width to 0.4-0.5mm
 4. For Bricklayers: Enable at least 2 perimeters
 5. For Non-planar: Use 10-20% infill with rectilinear or grid pattern
+6. For Bridge Densifier: Enable "Detect bridging perimeters" in slicer (usually default)
 
 ### Recommended Feature Combinations
 
@@ -338,6 +359,15 @@ python SilkSteel.py model.gcode -o output.gcode -full
 3. Only activates after first layer starts
 4. Returns to normal Z after travel completes
 
+### How Bridge Densifier Works
+1. Detects bridge infill sections and buffers all bridge lines
+2. Identifies parallel line pairs and creates edge lines offset perpendicular to bridge direction
+3. For single isolated lines: creates 3 parallel copies (LEFT, MIDDLE, RIGHT)
+4. Generates intermediate lines between paired lines when spacing allows
+5. Connects all lines using serpentine path optimization (always choose closest endpoint)
+6. Uses G0 travel for long connectors (>5mm), G1 extrusion for short connectors
+7. Maintains proper E values throughout, minimizes E mode switching
+
 ---
 
 ## 🐛 Troubleshooting
@@ -374,6 +404,15 @@ python SilkSteel.py model.gcode -o output.gcode -full
 
 ### Issue: Stringing or blobs on travels
 **Solution**: Safe Z-hop should prevent this - check that it's enabled
+
+### Issue: Bridges sagging or weak
+**Solution**: Enable Bridge Densifier with `-enableBridgeDensifier` or `-full`. If still weak, adjust slicer bridge settings (speed, flow, fan)
+
+### Issue: Over-extrusion on bridge edges
+**Solution**: This is rare but can happen with very thin bridges - bridge densifier can be left disabled if needed
+
+### Issue: Bridge processing taking too long
+**Solution**: Increase `-bridgeMinLength` to skip short bridges
 
 ### Issue: First layer problems
 **Solution**: Safe Z-hop intentionally skips first layer to avoid issues
