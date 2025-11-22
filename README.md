@@ -466,7 +466,7 @@ Contributions are welcome! Please feel free to submit pull requests or open issu
 
 ---
 
-**Made with ❤️ and 🧠 and 🤖 for the 3D printing community**
+**Made with ❤️ and 🧠 and 🤖 for the 3D printing community.**
 If this project helps you creating even more awesome 3D prints and if you want to help us improve this and other tools, you can sponsor us a cup of :coffee: - or two! :)
 [donate](https://www.48design.com/donate/)
 
