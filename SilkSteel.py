@@ -178,12 +178,12 @@ logging.basicConfig(
     ]
 )
 
-logging.info("=" * 70)
+logging.info("=" * 85)
 logging.info("SilkSteel started")
 logging.info(f"Script directory: {script_dir}")
 logging.info(f"Log file: {log_file}")
 logging.info(f"Command line args: {sys.argv}")
-logging.info("=" * 70)
+logging.info("=" * 85)
 
 # Smoothificator constants
 DEFAULT_OUTER_LAYER_HEIGHT = "Auto"  # "Auto" = min(first_layer, base_layer) * 0.5, "Min" = min_layer_height from G-code, or float value (mm)
@@ -1328,7 +1328,9 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
         # AND there's no travel move (G0) between first and second line (continuous section)
         if first_long.get('intermediate_after') is not None or first_long.get('single_line_edges') is not None:
             # Check for travel moves between first line and its paired line
-            paired_idx = first_long['intermediate_after'].get('paired_idx')
+            paired_idx = None
+            if first_long.get('intermediate_after') is not None:
+                paired_idx = first_long['intermediate_after'].get('paired_idx')
             has_travel = False
             if paired_idx is not None:
                 # Check all lines in buffer between the two long lines
@@ -1766,7 +1768,7 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                 current_pos = (right_edge['start'][0], right_edge['start'][1])
         
         # Insert edge intermediate AFTER last bridge line
-        if move_idx == long_move_indices[-1] and edge_after_last:
+        if long_move_indices and move_idx == long_move_indices[-1] and edge_after_last:
             dist_to_edge_start = math.sqrt((edge_after_last['start'][0] - current_pos[0])**2 + (edge_after_last['start'][1] - current_pos[1])**2)
             dist_to_edge_end = math.sqrt((edge_after_last['end'][0] - current_pos[0])**2 + (edge_after_last['end'][1] - current_pos[1])**2)
             
@@ -1842,9 +1844,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     else:
         in_place_mode = False
     
-    logging.info("=" * 70)
+    logging.info("=" * 85)
     logging.info("SMOOTHIFICATOR ADVANCED - Starting G-code processing")
-    logging.info("=" * 70)
+    logging.info("=" * 85)
     logging.info(f"Input file: {input_file}")
     if in_place_mode:
         logging.info(f"Output mode: IN-PLACE (for slicer compatibility)")
@@ -1858,10 +1860,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     logging.info(f"  - Bridge Densifier: {enable_bridge_densifier}")
     
     # Print to console for user visibility
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 85)
     print("  SILKSTEEL - Advanced G-code Post-Processor")
     print("  \"Smooth on the outside, strong on the inside\"")
-    print("=" * 70)
+    print("=" * 85)
     print(f"  Input:  {os.path.basename(input_file)}")
     if in_place_mode:
         print(f"  Output: [IN-PLACE] {os.path.basename(output_file)}")
@@ -1882,7 +1884,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     if enable_bridge_densifier:
         features.append("Bridge Densifier")
     print(", ".join(features) if features else "(None)")
-    print("=" * 70)
+    print("=" * 85)
     
     # Read the input G-code
     print("Reading G-code file...")
@@ -4520,13 +4522,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     logging.info("="*70)
     
     # Print summary to console
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 85)
     print("  [OK] SILKSTEEL POST-PROCESSING COMPLETE")
-    print("=" * 70)
+    print("=" * 85)
     print(f"  Total layers: {current_layer}")
     print(f"  Output size: {len(modified_gcode)} bytes")
     print(f"  Output file: {output_file}")
-    print("=" * 70 + "\n")
+    print("=" * 85 + "\n")
 
 # Main execution
 if __name__ == "__main__":
@@ -4605,7 +4607,7 @@ if __name__ == "__main__":
     # Log all received arguments for debugging
     if debug >= 1:
         logging.info("Debug mode enabled - log level set to INFO")
-        logging.info("=" * 70)
+        logging.info("=" * 85)
         logging.info("Command-line arguments received:")
         logging.info(f"  Raw sys.argv: {sys.argv}")
         logging.info(f"  Parsed input_file: {args.input_file}")
@@ -4613,7 +4615,7 @@ if __name__ == "__main__":
     logging.info(f"  Enable all: {args.enable_all}")
     logging.info(f"  Enable bricklayers: {args.enable_bricklayers}")
     logging.info(f"  Enable non-planar: {args.enable_non_planar}")
-    logging.info("=" * 70)
+    logging.info("=" * 85)
     
     # Validate that we have an input file
     if not args.input_file:
@@ -4664,10 +4666,10 @@ if __name__ == "__main__":
         logging.error(traceback.format_exc())
         
         # Print error to console
-        print("\n" + "=" * 70, file=sys.stderr)
+        print("\n" + "=" * 85, file=sys.stderr)
         print("  ✗ ERROR: POST-PROCESSING FAILED", file=sys.stderr)
-        print("=" * 70, file=sys.stderr)
+        print("=" * 85, file=sys.stderr)
         print(f"  {str(e)}", file=sys.stderr)
-        print("=" * 70 + "\n", file=sys.stderr)
+        print("=" * 85 + "\n", file=sys.stderr)
         sys.exit(2)
 
