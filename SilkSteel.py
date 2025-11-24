@@ -167,14 +167,29 @@ def write_and_track(buffer, line, recent_buffer, max_size=20):
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
+# Global counters for warnings/errors
+_warning_count = 0
+_error_count = 0
+
+class CountingHandler(logging.Handler):
+    """Custom logging handler that counts warnings and errors"""
+    def emit(self, record):
+        global _warning_count, _error_count
+        if record.levelno >= logging.ERROR:
+            _error_count += 1
+        elif record.levelno >= logging.WARNING:
+            _warning_count += 1
+
 # Configure logging to both console and file
 log_file = os.path.join(script_dir, "SilkSteel_log.txt")
+counting_handler = CountingHandler()
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler(log_file, mode='w', encoding='utf-8'),  # UTF-8 for Unicode emojis
-        logging.StreamHandler(sys.stdout)          # Also print to console
+        logging.StreamHandler(sys.stdout),          # Also print to console
+        counting_handler  # Count warnings/errors
     ]
 )
 
@@ -1118,7 +1133,31 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             return output, final_e, current_pos
         else:
             # Zero moves - just return buffered lines
-            logging.warning(f"[BRIDGE] No moves found in bridge section!")
+            # This typically happens when buffer contains only travel moves, retracts, or metadata
+            type_line = next((line for line in buffered_lines if ";TYPE:" in line), None)
+            type_str = type_line.strip() if type_line else "unknown"
+            
+            # Count actual extrusion moves in buffer
+            extrusion_lines = [line for line in buffered_lines 
+                             if line.startswith("G1") and "E" in line and "X" in line and "Y" in line]
+            
+            if len(extrusion_lines) == 0:
+                # This is normal - buffer only has travel moves or retracts, not actual bridge extrusion
+                logging.debug(f"[BRIDGE] Skipping non-extrusion buffer at Z={current_z:.2f}mm ({len(buffered_lines)} lines)")
+            elif len(extrusion_lines) == 1:
+                # Single extrusion move - this is a tail segment, just pass through
+                # This happens at the end of bridge sequences after main processing
+                logging.debug(f"[BRIDGE] Skipping single-move buffer at Z={current_z:.2f}mm (tail segment)")
+            else:
+                # Multiple extrusion moves but couldn't parse them - this IS unexpected
+                logging.warning(f"[BRIDGE] Could not parse {len(extrusion_lines)} extrusion moves at Z={current_z:.2f}mm")
+                logging.warning(f"[BRIDGE]   TYPE: {type_str}, buffer size: {len(buffered_lines)} lines")
+                # Log first few lines for debugging
+                for idx, line in enumerate(buffered_lines[:5]):
+                    logging.warning(f"[BRIDGE]   Line {idx+1}: {line.rstrip()}")
+                if len(buffered_lines) > 5:
+                    logging.warning(f"[BRIDGE]   ... ({len(buffered_lines) - 5} more lines)")
+            
             final_e = current_e
             return buffered_lines, final_e, (start_x, start_y)
     
@@ -1823,7 +1862,7 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
     return output, final_e, current_pos
 
 def process_gcode(input_file, output_file=None, outer_layer_height=None,
-                 enable_smoothificator=True,
+                 enable_smoothificator=True, smoothificator_skip_first_layer=True,
                  enable_bricklayers=False, bricklayers_extrusion_multiplier=1.0,
                  enable_nonplanar=False, deform_type='sine',
                  segment_length=DEFAULT_SEGMENT_LENGTH, amplitude=DEFAULT_AMPLITUDE, frequency=DEFAULT_FREQUENCY,
@@ -1854,6 +1893,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info(f"Output file: {output_file}")
     logging.info(f"Features enabled:")
     logging.info(f"  - Smoothificator (External perimeters): {enable_smoothificator}")
+    if enable_smoothificator:
+        logging.info(f"    - Skip first layer: {smoothificator_skip_first_layer}")
     logging.info(f"  - Bricklayers (Internal perimeters): {enable_bricklayers}")
     logging.info(f"  - Non-planar Infill: {enable_nonplanar}")
     logging.info(f"  - Safe Z-hop: {enable_safe_z_hop}")
@@ -1947,7 +1988,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Print feature settings summary to console
     print("\nFeature Settings:")
     if enable_smoothificator:
-        print(f"  • Smoothificator: target layer height = {outer_layer_height:.3f}mm")
+        skip_status = "Yes (preserves first layer tuning)" if smoothificator_skip_first_layer else "No"
+        print(f"  • Smoothificator: target layer height = {outer_layer_height:.3f}mm, skip first layer = {skip_status}")
     if enable_bricklayers:
         print(f"  • Bricklayers: extrusion multiplier = {bricklayers_extrusion_multiplier:.2f}x")
     if enable_nonplanar:
@@ -3451,7 +3493,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             continue
 
         # ========== SMOOTHIFICATOR: External Perimeter Processing ==========
-        if enable_smoothificator and (";TYPE:External perimeter" in line or ";TYPE:Outer wall" in line or ";TYPE:Overhang perimeter" in line):
+        if enable_smoothificator and (smoothificator_skip_first_layer and current_layer > 0 or not smoothificator_skip_first_layer) and (";TYPE:External perimeter" in line or ";TYPE:Outer wall" in line or ";TYPE:Overhang perimeter" in line):
             
             external_block_lines = []
             external_block_lines.append(line)
@@ -4559,6 +4601,12 @@ if __name__ == "__main__":
                        help='Enable Smoothificator (external perimeter smoothing) (default: enabled)')
     parser.add_argument('-disableSmoothificator', '--disable-smoothificator', action='store_false', dest='enable_smoothificator',
                        help='Disable Smoothificator functionality')
+    parser.add_argument('-smoothificatorSkipFirstLayer', '--smoothificator-skip-first-layer', 
+                       action='store_true', default=True, dest='smoothificator_skip_first_layer',
+                       help='Skip first layer in smoothificator (default: enabled - preserves first layer tuning)')
+    parser.add_argument('-smoothificatorProcessFirstLayer', '--smoothificator-process-first-layer',
+                       action='store_false', dest='smoothificator_skip_first_layer',
+                       help='Process first layer with smoothificator')
     
     parser.add_argument('-enableBricklayers', '--enable-bricklayers', action='store_true', default=False,
                        help='Enable Bricklayers Z-shifting (default: disabled)')
@@ -4643,6 +4691,7 @@ if __name__ == "__main__":
             output_file=args.output_file,
             outer_layer_height=args.outer_layer_height,
             enable_smoothificator=args.enable_smoothificator,
+            smoothificator_skip_first_layer=args.smoothificator_skip_first_layer,
             enable_bricklayers=args.enable_bricklayers,
             bricklayers_extrusion_multiplier=args.bricklayers_extrusion,
             enable_nonplanar=args.enable_non_planar,
@@ -4658,6 +4707,7 @@ if __name__ == "__main__":
             enable_bridge_densifier=args.enable_bridge_densifier,
             debug=debug
         )
+        
     except Exception as e:
         logging.error(f"\n{'='*70}")
         logging.error(f"FATAL ERROR: {str(e)}")
@@ -4670,6 +4720,21 @@ if __name__ == "__main__":
         print("  ✗ ERROR: POST-PROCESSING FAILED", file=sys.stderr)
         print("=" * 85, file=sys.stderr)
         print(f"  {str(e)}", file=sys.stderr)
-        print("=" * 85 + "\n", file=sys.stderr)
+        print(f"\n  📄 Check the log file for details: {log_file}", file=sys.stderr)
+        print("=" * 85, file=sys.stderr)
+        input("\n  Press ENTER to close this window...")
         sys.exit(2)
+    
+    # Check for warnings/errors and pause if any occurred (after successful completion)
+    if _warning_count > 0 or _error_count > 0:
+        print("\n" + "=" * 85)
+        print("  ⚠️  PROCESSING COMPLETED WITH ISSUES")
+        print("=" * 85)
+        if _error_count > 0:
+            print(f"  ✗ Errors: {_error_count}")
+        if _warning_count > 0:
+            print(f"  ⚠️  Warnings: {_warning_count}")
+        print(f"\n  📄 Check the log file for details: {log_file}")
+        print("=" * 85)
+        input("\n  Press ENTER to close this window...")
 
