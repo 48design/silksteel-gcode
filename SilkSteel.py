@@ -3710,6 +3710,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Process the travel line through Z-hop manually
             # Check if Z-hop should apply
+            # IMPORTANT: We might ALREADY be hopped from a travel move before gap fill started!
+            # In that case, just write the travel and drop back to current Z afterward
+            did_hop_for_gap_fill = False
             if enable_safe_z_hop and seen_first_layer:
                 # Check if we need Z-hop
                 layer_max_z = 0.0
@@ -3724,10 +3727,17 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         # Hop up
                         write_and_track(output_buffer, f"G0 Z{safe_z:.3f} F8400 ; Safe Z-hop\n", recent_output_lines)
                         current_travel_z = safe_z
-                        is_hopped = True
+                        did_hop_for_gap_fill = True
                 
                 # Write the travel
                 write_and_track(output_buffer, travel_line, recent_output_lines)
+                
+                # Drop back immediately after gap fill travel if we're hopped (either from us or already hopped)
+                # Check is_hopped to see if we were already hopped, or did_hop_for_gap_fill if we just hopped
+                if is_hopped or did_hop_for_gap_fill:
+                    write_and_track(output_buffer, f"G0 Z{current_z:.3f} F8400 ; Drop back to current Z\n", recent_output_lines)
+                    current_travel_z = current_z
+                    is_hopped = False  # Clear the hopped state
             else:
                 # No Z-hop, just write the travel
                 write_and_track(output_buffer, travel_line, recent_output_lines)
