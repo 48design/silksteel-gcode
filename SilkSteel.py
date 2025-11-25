@@ -224,6 +224,57 @@ logging.info(f"Log file: {log_file}")
 logging.info(f"Command line args: {sys.argv}")
 logging.info("=" * 85)
 
+# Type enumeration for grid cell classification
+# Used to track what type of material occupies each grid cell
+TYPE_NONE = 0
+TYPE_INTERNAL_INFILL = 1
+TYPE_SOLID_INFILL = 2
+TYPE_TOP_SOLID_INFILL = 3
+TYPE_BRIDGE_INFILL = 4
+TYPE_INTERNAL_BRIDGE_INFILL = 5
+TYPE_INTERNAL_PERIMETER = 6
+TYPE_EXTERNAL_PERIMETER = 7
+TYPE_OVERHANG_PERIMETER = 8
+TYPE_GAP_FILL = 9
+
+# Helper function to get type from TYPE marker string
+def get_type_from_marker(type_marker):
+    """Convert TYPE marker string to type enum"""
+    if 'Internal infill' in type_marker:
+        return TYPE_INTERNAL_INFILL
+    elif 'Top solid infill' in type_marker:
+        return TYPE_TOP_SOLID_INFILL
+    elif 'Solid infill' in type_marker:
+        return TYPE_SOLID_INFILL
+    elif 'Internal bridge infill' in type_marker:
+        return TYPE_INTERNAL_BRIDGE_INFILL
+    elif 'Bridge infill' in type_marker:
+        return TYPE_BRIDGE_INFILL
+    elif 'Overhang perimeter' in type_marker:
+        return TYPE_OVERHANG_PERIMETER
+    elif 'External perimeter' in type_marker or 'Outer wall' in type_marker:
+        return TYPE_EXTERNAL_PERIMETER
+    elif 'Internal perimeter' in type_marker or 'Inner wall' in type_marker or type_marker == ';TYPE:Perimeter':
+        return TYPE_INTERNAL_PERIMETER
+    elif 'Gap fill' in type_marker:
+        return TYPE_GAP_FILL
+    else:
+        return TYPE_NONE
+
+# Type colors for visualization (RGB tuples) - matches PrusaSlicer/OrcaSlicer colors
+TYPE_COLORS = {
+    TYPE_NONE: (0, 0, 0),
+    TYPE_INTERNAL_INFILL: (176, 48, 42),
+    TYPE_SOLID_INFILL: (214, 50, 214),
+    TYPE_TOP_SOLID_INFILL: (254, 26, 26),
+    TYPE_BRIDGE_INFILL: (152, 152, 254),
+    TYPE_INTERNAL_BRIDGE_INFILL: (169, 169, 220),
+    TYPE_INTERNAL_PERIMETER: (254, 254, 102),
+    TYPE_EXTERNAL_PERIMETER: (254, 164, 0),
+    TYPE_OVERHANG_PERIMETER: (0, 0, 254),
+    TYPE_GAP_FILL: (254, 254, 254),
+}
+
 # Smoothificator constants
 DEFAULT_OUTER_LAYER_HEIGHT = "Auto"  # "Auto" = min(first_layer, base_layer) * 0.5, "Min" = min_layer_height from G-code, or float value (mm)
 
@@ -2208,6 +2259,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         current_layer_num = -1  # Will be set from ;LAYER: marker
         in_solid_infill = False
         in_internal_infill = False
+        current_type = TYPE_NONE  # Track current TYPE for grid metadata
         last_solid_pos = None  # Track last position to mark all cells along line
         last_solid_coords = None  # Track actual X,Y coordinates for DDA
         last_infill_pos = None  # Track last position for infill
@@ -2269,10 +2321,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Detect solid infill AND perimeters (both block infill from below)
             if ';TYPE:Solid infill' in line or ';TYPE:Top solid infill' in line or ';TYPE:Bridge infill' in line or \
                ';TYPE:Internal bridge infill' in line or ';TYPE:Overhang perimeter' in line or \
-               ';TYPE:External perimeter' in line or ';TYPE:Internal perimeter' in line or ';TYPE:Perimeter' in line:
+               ';TYPE:External perimeter' in line or ';TYPE:Internal perimeter' in line or ';TYPE:Perimeter' in line or \
+               ';TYPE:Outer wall' in line or ';TYPE:Inner wall' in line:
 
                 in_solid_infill = True
                 in_internal_infill = False
+                current_type = get_type_from_marker(line)
                 # Initialize solid tracking from current global position
                 last_solid_coords = (grid_build_pos['x'], grid_build_pos['y'])
                 last_solid_pos = (int(grid_build_pos['x'] / grid_resolution), int(grid_build_pos['y'] / grid_resolution))
@@ -2283,6 +2337,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             elif ';TYPE:Internal infill' in line:
                 in_internal_infill = True
                 in_solid_infill = False
+                current_type = TYPE_INTERNAL_INFILL
                 last_solid_pos = None
                 last_solid_coords = None
                 # Initialize infill tracking from current global position
@@ -2295,6 +2350,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     type_markers_seen.add(type_match.group(1))
                 in_solid_infill = False
                 in_internal_infill = False
+                current_type = TYPE_NONE
                 last_solid_pos = None  # Reset when exiting solid infill or perimeter
                 last_solid_coords = None
                 last_infill_pos = None
@@ -2391,12 +2447,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 # Grid resolution is sized to match extrusion width, so just mark center cells
                                 for _ in range(max_iterations + 10):  # Safety margin
-                                    # Mark current cell as solid
+                                    # Mark current cell as solid with type information
                                     cell_key = (current_cell_x, current_cell_y, current_layer_num)
                                     if cell_key not in solid_at_grid:
-                                        solid_at_grid[cell_key] = {'solid': True, 'infill_crossings': 0}
+                                        solid_at_grid[cell_key] = {'solid': True, 'infill_crossings': 0, 'type': current_type}
                                     else:
                                         solid_at_grid[cell_key]['solid'] = True
+                                        # Keep the first type encountered (or could use last, or prioritize certain types)
+                                        if 'type' not in solid_at_grid[cell_key]:
+                                            solid_at_grid[cell_key]['type'] = current_type
                                     cells_marked += 1
                                     
                                     # Check if we've reached the target
@@ -2512,11 +2571,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 for _ in range(max_iterations + 10):
                                     cell_key = (current_cell_x, current_cell_y, current_layer_num)
-                                    # Increment crossing count for this cell
+                                    # Increment crossing count for this cell and store type
                                     if cell_key not in solid_at_grid:
-                                        solid_at_grid[cell_key] = {'solid': False, 'infill_crossings': 1}
+                                        solid_at_grid[cell_key] = {'solid': False, 'infill_crossings': 1, 'type': TYPE_INTERNAL_INFILL}
                                     else:
                                         solid_at_grid[cell_key]['infill_crossings'] += 1
+                                        if 'type' not in solid_at_grid[cell_key]:
+                                            solid_at_grid[cell_key]['type'] = TYPE_INTERNAL_INFILL
                                     
                                     if current_cell_x == target_cell_x and current_cell_y == target_cell_y:
                                         break
@@ -2531,9 +2592,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # First point - just increment count
                                 cell_key = (gx, gy, current_layer_num)
                                 if cell_key not in solid_at_grid:
-                                    solid_at_grid[cell_key] = {'solid': False, 'infill_crossings': 1}
+                                    solid_at_grid[cell_key] = {'solid': False, 'infill_crossings': 1, 'type': TYPE_INTERNAL_INFILL}
                                 else:
                                     solid_at_grid[cell_key]['infill_crossings'] += 1
+                                    if 'type' not in solid_at_grid[cell_key]:
+                                        solid_at_grid[cell_key]['type'] = TYPE_INTERNAL_INFILL
                         
                         # ALWAYS save coordinates for next iteration (even for travel moves)
                         # This ensures next extrusion knows where it's starting from
@@ -2724,6 +2787,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         total_safe_ranges = sum(len(ranges) for ranges in grid_cell_safe_z.values())
         logging.info(f"  Total safe range entries: {total_safe_ranges}")
         
+        # Extract all layer numbers for visualization and debugging
+        all_layer_nums = sorted(set(layer for _, _, layer in solid_at_grid.keys()))
+        
         if debug >= 3:
             print(f"[DEBUG] Calculated safe Z ranges for {len(all_grid_positions)} unique grid cells")
             print(f"[DEBUG] Identified {sum(len(regions) for regions in grid_cell_solid_regions.values())} solid regions")
@@ -2738,7 +2804,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     print(f"    Solid region: layers {region_start}-{region_end}, Z={z_bottom:.2f} to {z_top:.2f}")
             
             # Check if we're missing bottom layers
-            all_layer_nums = sorted(set(layer for _, _, layer in solid_at_grid.keys()))
             print(f"\n[DEBUG] Solid layers detected: {all_layer_nums[:20]}..." if len(all_layer_nums) > 20 else f"\n[DEBUG] Solid layers detected: {all_layer_nums}")
             print(f"[DEBUG] First solid layer: {min(all_layer_nums)}, Last: {max(all_layer_nums)}")
             
@@ -2767,51 +2832,70 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     
                     layers_to_visualize = sorted(all_layer_nums)  # ALL layers
                     print(f"[DEBUG] Generating PNG images for {len(layers_to_visualize)} layers...")
+                    
                     for layer in layers_to_visualize:
-                        # Create image (black background = air)
-                        img = Image.new('RGB', (img_width, img_height), color='black')
-                        draw = ImageDraw.Draw(img)
+                        layer_z = z_layer_map.get(layer, 0)
                         
-                        # Draw grid cells with solid material (white only)
+                        # IMAGE 1: Solid only (white/black) - simple solid detection
+                        img_solid = Image.new('RGB', (img_width, img_height), color='black')
+                        draw_solid = ImageDraw.Draw(img_solid)
+                        
+                        # IMAGE 2: Type-based colors - shows what type of material
+                        img_type = Image.new('RGB', (img_width, img_height), color='black')
+                        draw_type = ImageDraw.Draw(img_type)
+                        
+                        # IMAGE 3: Infill crossings overlay (for debugging)
+                        img_infill = Image.new('RGB', (img_width, img_height), color='black')
+                        draw_infill = ImageDraw.Draw(img_infill)
+                        
+                        # Draw all cells for this layer
                         for cell_key, cell_data in solid_at_grid.items():
                             gx, gy, lay = cell_key
-                            if lay == layer and cell_data.get('solid', False):
+                            if lay == layer:
                                 # Convert to image coordinates (flip Y axis)
                                 img_x = (gx - grid_x_min) * scale
                                 img_y = (grid_y_max - gy) * scale  # Flip Y
                                 
-                                # Draw filled rectangle for this grid cell (white = solid)
-                                draw.rectangle(
-                                    [img_x, img_y, img_x + scale - 1, img_y + scale - 1],
-                                    fill='white'
-                                )
-                        
-                        # Draw infill lines (very dark grey, minimalistic)
-                        # Check cells that have infill crossings
-                        for cell_key, cell_data in solid_at_grid.items():
-                            gx, gy, lay = cell_key
-                            if lay == layer:
+                                # Solid image: white = solid, black = air
+                                if cell_data.get('solid', False):
+                                    draw_solid.rectangle(
+                                        [img_x, img_y, img_x + scale - 1, img_y + scale - 1],
+                                        fill='white'
+                                    )
+                                
+                                # Type image: color-coded by material type
+                                cell_type = cell_data.get('type', TYPE_NONE)
+                                if cell_type != TYPE_NONE:
+                                    type_color = TYPE_COLORS.get(cell_type, (128, 128, 128))
+                                    draw_type.rectangle(
+                                        [img_x, img_y, img_x + scale - 1, img_y + scale - 1],
+                                        fill=type_color
+                                    )
+                                
+                                # Infill crossings image: show infill density
                                 infill_crossings = cell_data.get('infill_crossings', 0)
                                 if infill_crossings > 0:
-                                    # Convert to image coordinates (flip Y axis)
-                                    img_x = (gx - grid_x_min) * scale
-                                    img_y = (grid_y_max - gy) * scale  # Flip Y
-                                    
-                                    # Draw very dark grey overlay (RGB 30,30,30 = very dark)
-                                    # Only draw if not already solid (white)
-                                    if not cell_data.get('solid', False):
-                                        draw.rectangle(
+                                    # Solid first (white)
+                                    if cell_data.get('solid', False):
+                                        draw_infill.rectangle(
+                                            [img_x, img_y, img_x + scale - 1, img_y + scale - 1],
+                                            fill='white'
+                                        )
+                                    # Infill overlay (dark grey only if not solid)
+                                    else:
+                                        draw_infill.rectangle(
                                             [img_x, img_y, img_x + scale - 1, img_y + scale - 1],
                                             fill=(30, 30, 30)
                                         )
                         
-                        # Save image
-                        layer_z = z_layer_map.get(layer, 0)
-                        img_filename = os.path.join(script_dir, f"layer_{layer:03d}_z{layer_z:.2f}.png")
-                        img.save(img_filename)
-                        print(f"  Saved: {os.path.basename(img_filename)}")
+                        # Save all three images
+                        img_solid.save(os.path.join(script_dir, f"layer_solid_{layer:03d}_z{layer_z:.2f}.png"))
+                        img_type.save(os.path.join(script_dir, f"layer_type_{layer:03d}_z{layer_z:.2f}.png"))
+                        # LUT visualization: shows solid (white) + infill crossings (dark grey)
+                        img_infill.save(os.path.join(script_dir, f"layer_lut_{layer:03d}_z{layer_z:.2f}.png"))
+                        print(f"  Saved: layer_[solid/type/lut]_{layer:03d}_z{layer_z:.2f}.png")
                     
-                    print(f"[DEBUG] Generated {len(layers_to_visualize)} layer visualization PNGs")
+                    print(f"[DEBUG] Generated {len(layers_to_visualize) * 3} layer visualization PNGs (solid, type, lut)")
             else:
                 print(f"[DEBUG] PIL/Pillow not available - skipping PNG generation")
                 print(f"[DEBUG] Install with: pip install Pillow")
@@ -3562,16 +3646,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 if vis_layer in z_layer_map:
                     vis_layer_z = z_layer_map[vis_layer]
                 
-                # Generate visualization (uses cached PIL check and grid bounds)
-                success = generate_lut_visualization(
-                    vis_layer, vis_layer_z, noise_lut, amplitude, grid_resolution,
-                    solid_at_grid, grid_cell_solid_regions, script_dir, logging
-                )
-                
-                # Warn once if PIL not available (on first layer only)
-                if not success and not HAS_PIL and current_layer == 1:
-                    logging.warning("PIL/Pillow not available - skipping LUT visualization")
-                    logging.warning("Install with: pip install Pillow")
+                # NOTE: LUT visualization is now generated in the grid debug section above
+                # (layer_lut_* images showing solid + infill crossings)
+                # The old generate_lut_visualization() function is no longer called here
             
             write_and_track(output_buffer, line, recent_output_lines)
             i += 1
@@ -3972,7 +4049,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             block_travel_y = entry_y
                         
                         # Detect if this layer is a base or top of a solid region
-                        # Use grid position of the perimeter block to check solid regions
+                        # Use grid position of the perimeter block to check solid layers above/below
                         is_base_layer = False
                         is_top_layer = False
                         
@@ -3980,14 +4057,27 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             gx = int(round(block_travel_x / grid_resolution))
                             gy = int(round(block_travel_y / grid_resolution))
                             
-                            if (gx, gy) in grid_cell_solid_regions:
-                                for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
-                                    if current_layer == region_start:
-                                        is_base_layer = True
-                                        #logging.info(f"  [BRICKLAYERS DEBUG] Layer {current_layer}, Block #{perimeter_block_count}: Detected BASE layer (region_start={region_start}, region_end={region_end})")
-                                    if current_layer == region_end:
-                                        is_top_layer = True
-                                        #logging.info(f"  [BRICKLAYERS DEBUG] Layer {current_layer}, Block #{perimeter_block_count}: Detected TOP layer (region_start={region_start}, region_end={region_end})")
+                            # Check if layer BELOW has solid (this is base layer - first layer of internal perimeters)
+                            # Look at layer - 1 to see if it has NO solid (then we're starting a new region)
+                            if current_layer > 0:
+                                prev_layer_key = (gx, gy, current_layer - 1)
+                                if prev_layer_key not in solid_at_grid or not solid_at_grid[prev_layer_key].get('solid', False):
+                                    is_base_layer = True
+                                    #logging.info(f"  [BRICKLAYERS DEBUG] Layer {current_layer}, Block #{perimeter_block_count}: Detected BASE layer (no solid below)")
+                            else:
+                                is_base_layer = True  # Layer 0 is always base
+                            
+                            # Check if layer ABOVE has BLOCKING solid (not internal perimeters)
+                            # Blocking types: external perimeters, solid infill, bridge infill, etc.
+                            # Non-blocking: internal perimeters (they will also be shifted)
+                            next_layer_key = (gx, gy, current_layer + 1)
+                            if next_layer_key in solid_at_grid:
+                                next_type = solid_at_grid[next_layer_key].get('type', TYPE_NONE)
+                                # Internal perimeters don't block (they will also be bricklayered)
+                                # Everything else blocks (external perimeters, solid infill, bridges, etc.)
+                                if next_type != TYPE_INTERNAL_PERIMETER and next_type != TYPE_NONE:
+                                    is_top_layer = True
+                                    #logging.info(f"  [BRICKLAYERS DEBUG] Layer {current_layer}, Block #{perimeter_block_count}: Detected TOP layer (blocking solid type {next_type} above)")
                         
                         # On base layers: all blocks are base blocks (no shifting)
                         # On other layers: alternate between shifted and base
@@ -4887,9 +4977,9 @@ if __name__ == "__main__":
     
     # Debug mode arguments
     debug_group = parser.add_mutually_exclusive_group()
-    debug_group.add_argument('-debug', '--debug', dest='debug_level', action='store_const', const=0, default=-1,
-                       help='Enable basic debug mode with standard logging (WARNING level)')
-    debug_group.add_argument('-debug-full', '--debug-full', dest='debug_level', action='store_const', const=1,
+    debug_group.add_argument('-debug', '--debug', dest='debug_level', action='store_const', const=1, default=0,
+                       help='Enable basic debug mode with standard logging (INFO level)')
+    debug_group.add_argument('-debug-full', '--debug-full', dest='debug_level', action='store_const', const=2,
                        help='Enable full debug mode: INFO logging + PNG layer images + debug G-code visualization')
     
     args = parser.parse_args()
