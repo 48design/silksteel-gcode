@@ -17,6 +17,8 @@ SilkSteel is an advanced G-code post-processing tool that applies multiple optim
 - **Non-planar Infill**: Modulates Z height during infill printing to mechanically interlock with adjacent layers
 - **Valley Filling**: Intelligently fills gaps between infill layers to prevent air pockets and improve strength
 - **Safe Z-hop**: Intelligently lifts the nozzle during travel moves to prevent collisions with already-printed geometry
+- **Bridge Densifier**: Adds parallel lines to bridges for improved strength and surface quality
+- **Gap Fill Removal**: Optionally removes gap fill sections to reduce print time and potential artifacts
 
 The result? Prints with **silk-smooth exteriors** and **steel-strong interiors**.
 
@@ -103,6 +105,18 @@ Strengthens bridge sections by adding parallel extrusion lines:
 
 **Best for:** Parts with long bridges or many overhangs
 
+### 🔧 Gap Fill Removal (Optional, `-enableRemoveGapFill`)
+Removes gap fill sections from G-code:
+- Detects and removes ";TYPE:Gap fill" sections
+- Can reduce print time by skipping thin gap-filling passes
+- May improve surface quality by eliminating potential artifacts from gap fill
+- Useful when gap fill causes problems or isn't needed
+- Position tracking maintained even when gap fill is removed
+
+**Best for:** Prints where gap fill causes artifacts or isn't structurally necessary
+
+**Note:** Gap fill is often useful for sealing small gaps. Only remove it if you're experiencing issues or want faster prints.
+
 ---
 
 ## 📦 Installation
@@ -143,6 +157,12 @@ python SilkSteel.py input.gcode -o output.gcode -enableBricklayers
 # All features with custom settings
 python SilkSteel.py input.gcode -o output.gcode -full -amplitude 1.5 -frequency 8
 
+# Full mode but disable gap fill removal
+python SilkSteel.py input.gcode -o output.gcode -full -disableRemoveGapFill
+
+# Full mode but disable bridge densifier (if causing issues)
+python SilkSteel.py input.gcode -o output.gcode -full -disableBridgeDensifier
+
 # Bricklayers with reduced extrusion on shifted blocks
 python SilkSteel.py input.gcode -o output.gcode -enableBricklayers -bricklayersExtrusion 0.9
 ```
@@ -165,10 +185,16 @@ input_file              Input G-code file (required)
 
 ### Feature Toggles
 ```
--full, --enable-all                Enable all features (Bricklayers + Non-planar + Bridge Densifier)
+-full, --enable-all                Enable all features (Bricklayers + Non-planar + 
+                                   Bridge Densifier + Gap Fill Removal)
 -enableBricklayers                 Enable Bricklayers Z-shifting (default: disabled)
+-disableBricklayers                Disable Bricklayers (overrides -full)
 -enableNonPlanar                   Enable non-planar infill (default: disabled)
+-disableNonPlanar                  Disable non-planar infill (overrides -full)
 -enableBridgeDensifier             Enable bridge densifier (default: disabled)
+-disableBridgeDensifier            Disable bridge densifier (overrides -full)
+-enableRemoveGapFill               Enable gap fill removal (default: disabled)
+-disableRemoveGapFill              Disable gap fill removal (overrides -full)
 -disableSmoothificator             Disable Smoothificator (default: enabled)
 -disableSafeZHop                   Disable safe Z-hop (default: enabled)
 ```

@@ -62,10 +62,10 @@ except ImportError:
 # These patterns are compiled ONCE at startup and reused thousands of times.
 # Using pre-compiled patterns is ~2-3x faster than re.search() with inline patterns.
 # Always use these via the extract_x/y/z/e/f() functions or parse_gcode_line().
-REGEX_X = re.compile(r'X([-\d.]+)')
-REGEX_Y = re.compile(r'Y([-\d.]+)')
-REGEX_Z = re.compile(r'Z([-\d.]+)')
-REGEX_E = re.compile(r'E([-\d.]+)')
+REGEX_X = re.compile(r'X([-+]?\d*\.?\d+)')
+REGEX_Y = re.compile(r'Y([-+]?\d*\.?\d+)')
+REGEX_Z = re.compile(r'Z([-+]?\d*\.?\d+)')
+REGEX_E = re.compile(r'E([-+]?\d*\.?\d+)')
 REGEX_F = re.compile(r'F(\d+)')
 REGEX_E_SUB = re.compile(r'E[-\d.]+')
 REGEX_Z_SUB = re.compile(r'Z[-\d.]+\s*')
@@ -126,25 +126,39 @@ def parse_gcode_line(line):
         if params['x'] is not None:
             current_x = params['x']
     """
+    # Only parse the portion before any comment to avoid capturing things like "Z-hop" or "E-layers".
+    code_part = line.split(';', 1)[0]
     result = {'x': None, 'y': None, 'z': None, 'e': None, 'f': None}
     
-    x_match = REGEX_X.search(line)
+    x_match = REGEX_X.search(code_part)
     if x_match:
-        result['x'] = float(x_match.group(1))
+        try:
+            result['x'] = float(x_match.group(1))
+        except ValueError:
+            pass
     
-    y_match = REGEX_Y.search(line)
+    y_match = REGEX_Y.search(code_part)
     if y_match:
-        result['y'] = float(y_match.group(1))
+        try:
+            result['y'] = float(y_match.group(1))
+        except ValueError:
+            pass
     
-    z_match = REGEX_Z.search(line)
+    z_match = REGEX_Z.search(code_part)
     if z_match:
-        result['z'] = float(z_match.group(1))
+        try:
+            result['z'] = float(z_match.group(1))
+        except ValueError:
+            pass
     
-    e_match = REGEX_E.search(line)
+    e_match = REGEX_E.search(code_part)
     if e_match:
-        result['e'] = float(e_match.group(1))
+        try:
+            result['e'] = float(e_match.group(1))
+        except ValueError:
+            pass
     
-    f_match = REGEX_F.search(line)
+    f_match = REGEX_F.search(code_part)
     if f_match:
         result['f'] = int(f_match.group(1))
     
@@ -157,9 +171,19 @@ def write_line(buffer, line):
     else:
         buffer.write(line)
 
+_update_position_for_output = None  # Will be set inside process_gcode once update_position is defined
+
 def write_and_track(buffer, line, recent_buffer, max_size=20):
-    """Write line to buffer and add to rolling buffer for lookback operations"""
+    """Write line to buffer, update global position if callback set, and add to rolling buffer.
+    IMPORTANT: Position tracking is now OUTPUT-DRIVEN. We only update the nozzle position
+    based on lines that are ACTUALLY written to the output. This prevents mismatches where
+    skipped/removed input lines (e.g., gap fill removal) would previously advance the
+    position tracker incorrectly.
+    """
     write_line(buffer, line)
+    # Update position ONLY from written lines
+    if _update_position_for_output:
+        _update_position_for_output(line)
     recent_buffer.append(line)
     if len(recent_buffer) > max_size:
         recent_buffer.pop(0)  # Remove oldest line
@@ -209,7 +233,7 @@ DEFAULT_FREQUENCY = 8  # Default frequency of the sine wave (reduced for longer 
 DEFAULT_SEGMENT_LENGTH = 0.64  # Split infill lines into segments of this length (mm) - LARGER = fewer segments, smoother motion
 DEFAULT_NONPLANAR_FEEDRATE_MULTIPLIER = 1.1  # Boost feedrate by this factor for non-planar 3D moves (2.0 = double speed)
 DEFAULT_ENABLE_ADAPTIVE_EXTRUSION = True  # Enable adaptive extrusion multiplier for Z-lift (adds material to droop down and bond)
-DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER = 1.5  # Base multiplier for adaptive extrusion (e.g., 1.33 = 33% extra material per layer height of lift)
+DEFAULT_ADAPTIVE_EXTRUSION_MULTIPLIER = 1.75  # Base multiplier for adaptive extrusion (e.g., 1.33 = 33% extra material per layer height of lift)
 
 # Grid resolution for solid occupancy detection
 # Will be read from G-code if available, otherwise use default
@@ -217,15 +241,19 @@ DEFAULT_EXTRUSION_WIDTH = 0.45  # Default extrusion width in mm (typical value)
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
-DEFAULT_SAFE_Z_HOP_MARGIN = 0.5  # mm - safety margin above max Z in layer
-DEFAULT_Z_HOP_RETRACTION = 3.0  # mm - retraction distance during Z-hop to prevent stringing
+DEFAULT_SAFE_Z_HOP_MARGIN = 0.75  # mm - safety margin above max Z in layer
+DEFAULT_Z_HOP_RETRACTION = 1.5  # mm - retraction distance during Z-hop to prevent stringing
 
 # Bridge densifier constants
 DEFAULT_ENABLE_BRIDGE_DENSIFIER = False  # Disabled by default (experimental feature)
 DEFAULT_BRIDGE_MIN_LENGTH = 2.0  # mm - Only densify lines longer than this (filters out short bridges)
 DEFAULT_BRIDGE_MAX_SPACING = 0.6  # mm - Maximum spacing between parallel lines to add intermediate (typical bridge line width is 0.4-0.45mm)
+DEFAULT_BRIDGE_EXTRUSION_COMPENSATION = 0.25  # Factor for intermediate extrusion (0.5 = 50%, fills gap not full width - round vs squished)
 DEFAULT_BRIDGE_MAX_GAP = 3  # Maximum number of connector lines allowed between parallel long lines (for curves)
 DEFAULT_BRIDGE_CONNECTOR_MAX_LENGTH = 0.9  # mm - Fallback value (will be set to 2× actual extrusion width from G-code)
+
+# Gap fill removal constants
+DEFAULT_REMOVE_GAP_FILL = False  # Disabled by default - removes all gap fill sections, useful for getting less expansion/contraction of outer walls
 
 def get_layer_height(gcode_lines):
     """Extract layer height from G-code header comments"""
@@ -904,7 +932,7 @@ def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_re
         logging.error(f"Error generating LUT visualization for layer {layer_num}: {e}")
         return False
 
-def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_y, connector_max_length, logging, debug=False):
+def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_y, connector_max_length, logging, debug=False, bridge_feedrate_slowdown=0.6):
     """
     Process a buffered bridge section and densify it by inserting intermediate lines between parallel bridges.
     
@@ -924,12 +952,46 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
         connector_max_length: Maximum length of connectors to skip (typically 2× extrusion width)
         logging: Logger instance
         debug: If True, add inline comments to output lines
+        bridge_feedrate_slowdown: Factor to slow down bridge extrusion (0.6 = 60% of original speed)
     
     Returns:
         Tuple of (processed_lines, final_e, final_pos) where processed_lines is the densified G-code, 
         final_e is the updated E position, and final_pos is (x, y) tuple of final position
     """
     import math
+    
+    # Extract feedrates from buffered lines
+    extrusion_feedrate = None
+    travel_feedrate = None
+    
+    for line in buffered_lines:
+        if line.startswith("G1") and "F" in line:
+            f_val = re.search(r'F(\d+\.?\d*)', line)
+            if f_val:
+                feedrate = float(f_val.group(1))
+                if "E" in line and ("X" in line or "Y" in line):
+                    # Extrusion move with feedrate
+                    if extrusion_feedrate is None:
+                        extrusion_feedrate = feedrate
+                elif "E" not in line and ("X" in line or "Y" in line):
+                    # Travel move with feedrate
+                    if travel_feedrate is None:
+                        travel_feedrate = feedrate
+        elif line.startswith("G0") and "F" in line:
+            f_val = re.search(r'F(\d+\.?\d*)', line)
+            if f_val and travel_feedrate is None:
+                travel_feedrate = float(f_val.group(1))
+    
+    # Apply slowdown to extrusion feedrate, use defaults if not found
+    if extrusion_feedrate is not None:
+        bridge_extrusion_feedrate = int(extrusion_feedrate * bridge_feedrate_slowdown)
+    else:
+        bridge_extrusion_feedrate = int(1800 * bridge_feedrate_slowdown)  # Fallback: 1800mm/min
+    
+    if travel_feedrate is None:
+        travel_feedrate = 8400  # Fallback travel speed
+    
+    logging.info(f"[BRIDGE] Extracted feedrates: extrusion={extrusion_feedrate}, travel={travel_feedrate}, bridge_extrusion (after slowdown)={bridge_extrusion_feedrate}")
     
     # Helper function to conditionally add comments based on debug mode
     def comment_if_debug(gcode_line, comment):
@@ -949,8 +1011,10 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
         if current_e_mode != target_mode:
             if target_mode == 'absolute':
                 output.append(f"M82 ; Absolute E mode\n")
+                logging.debug(f"[BRIDGE] Switched to ABSOLUTE E mode")
             else:
                 output.append(f"M83 ; Relative E mode\n")
+                logging.debug(f"[BRIDGE] Switched to RELATIVE E mode")
             current_e_mode = target_mode
     
     # Step 1: Parse all extrusion moves
@@ -1050,22 +1114,22 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             if dist_to_left_start < dist_to_left_end:
                 if dist_to_left_start > 0.001:
                     output.append(comment_if_debug(
-                        f"G0 X{left_start[0]:.3f} Y{left_start[1]:.3f} F8400\n",
+                        f"G0 X{left_start[0]:.3f} Y{left_start[1]:.3f} F{int(travel_feedrate)}\n",
                         f"Connector to LEFT edge {dist_to_left_start:.2f}mm"
                     ))
                 output.append(comment_if_debug(
-                    f"G1 X{left_end[0]:.3f} Y{left_end[1]:.3f} E{edge_e_delta:.5f} F1800\n",
+                    f"G1 X{left_end[0]:.3f} Y{left_end[1]:.3f} E{edge_e_delta:.5f} F{bridge_extrusion_feedrate}\n",
                     f"LEFT edge fwd, offset={offset:.2f}mm"
                 ))
                 current_pos = left_end
             else:
                 if dist_to_left_end > 0.001:
                     output.append(comment_if_debug(
-                        f"G0 X{left_end[0]:.3f} Y{left_end[1]:.3f} F8400\n",
+                        f"G0 X{left_end[0]:.3f} Y{left_end[1]:.3f} F{int(travel_feedrate)}\n",
                         f"Connector to LEFT edge {dist_to_left_end:.2f}mm"
                     ))
                 output.append(comment_if_debug(
-                    f"G1 X{left_start[0]:.3f} Y{left_start[1]:.3f} E{edge_e_delta:.5f} F1800\n",
+                    f"G1 X{left_start[0]:.3f} Y{left_start[1]:.3f} E{edge_e_delta:.5f} F{bridge_extrusion_feedrate}\n",
                     f"LEFT edge rev, offset={offset:.2f}mm"
                 ))
                 current_pos = left_start
@@ -1077,22 +1141,22 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             if dist_to_mid_start < dist_to_mid_end:
                 if dist_to_mid_start > 0.001:
                     output.append(add_inline_comment(
-                        f"G0 X{move['x1']:.3f} Y{move['y1']:.3f} F8400\n",
+                        f"G0 X{move['x1']:.3f} Y{move['y1']:.3f} F{int(travel_feedrate)}\n",
                         f"Connector to MIDDLE {dist_to_mid_start:.2f}mm"
                     ))
                 output.append(add_inline_comment(
-                    f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{move['e_delta']:.5f} F1800\n",
+                    f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{move['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"MIDDLE (original) fwd"
                 ))
                 current_pos = (move['x2'], move['y2'])
             else:
                 if dist_to_mid_end > 0.001:
                     output.append(add_inline_comment(
-                        f"G0 X{move['x2']:.3f} Y{move['y2']:.3f} F8400\n",
+                        f"G0 X{move['x2']:.3f} Y{move['y2']:.3f} F{int(travel_feedrate)}\n",
                         f"Connector to MIDDLE {dist_to_mid_end:.2f}mm"
                     ))
                 output.append(add_inline_comment(
-                    f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{move['e_delta']:.5f} F1800\n",
+                    f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{move['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"MIDDLE (original) rev"
                 ))
                 current_pos = (move['x1'], move['y1'])
@@ -1104,22 +1168,22 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             if dist_to_right_start < dist_to_right_end:
                 if dist_to_right_start > 0.001:
                     output.append(add_inline_comment(
-                        f"G0 X{right_start[0]:.3f} Y{right_start[1]:.3f} F8400\n",
+                        f"G0 X{right_start[0]:.3f} Y{right_start[1]:.3f} F{int(travel_feedrate)}\n",
                         f"Connector to RIGHT edge {dist_to_right_start:.2f}mm"
                     ))
                 output.append(add_inline_comment(
-                    f"G1 X{right_end[0]:.3f} Y{right_end[1]:.3f} E{edge_e_delta:.5f} F1800\n",
+                    f"G1 X{right_end[0]:.3f} Y{right_end[1]:.3f} E{edge_e_delta:.5f} F{bridge_extrusion_feedrate}\n",
                     f"RIGHT edge fwd, offset={offset:.2f}mm"
                 ))
                 current_pos = right_end
             else:
                 if dist_to_right_end > 0.001:
                     output.append(add_inline_comment(
-                        f"G0 X{right_end[0]:.3f} Y{right_end[1]:.3f} F8400\n",
+                        f"G0 X{right_end[0]:.3f} Y{right_end[1]:.3f} F{int(travel_feedrate)}\n",
                         f"Connector to RIGHT edge {dist_to_right_end:.2f}mm"
                     ))
                 output.append(add_inline_comment(
-                    f"G1 X{right_start[0]:.3f} Y{right_start[1]:.3f} E{edge_e_delta:.5f} F1800\n",
+                    f"G1 X{right_start[0]:.3f} Y{right_start[1]:.3f} E{edge_e_delta:.5f} F{bridge_extrusion_feedrate}\n",
                     f"RIGHT edge rev, offset={offset:.2f}mm"
                 ))
                 current_pos = right_start
@@ -1129,6 +1193,8 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             
             # Calculate final E (original E + 2 edges)
             final_e = move['e_end'] + (2 * edge_e_delta)
+            
+            logging.info(f"[BRIDGE] Single-move densification complete: E={current_e:.5f} -> {final_e:.5f} (added {2*edge_e_delta:.5f})")
             
             return output, final_e, current_pos
         else:
@@ -1256,8 +1322,10 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                         inter_dy = inter_y2 - inter_y1
                         inter_length = math.sqrt(inter_dx*inter_dx + inter_dy*inter_dy)
                         
+                        # Calculate E with compensation: bridge extrusions are round (~nozzle diameter)
+                        # not squished (extrusion width), so intermediate only fills gap
                         e_per_mm = (long_move['e_delta']/len1 + next_move['e_delta']/len2) / 2.0
-                        inter_e_delta = inter_length * e_per_mm
+                        inter_e_delta = inter_length * e_per_mm * DEFAULT_BRIDGE_EXTRUSION_COMPENSATION
                         
                         # Store intermediate to insert AFTER long_move
                         long_move['intermediate_after'] = {
@@ -1556,12 +1624,12 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                 # Closer to start - travel to start, then draw start->end
                 if dist_to_start > 0.001:  # Only if we're not already there
                     output.append(add_inline_comment(
-                        f"G0 X{edge_before_first['start'][0]:.3f} Y{edge_before_first['start'][1]:.3f} F8400\n",
+                        f"G0 X{edge_before_first['start'][0]:.3f} Y{edge_before_first['start'][1]:.3f} F{int(travel_feedrate)}\n",
                         f"Edge BEFORE connector {dist_to_start:.2f}mm"
                     ))
                 logging.info(f"[BRIDGE] Drawing edge BEFORE: start->end")
                 output.append(add_inline_comment(
-                    f"G1 X{edge_before_first['end'][0]:.3f} Y{edge_before_first['end'][1]:.3f} E{edge_before_first['e_delta']:.5f} F1800\n",
+                    f"G1 X{edge_before_first['end'][0]:.3f} Y{edge_before_first['end'][1]:.3f} E{edge_before_first['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Edge BEFORE start->end, spacing={edge_before_first['spacing']:.3f}mm"
                 ))
                 current_pos = (edge_before_first['end'][0], edge_before_first['end'][1])
@@ -1569,12 +1637,12 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                 # Closer to end - travel to end, then draw end->start
                 if dist_to_end > 0.001:  # Only if we're not already there
                     output.append(add_inline_comment(
-                        f"G0 X{edge_before_first['end'][0]:.3f} Y{edge_before_first['end'][1]:.3f} F8400\n",
+                        f"G0 X{edge_before_first['end'][0]:.3f} Y{edge_before_first['end'][1]:.3f} F{int(travel_feedrate)}\n",
                         f"Edge BEFORE connector {dist_to_end:.2f}mm"
                     ))
                 logging.info(f"[BRIDGE] Drawing edge BEFORE: end->start")
                 output.append(add_inline_comment(
-                    f"G1 X{edge_before_first['start'][0]:.3f} Y{edge_before_first['start'][1]:.3f} E{edge_before_first['e_delta']:.5f} F1800\n",
+                    f"G1 X{edge_before_first['start'][0]:.3f} Y{edge_before_first['start'][1]:.3f} E{edge_before_first['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Edge BEFORE end->start, spacing={edge_before_first['spacing']:.3f}mm"
                 ))
                 current_pos = (edge_before_first['start'][0], edge_before_first['start'][1])
@@ -1613,7 +1681,7 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             dist_to_expected = math.sqrt((expected_x - current_pos[0])**2 + (expected_y - current_pos[1])**2)
             
             if dist_to_expected > 0.5:  # If we're more than 0.5mm away, add travel
-                output.append(f"G0 X{expected_x:.3f} Y{expected_y:.3f} F8400 ; [Bridge Densifier] Restart serpentine\n")
+                output.append(f"G0 X{expected_x:.3f} Y{expected_y:.3f} F{int(travel_feedrate)} ; [Bridge Densifier] Restart serpentine\n")
                 current_pos = (expected_x, expected_y)
         
         # Choose optimal direction for this line (minimize distance from current position)
@@ -1642,14 +1710,14 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                     # Long connector - use travel instead of extrusion
                     set_e_mode('absolute')
                     output.append(add_inline_comment(
-                        f"G0 X{move['x1']:.3f} Y{move['y1']:.3f} F8400\n",
+                        f"G0 X{move['x1']:.3f} Y{move['y1']:.3f} F{int(travel_feedrate)}\n",
                         f"Long jump {dist_to_start:.2f}mm - new section"
                     ))
                     set_e_mode('relative')
                 else:
                     # Normal short connector - extrude
                     output.append(add_inline_comment(
-                        f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{dist_to_start * 0.04187:.5f} F1800\n",
+                        f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{dist_to_start * 0.04187:.5f} F{bridge_extrusion_feedrate}\n",
                         f"Connector {dist_to_start:.2f}mm"
                     ))
             
@@ -1666,7 +1734,7 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             
             # Now draw the line itself (start → end)
             output.append(add_inline_comment(
-                f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{move['e_delta']:.5f} F1800\n",
+                f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{move['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                 f"Bridge line #{move_idx} fwd, len={move['length']:.2f}mm [{line_type}]"
             ))
             current_pos = (move['x2'], move['y2'])
@@ -1677,14 +1745,14 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                     # Long connector - use travel instead of extrusion
                     set_e_mode('absolute')
                     output.append(add_inline_comment(
-                        f"G0 X{move['x2']:.3f} Y{move['y2']:.3f} F8400\n",
+                        f"G0 X{move['x2']:.3f} Y{move['y2']:.3f} F{int(travel_feedrate)}\n",
                         f"Long jump {dist_to_end:.2f}mm - new section"
                     ))
                     set_e_mode('relative')
                 else:
                     # Normal short connector - extrude
                     output.append(add_inline_comment(
-                        f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{dist_to_end * 0.04187:.5f} F1800\n",
+                        f"G1 X{move['x2']:.3f} Y{move['y2']:.3f} E{dist_to_end * 0.04187:.5f} F{bridge_extrusion_feedrate}\n",
                         f"Connector {dist_to_end:.2f}mm"
                     ))
             
@@ -1701,7 +1769,7 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             
             # Now draw the line itself (end → start)
             output.append(add_inline_comment(
-                f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{move['e_delta']:.5f} F1800\n",
+                f"G1 X{move['x1']:.3f} Y{move['y1']:.3f} E{move['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                 f"Bridge line #{move_idx} rev, len={move['length']:.2f}mm [{line_type}]"
             ))
             current_pos = (move['x1'], move['y1'])
@@ -1728,19 +1796,19 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                         # Long connector - use travel
                         set_e_mode('absolute')
                         output.append(add_inline_comment(
-                            f"G0 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} F8400\n",
+                            f"G0 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} F{int(travel_feedrate)}\n",
                             f"Inter long jump {dist_to_inter_start:.2f}mm"
                         ))
                         set_e_mode('relative')
                     else:
                         # Normal connector - extrude
                         output.append(add_inline_comment(
-                            f"G1 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} E{dist_to_inter_start * 0.04187:.5f} F1800\n",
+                            f"G1 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} E{dist_to_inter_start * 0.04187:.5f} F{bridge_extrusion_feedrate}\n",
                             f"Inter connector {dist_to_inter_start:.2f}mm"
                         ))
                 # Draw the intermediate line itself (start → end)
                 output.append(add_inline_comment(
-                    f"G1 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} E{inter['e_delta']:.5f} F1800\n",
+                    f"G1 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} E{inter['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Intermediate fwd, spacing={inter['spacing']:.2f}mm"
                 ))
                 current_pos = (inter['end'][0], inter['end'][1])
@@ -1751,19 +1819,19 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                         # Long connector - use travel
                         set_e_mode('absolute')
                         output.append(add_inline_comment(
-                            f"G0 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} F8400\n",
+                            f"G0 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} F{int(travel_feedrate)}\n",
                             f"Inter long jump {dist_to_inter_end:.2f}mm"
                         ))
                         set_e_mode('relative')
                     else:
                         # Normal connector - extrude
                         output.append(add_inline_comment(
-                            f"G1 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} E{dist_to_inter_end * 0.04187:.5f} F1800\n",
+                            f"G1 X{inter['end'][0]:.3f} Y{inter['end'][1]:.3f} E{dist_to_inter_end * 0.04187:.5f} F{bridge_extrusion_feedrate}\n",
                             f"Inter connector {dist_to_inter_end:.2f}mm"
                         ))
                 # Draw the intermediate line itself (end → start)
                 output.append(add_inline_comment(
-                    f"G1 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} E{inter['e_delta']:.5f} F1800\n",
+                    f"G1 X{inter['start'][0]:.3f} Y{inter['start'][1]:.3f} E{inter['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Intermediate rev, spacing={inter['spacing']:.2f}mm"
                 ))
                 current_pos = (inter['start'][0], inter['start'][1])
@@ -1786,22 +1854,22 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             if dist_to_right_start < dist_to_right_end:
                 if dist_to_right_start > 0.001:
                     output.append(add_inline_comment(
-                        f"G1 X{right_edge['start'][0]:.3f} Y{right_edge['start'][1]:.3f} E{dist_to_right_start * 0.04187:.5f} F1800\n",
+                        f"G1 X{right_edge['start'][0]:.3f} Y{right_edge['start'][1]:.3f} E{dist_to_right_start * 0.04187:.5f} F{bridge_extrusion_feedrate}\n",
                         f"Right edge connector {dist_to_right_start:.2f}mm"
                     ))
                 output.append(add_inline_comment(
-                    f"G1 X{right_edge['end'][0]:.3f} Y{right_edge['end'][1]:.3f} E{right_edge['e_delta']:.5f} F1800\n",
+                    f"G1 X{right_edge['end'][0]:.3f} Y{right_edge['end'][1]:.3f} E{right_edge['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Single line RIGHT edge, spacing={right_edge['spacing']:.2f}mm"
                 ))
                 current_pos = (right_edge['end'][0], right_edge['end'][1])
             else:
                 if dist_to_right_end > 0.001:
                     output.append(add_inline_comment(
-                        f"G1 X{right_edge['end'][0]:.3f} Y{right_edge['end'][1]:.3f} E{dist_to_right_end * 0.04187:.5f} F1800\n",
+                        f"G1 X{right_edge['end'][0]:.3f} Y{right_edge['end'][1]:.3f} E{dist_to_right_end * 0.04187:.5f} F{bridge_extrusion_feedrate}\n",
                         f"Right edge connector {dist_to_right_end:.2f}mm"
                     ))
                 output.append(add_inline_comment(
-                    f"G1 X{right_edge['start'][0]:.3f} Y{right_edge['start'][1]:.3f} E{right_edge['e_delta']:.5f} F1800\n",
+                    f"G1 X{right_edge['start'][0]:.3f} Y{right_edge['start'][1]:.3f} E{right_edge['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Single line RIGHT edge, spacing={right_edge['spacing']:.2f}mm"
                 ))
                 current_pos = (right_edge['start'][0], right_edge['start'][1])
@@ -1818,22 +1886,22 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             if dist_to_edge_start <= dist_to_edge_end:
                 # Draw connector to start, then start → end
                 output.append(add_inline_comment(
-                    f"G1 X{edge_after_last['start'][0]:.3f} Y{edge_after_last['start'][1]:.3f} E{dist_to_edge_start * 0.04187:.5f} F1800\n",
+                    f"G1 X{edge_after_last['start'][0]:.3f} Y{edge_after_last['start'][1]:.3f} E{dist_to_edge_start * 0.04187:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Edge AFTER connector {dist_to_edge_start:.2f}mm"
                 ))
                 output.append(add_inline_comment(
-                    f"G1 X{edge_after_last['end'][0]:.3f} Y{edge_after_last['end'][1]:.3f} E{edge_after_last['e_delta']:.5f} F1800\n",
+                    f"G1 X{edge_after_last['end'][0]:.3f} Y{edge_after_last['end'][1]:.3f} E{edge_after_last['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Edge AFTER fwd, spacing={edge_after_last['spacing']:.2f}mm"
                 ))
                 current_pos = (edge_after_last['end'][0], edge_after_last['end'][1])
             else:
                 # Draw connector to end, then end → start
                 output.append(add_inline_comment(
-                    f"G1 X{edge_after_last['end'][0]:.3f} Y{edge_after_last['end'][1]:.3f} E{dist_to_edge_end * 0.04187:.5f} F1800\n",
+                    f"G1 X{edge_after_last['end'][0]:.3f} Y{edge_after_last['end'][1]:.3f} E{dist_to_edge_end * 0.04187:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Edge AFTER connector {dist_to_edge_end:.2f}mm"
                 ))
                 output.append(add_inline_comment(
-                    f"G1 X{edge_after_last['start'][0]:.3f} Y{edge_after_last['start'][1]:.3f} E{edge_after_last['e_delta']:.5f} F1800\n",
+                    f"G1 X{edge_after_last['start'][0]:.3f} Y{edge_after_last['start'][1]:.3f} E{edge_after_last['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Edge AFTER rev, spacing={edge_after_last['spacing']:.2f}mm"
                 ))
                 current_pos = (edge_after_last['start'][0], edge_after_last['start'][1])
@@ -1852,13 +1920,26 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
     logging.info(f"[BRIDGE] Removed {connector_skip_count} old connectors, kept {kept_count} bridge lines (direction optimized)")
     
     # Calculate final E from original buffer (for comparison)
-    final_e = current_e
+    original_final_e = current_e
     for line in buffered_lines:
         e_match = REGEX_E.search(line)
         if e_match:
-            final_e = float(e_match.group(1))
+            original_final_e = float(e_match.group(1))
+    
+    # Count total E extruded in densified output (for verification)
+    densified_total_e = 0.0
+    for line in output:
+        if line.startswith("G1") and "E" in line and "X" in line:
+            e_match = REGEX_E.search(line)
+            if e_match:
+                e_val = float(e_match.group(1))
+                if e_val > 0:  # Relative mode, positive = extrusion
+                    densified_total_e += e_val
+    
+    logging.info(f"[BRIDGE] E tracking: start={current_e:.5f}, original_end={original_final_e:.5f}, densified_total={densified_total_e:.5f}")
     
     # Return output, final E, and final XY position (where serpentine path ended)
+    final_e = current_e + densified_total_e
     return output, final_e, current_pos
 
 def process_gcode(input_file, output_file=None, outer_layer_height=None,
@@ -1872,6 +1953,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  enable_safe_z_hop=DEFAULT_ENABLE_SAFE_Z_HOP, safe_z_hop_margin=DEFAULT_SAFE_Z_HOP_MARGIN,
                  z_hop_retraction=DEFAULT_Z_HOP_RETRACTION,
                  enable_bridge_densifier=DEFAULT_ENABLE_BRIDGE_DENSIFIER,
+                 remove_gap_fill=DEFAULT_REMOVE_GAP_FILL,
                  debug=False):
     
     # Determine output filename
@@ -1899,6 +1981,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     logging.info(f"  - Non-planar Infill: {enable_nonplanar}")
     logging.info(f"  - Safe Z-hop: {enable_safe_z_hop}")
     logging.info(f"  - Bridge Densifier: {enable_bridge_densifier}")
+    logging.info(f"  - Remove Gap Fill: {remove_gap_fill}")
     
     # Print to console for user visibility
     print("\n" + "=" * 85)
@@ -3112,6 +3195,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     current_type = None  # Track current TYPE for Z-hop exclusion logic
     line_count_processed = 0
     total_lines = len(lines)  # Cache length to avoid repeated calls
+    force_write_next_z = False  # Flag to force writing next standalone Z move after LAYER_CHANGE
     
     # Rolling buffer for lookback operations on OUTPUT (keep last 50 lines for Smoothificator)
     recent_output_lines = []
@@ -3120,6 +3204,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Global position tracker - updated with EVERY line we read from input
     # This tracks where the nozzle IS (the starting position for the NEXT move)
     # Uses a dict so it can be modified inside the helper function
+    # CRITICAL: All features MUST use this tracker as their entry position when starting a new TYPE section
+    # DO NOT do backwards lookups through lines - always trust the global position tracker!
     position = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'e': 0.0}
     
     def update_position(line_str):
@@ -3143,13 +3229,20 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             e_val = extract_e(line_str)
             if e_val is not None:
                 position['e'] = e_val
+
+    # Register output-driven position update callback
+    global _update_position_for_output
+    _update_position_for_output = update_position
+    # From now on, ANY line written via write_and_track will update the position tracker.
+    # Collection phases MUST NOT call update_position directly (input lines can be skipped/modified).
     
     while i < total_lines:
         line = lines[i]
         line_count_processed += 1
         
-        # Update global position tracker FIRST (before any processing logic)
-        update_position(line)
+        # NOTE: We NO LONGER update position tracker from INPUT here.
+        # Position is updated ONLY when lines are written (see write_and_track).
+        # This ensures position always reflects ACTUAL nozzle state in the modified G-code.
         
         # Track TYPE markers for Z-hop exclusion logic and bridge densifier
         if ";TYPE:" in line:
@@ -3162,7 +3255,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     # Process the buffered bridge section
                     logging.info(f"[BRIDGE] Exiting bridge section, processing {len(bridge_buffer)} buffered lines")
                     densified_lines, final_e, final_pos = process_bridge_section(
-                        bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug
+                        bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug, bridge_feedrate_slowdown=0.6
                     )
                     
                     # Output densified bridge lines
@@ -3220,16 +3313,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         position['x'] = final_pos[0]
                         position['y'] = final_pos[1]
                     
-                    # Output un-retract command if found (BEFORE TYPE marker is output)
-                    if unretract_line:
-                        write_and_track(output_buffer, 
-                            add_inline_comment(unretract_line, "[Bridge Densifier] Preserved un-retract"),
-                            recent_output_lines)
-                        # Update E position
-                        params = parse_gcode_line(unretract_line)
-                        if params['e'] is not None:
-                            position['e'] = params['e']
-                            current_e = params['e']
+                    # DON'T output un-retract command when exiting on TYPE change
+                    # The unretract belongs to the NEXT section, not the bridge
+                    # It will be processed normally by the main loop
+                    # (Only preserve unretract when exiting on retraction, which happens below)
                     
                     # Update E position after bridge
                     position['e'] = final_e
@@ -3259,98 +3346,148 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         # BRIDGE DENSIFIER: Buffer lines when in bridge section
         if enable_bridge_densifier and in_bridge_section:
-            # Check if this line is a retraction (negative E move)
-            # If so, we've reached the end of this bridge section
-            is_retraction = False
-            if line.strip().startswith("G1") and "E" in line:
-                params = parse_gcode_line(line)
-                if params['e'] is not None and params['e'] < 0:
-                    is_retraction = True
-                    logging.info(f"[BRIDGE] Detected retraction during bridge buffering, will process bridge section")
-            
-            # Buffer this line BEFORE processing (retraction belongs to bridge section)
-            bridge_buffer.append(line)
-            
-            # If retraction detected, process the bridge section now
-            if is_retraction:
-                logging.info(f"[BRIDGE] Processing bridge section due to retraction, {len(bridge_buffer)} buffered lines")
-                densified_lines, final_e, final_pos = process_bridge_section(
-                    bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug
-                )
-                
-                # Output densified bridge lines
-                for densified_line in densified_lines:
-                    write_and_track(output_buffer, densified_line, recent_output_lines)
-                
-                # Find where the original G-code expects to continue from (last XY move in bridge buffer)
-                # Also look for un-retract command that needs to be preserved
-                last_x, last_y = None, None
-                unretract_line = None
-                last_move_idx = -1
-                
-                for idx in range(len(bridge_buffer) - 1, -1, -1):
-                    buf_line = bridge_buffer[idx]
-                    if buf_line.startswith("G1") and "X" in buf_line and "Y" in buf_line:
-                        params = parse_gcode_line(buf_line)
-                        if params['x'] is not None:
-                            last_x = params['x']
-                        if params['y'] is not None:
-                            last_y = params['y']
-                        if last_x is not None and last_y is not None:
-                            last_move_idx = idx
-                            break
-                
-                # Look for un-retract command after the last move (E-only move with E >= 0)
-                # BUT this won't exist yet since we just saw the retraction!
-                # The un-retract will come AFTER the travel move in subsequent lines
-                
-                # Check if densified path ended at a different position than expected
-                if last_x is not None and last_y is not None:
-                    dist = math.sqrt((final_pos[0] - last_x)**2 + (final_pos[1] - last_y)**2)
-                    if dist > 0.01:  # More than 0.01mm away
-                        # Need to travel to expected position
-                        write_and_track(output_buffer, 
-                            add_inline_comment(f"G0 X{last_x:.3f} Y{last_y:.3f} F8400\n", 
-                                             "[Bridge Densifier] Return to expected position"),
-                            recent_output_lines)
-                        position['x'] = last_x
-                        position['y'] = last_y
-                        logging.info(f"[BRIDGE] Added travel to expected position: X={last_x:.3f} Y={last_y:.3f}, distance={dist:.3f}mm")
-                    else:
-                        # Already at expected position
-                        position['x'] = final_pos[0]
-                        position['y'] = final_pos[1]
-                else:
-                    # No last position found, use final position
+            # Check if we hit a layer boundary - stop buffering immediately!
+            if ";LAYER_CHANGE" in line or ";LAYER:" in line:
+                # Process what we have so far
+                if bridge_buffer:
+                    logging.info(f"[BRIDGE] Hit layer boundary, processing {len(bridge_buffer)} buffered lines")
+                    densified_lines, final_e, final_pos = process_bridge_section(
+                        bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug, bridge_feedrate_slowdown=0.6
+                    )
+                    
+                    # Output densified bridge lines
+                    for densified_line in densified_lines:
+                        write_and_track(output_buffer, densified_line, recent_output_lines)
+                    
+                    # Update position
                     position['x'] = final_pos[0]
                     position['y'] = final_pos[1]
-                
-                # Update E position after bridge
-                position['e'] = final_e
-                current_e = final_e
-                
-                # Output the retraction command
-                write_and_track(output_buffer, 
-                    add_inline_comment(line, "[Bridge Densifier] Original retraction"),
-                    recent_output_lines)
-                
-                # Clear buffer and exit bridge mode
-                bridge_buffer = []
-                in_bridge_section = False
-                logging.info(f"[BRIDGE] Bridge section processed, E={final_e:.5f}")
-                
-                # Check if we should immediately re-enter bridge mode
-                # (We're still in Bridge infill TYPE, just had a retraction between bridge segments)
-                if "Bridge infill" in current_type and "Internal bridge infill" not in current_type:
-                    in_bridge_section = True
+                    position['e'] = final_e
+                    current_e = final_e
+                    
+                    # Clear buffer
                     bridge_buffer = []
-                    bridge_start_e = final_e  # Start from where we ended
-                    bridge_start_x = position['x']
-                    bridge_start_y = position['y']
-                    logging.info(f"[BRIDGE] Re-entering bridge section immediately after retraction at X={bridge_start_x:.3f} Y={bridge_start_y:.3f} E={bridge_start_e:.5f}")
-            
-            i += 1
-            continue
+                    in_bridge_section = False
+                
+                # Don't buffer the LAYER_CHANGE line - let it be processed normally
+                # DON'T continue - fall through so the line gets processed by other handlers
+                # The `if` check below will not match since we cleared in_bridge_section
+            else:
+                # Check if this line is a retraction (negative E move)
+                # If so, we've reached the end of this bridge section
+                is_retraction = False
+                if line.strip().startswith("G1") and "E" in line:
+                    params = parse_gcode_line(line)
+                    if params['e'] is not None and params['e'] < 0:
+                        is_retraction = True
+                        logging.info(f"[BRIDGE] Detected retraction during bridge buffering, will process bridge section")
+                
+                # Buffer this line BEFORE processing (retraction belongs to bridge section)
+                bridge_buffer.append(line)
+                
+                # If retraction detected, process the bridge section now
+                if is_retraction:
+                    logging.info(f"[BRIDGE] Processing bridge section due to retraction, {len(bridge_buffer)} buffered lines")
+                    densified_lines, final_e, final_pos = process_bridge_section(
+                        bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug, bridge_feedrate_slowdown=0.6
+                    )
+                    
+                    # Output densified bridge lines
+                    for densified_line in densified_lines:
+                        write_and_track(output_buffer, densified_line, recent_output_lines)
+                    
+                    # Find where the original G-code expects to continue from (last XY move in bridge buffer)
+                    # Also look for un-retract command that needs to be preserved
+                    last_x, last_y = None, None
+                    unretract_line = None
+                    last_move_idx = -1
+                    
+                    for idx in range(len(bridge_buffer) - 1, -1, -1):
+                        buf_line = bridge_buffer[idx]
+                        if buf_line.startswith("G1") and "X" in buf_line and "Y" in buf_line:
+                            params = parse_gcode_line(buf_line)
+                            if params['x'] is not None:
+                                last_x = params['x']
+                            if params['y'] is not None:
+                                last_y = params['y']
+                            if last_x is not None and last_y is not None:
+                                last_move_idx = idx
+                                break
+                    
+                    # Look for un-retract command after the last move (E-only move with E >= 0)
+                    # BUT this won't exist yet since we just saw the retraction!
+                    # The un-retract will come AFTER the travel move in subsequent lines
+                    
+                    # Check if densified path ended at a different position than expected
+                    if last_x is not None and last_y is not None:
+                        dist = math.sqrt((final_pos[0] - last_x)**2 + (final_pos[1] - last_y)**2)
+                        if dist > 0.01:  # More than 0.01mm away
+                            # Need to travel to expected position
+                            write_and_track(output_buffer, 
+                                add_inline_comment(f"G0 X{last_x:.3f} Y{last_y:.3f} F8400\n", "[Bridge Densifier] Return to expected position"),
+                                recent_output_lines)
+                            position['x'] = last_x
+                            position['y'] = last_y
+                            logging.info(f"[BRIDGE] Added travel to expected position: X={last_x:.3f} Y={last_y:.3f}, distance={dist:.3f}mm")
+                        else:
+                            # Already at expected position
+                            position['x'] = final_pos[0]
+                            position['y'] = final_pos[1]
+                    else:
+                        # No last position found, use final position
+                        position['x'] = final_pos[0]
+                        position['y'] = final_pos[1]
+                    
+                    # Update E position after bridge
+                    position['e'] = final_e
+                    current_e = final_e
+                    
+                    # Output the retraction command (this will reduce E)
+                    retract_e = extract_e(line)
+                    write_and_track(output_buffer, 
+                        add_inline_comment(line, "[Bridge Densifier] Original retraction"),
+                        recent_output_lines)
+                    
+                    # Update position tracking after retraction
+                    if retract_e is not None:
+                        position['e'] = retract_e
+                        current_e = retract_e
+                    
+                    # Clear buffer and exit bridge mode
+                    bridge_buffer = []
+                    in_bridge_section = False
+                    logging.info(f"[BRIDGE] Bridge section processed, E after densification={final_e:.5f}, E after retract={position['e']:.5f}")
+                    
+                    # Check if we should immediately re-enter bridge mode
+                    # (We're still in Bridge infill TYPE, just had a retraction between bridge segments)
+                    # But DON'T re-enter if the next section is a TYPE change (bridge is ending)
+                    should_reenter = False
+                    if "Bridge infill" in current_type and "Internal bridge infill" not in current_type:
+                        # Look ahead to see if TYPE is changing soon
+                        next_is_type_change = False
+                        for j in range(i + 1, min(i + 10, len(lines))):
+                            if ";TYPE:" in lines[j]:
+                                # Check if it's a different TYPE
+                                if "Bridge infill" not in lines[j] or "Internal bridge infill" in lines[j]:
+                                    next_is_type_change = True
+                                break
+                        
+                        if not next_is_type_change:
+                            should_reenter = True
+                    
+                    if should_reenter:
+                        in_bridge_section = True
+                        bridge_buffer = []
+                        # CRITICAL: Use current E position (after retraction), not final_e!
+                        # The next bridge section will start from wherever we are NOW (after retract/travel/unretract)
+                        bridge_start_e = position['e']
+                        bridge_start_x = position['x']
+                        bridge_start_y = position['y']
+                        logging.info(f"[BRIDGE] Re-entering bridge section after retraction at X={bridge_start_x:.3f} Y={bridge_start_y:.3f} E={bridge_start_e:.5f}")
+                
+                # Only continue for retraction case - for LAYER_CHANGE, fall through
+                i += 1
+                continue
         
         # Progress logging every 10,000 lines
         if line_count_processed % 10000 == 0:
@@ -3360,6 +3497,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         if ";LAYER_CHANGE" in line:
             # Mark that we've started the first layer (enable Z-hop from now on)
             seen_first_layer = True
+            
+            # Flag that the NEXT standalone Z move must be written (layer base Z)
+            # This prevents Smoothificator from skipping the critical layer Z positioning
+            force_write_next_z = True
             
             # DON'T increment current_layer yet - we need to read the layer number first
             
@@ -3397,6 +3538,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     if z_marker_match:
                         old_z = current_z
                         current_z = float(z_marker_match.group(1))
+                        # Synchronize working/base Z and position tracker with marker value.
+                        # This overrides any earlier priming Z (e.g., 0.8) so first layer starts at real base (e.g., 0.2).
+                        working_z = current_z
+                        current_travel_z = current_z
+                        position['z'] = current_z  # Comment markers don't write a line, so force tracker update
                         #logging.info(f"\nLayer {current_layer} Z marker: updated current_z from {old_z:.3f} to {current_z:.3f}")
                 if ";HEIGHT:" in lines[j]:
                     height_match = re.search(r';HEIGHT:([\d.]+)', lines[j])
@@ -3473,8 +3619,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Check if next lines contain external perimeter - if so, don't output Z yet
             # Smoothificator will handle Z for each pass
+            # CRITICAL: Only skip Z moves if we're in an actual layer (seen_first_layer is True)
+            # Don't skip the initial Z positioning moves before first layer!
+            # CRITICAL: ALWAYS write Z moves immediately after LAYER_CHANGE (layer base positioning)
             should_output_z = True
-            if enable_smoothificator:
+            if enable_smoothificator and seen_first_layer and not force_write_next_z:
                 # Look ahead to see if external perimeter is coming
                 for j in range(i + 1, min(i + 10, len(lines))):
                     if ";TYPE:External perimeter" in lines[j] or ";TYPE:Outer wall" in lines[j] or ";TYPE:Overhang perimeter" in lines[j]:
@@ -3487,13 +3636,112 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             if should_output_z:
                 write_and_track(output_buffer, line, recent_output_lines)
+            
+            # Clear the force flag after processing the Z move
+            force_write_next_z = False
+            
             actual_output_z = current_z  # Update actual output Z tracker
             
             i += 1
             continue
 
+        # ========== GAP FILL REMOVAL: Optionally skip gap fill sections ==========
+        if ";TYPE:Gap fill" in line:
+            # If gap fill removal is DISABLED: just pass through without any collection/buffering
+            # Let write_and_track handle position updates naturally - don't interfere!
+            if not remove_gap_fill:
+                write_and_track(output_buffer, line, recent_output_lines)
+                i += 1
+                continue
+            
+            # If gap fill removal IS ENABLED: replace with travel move to final position
+            # CRITICAL: We must actually MOVE the nozzle to where gap fill would have ended!
+            i += 1  # Skip the TYPE:Gap fill marker
+            
+            # Save E and Z state BEFORE gap fill - we'll restore them after
+            # Gap fill shouldn't change layer Z or E state
+            saved_e = position['e']
+            saved_z = position['z']
+            saved_current_z = current_z
+            saved_working_z = working_z
+            
+            # Track final XY position through all gap fill moves
+            gap_fill_final_x = position['x']
+            gap_fill_final_y = position['y']
+            
+            while i < len(lines):
+                current_line = lines[i]
+                
+                # Stop at layer boundary
+                if ";LAYER_CHANGE" in current_line or ";LAYER:" in current_line:
+                    break
+                
+                # Stop at different TYPE marker
+                if ";TYPE:" in current_line and ";TYPE:Gap fill" not in current_line:
+                    break
+                
+                # Update position tracker by "writing" this line to the tracker (but not to output)
+                # This ensures position tracker knows where gap fill ENDS
+                if _update_position_for_output:
+                    _update_position_for_output(current_line)
+                
+                # Track final XY position from moves
+                if current_line.startswith("G1") or current_line.startswith("G0"):
+                    params = parse_gcode_line(current_line)
+                    if params['x'] is not None:
+                        gap_fill_final_x = params['x']
+                    if params['y'] is not None:
+                        gap_fill_final_y = params['y']
+                
+                i += 1
+            
+            # Restore E and Z to what they were BEFORE gap fill
+            # Gap fill might have retractions/G92/Z-hops that we don't want to apply
+            position['e'] = saved_e
+            position['z'] = saved_z
+            current_z = saved_current_z
+            working_z = saved_working_z
+            
+            # Now replace gap fill with a single travel move to final position
+            # Write it directly and let it go through Z-hop in a FUTURE iteration
+            # We can't fall through to Z-hop (it's an elif) so we need to inject the travel
+            # We do this by writing the travel immediately (Z-hop will process it when written)
+            travel_line = f"G1 X{gap_fill_final_x:.3f} Y{gap_fill_final_y:.3f} F8400 ; Travel replacing gap fill\n"
+            
+            # Process the travel line through Z-hop manually
+            # Check if Z-hop should apply
+            if enable_safe_z_hop and seen_first_layer:
+                # Check if we need Z-hop
+                layer_max_z = 0.0
+                if current_layer in actual_layer_max_z:
+                    layer_max_z = actual_layer_max_z[current_layer]
+                
+                if layer_max_z > 0:
+                    safe_z = layer_max_z + safe_z_hop_margin
+                    
+                    # Only hop if we're not already above safe_z
+                    if current_travel_z < safe_z:
+                        # Hop up
+                        write_and_track(output_buffer, f"G0 Z{safe_z:.3f} F8400 ; Safe Z-hop\n", recent_output_lines)
+                        current_travel_z = safe_z
+                        is_hopped = True
+                
+                # Write the travel
+                write_and_track(output_buffer, travel_line, recent_output_lines)
+            else:
+                # No Z-hop, just write the travel
+                write_and_track(output_buffer, travel_line, recent_output_lines)
+            
+            # Sync current_e with position tracker
+            if not use_relative_e:
+                current_e = position['e']
+            
+            # Continue to process the line that ended gap fill (LAYER_CHANGE or TYPE)
+            # The scanning loop left i pointing at this line, so continue will process it fresh
+            continue
+
         # ========== SMOOTHIFICATOR: External Perimeter Processing ==========
-        if enable_smoothificator and (smoothificator_skip_first_layer and current_layer > 0 or not smoothificator_skip_first_layer) and (";TYPE:External perimeter" in line or ";TYPE:Outer wall" in line or ";TYPE:Overhang perimeter" in line):
+        elif enable_smoothificator and (smoothificator_skip_first_layer and current_layer > 0 or not smoothificator_skip_first_layer) and (";TYPE:External perimeter" in line or ";TYPE:Outer wall" in line or ";TYPE:Overhang perimeter" in line):
             
             external_block_lines = []
             external_block_lines.append(line)
@@ -3503,9 +3751,18 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Include WIPE moves and everything up to the next TYPE marker
             while i < len(lines):
                 current_line = lines[i]
-                
-                # Update global position tracker
-                update_position(current_line)
+                # OUTPUT-DRIVEN POSITION TRACKING: We normally don't update during collection.
+                # HOWEVER: If we encounter a standalone Z move (no X/Y) we must capture it as the
+                # base Z before Smoothificator replaces Z handling. Otherwise we lose the true
+                # layer Z (e.g., initial drop from priming height 0.8 -> 0.2).
+                if current_line.startswith("G1") and "Z" in current_line and "X" not in current_line and "Y" not in current_line:
+                    z_match = re.search(r'Z([-+]?\d*\.?\d+)', current_line)
+                    if z_match:
+                        old_z = current_z
+                        current_z = float(z_match.group(1))
+                        working_z = current_z  # Update working/base Z for passes
+                        # We do NOT write this original Z move; passes will emit their own
+                        # But we now have the correct base Z (e.g., 0.2 instead of prior 0.8)
                 
                 # Stop at layer boundary to prevent crossing layers
                 if ";LAYER_CHANGE" in current_line:
@@ -3563,37 +3820,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # SIMPLE APPROACH: Just duplicate the block N times with adjusted Z and E
             current_e = 0.0
             
-            # Find the TRUE start position: the last XY position BEFORE this smoothificator block
-            # This is where the nozzle was when it encountered the TYPE marker
-            # Look backwards through recent output lines to find last XY coordinate
-            start_pos = None
-            for j in range(len(recent_output_lines) - 1, -1, -1):
-                prev_line = recent_output_lines[j]
-                if "G1" in prev_line and ("X" in prev_line or "Y" in prev_line):
-                    x_val = extract_x(prev_line)
-                    y_val = extract_y(prev_line)
-                    if x_val is not None and y_val is not None:
-                        start_pos = (x_val, y_val)
-                        #logging.info(f"  [SMOOTHIFICATOR] Found TRUE start position from previous lines: X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
-                        break
-                    elif x_val is not None:
-                        # Only X found, need to find last Y
-                        for k in range(j - 1, -1, -1):
-                            y_val2 = extract_y(recent_output_lines[k])
-                            if y_val2 is not None:
-                                start_pos = (x_val, y_val2)
-                                #logging.info(f"  [SMOOTHIFICATOR] Found TRUE start position (X from recent line {j}, Y from recent line {k}): X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
-                                break
-                        break
-                    elif y_val is not None:
-                        # Only Y found, need to find last X
-                        for k in range(j - 1, -1, -1):
-                            x_val2 = extract_x(recent_output_lines[k])
-                            if x_val2 is not None:
-                                start_pos = (x_val2, y_val)
-                                #logging.info(f"  [SMOOTHIFICATOR] Found TRUE start position (X from recent line {k}, Y from recent line {j}): X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
-                                break
-                        break
+            # Use the global position tracker - it's always accurate!
+            start_pos = (position['x'], position['y'])
+            logging.info(f"  [SMOOTHIFICATOR] Start position from position tracker: X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
             
             for pass_num in range(passes_needed):
                 # Calculate Z for this pass (work DOWN from current_z)
@@ -3666,19 +3895,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 z_shift = current_layer_height * 0.5
                 is_last_layer = (current_layer == max_layer)
                 
-                # Look back to find the travel position and last E value before this TYPE comment
-                travel_start_x, travel_start_y = None, None
+                # Use global position tracker for entry position (where nozzle is NOW)
+                entry_x = position['x']
+                entry_y = position['y']
+                
+                # Look back to find the last E value before this TYPE comment (not a retraction)
                 pre_block_e_value = None
                 for back_idx in range(i - 2, max(0, i - 10), -1):
                     back_line = lines[back_idx]
-                    # Look for travel move
-                    if travel_start_x is None and back_line.startswith("G1") and "X" in back_line and "Y" in back_line and "E" not in back_line:
-                        x_match = re.search(r'X([-\d.]+)', back_line)
-                        y_match = re.search(r'Y([-\d.]+)', back_line)
-                        if x_match and y_match:
-                            travel_start_x = float(x_match.group(1))
-                            travel_start_y = float(y_match.group(1))
-                    # Also track last E value before the block (not a retraction)
+                    # Track last E value before the block (not a retraction)
                     if pre_block_e_value is None and back_line.startswith("G1") and "E" in back_line and "E-" not in back_line:
                         e_match = re.search(r'E([-\d.]+)', back_line)
                         if e_match:
@@ -3690,8 +3915,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 while i < len(lines):
                     current_line = lines[i]
                     
-                    # Update global position tracker
-                    update_position(current_line)
+                    # Capture standalone Z move (no X/Y) to set correct base Z before modifying block
+                    if current_line.startswith("G1") and "Z" in current_line and "X" not in current_line and "Y" not in current_line:
+                        z_match = re.search(r'Z([-+]?\d*\.?\d+)', current_line)
+                        if z_match:
+                            old_z = current_z
+                            current_z = float(z_match.group(1))
+                            working_z = current_z
+                            # We do not write this now; Bricklayers will emit its own Z moves
                     
                     # Stop collecting at next TYPE marker OR layer change
                     if ";TYPE:" in current_line or ";LAYER_CHANGE" in current_line:
@@ -3725,10 +3956,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     block_travel_y = float(y_match.group(1))
                                     break
                         
-                        # If no block-specific travel found, use the TYPE comment travel (for first block)
+                        # If no block-specific travel found, use the entry position (global position tracker)
                         if block_travel_x is None:
-                            block_travel_x = travel_start_x
-                            block_travel_y = travel_start_y
+                            block_travel_x = entry_x
+                            block_travel_y = entry_y
                         
                         # Detect if this layer is a base or top of a solid region
                         # Use grid position of the perimeter block to check solid regions
@@ -3820,20 +4051,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 non_extrusion_commands = []
                                 fan_commands = []  # Collect all fan commands separately
                                 
-                                # CRITICAL: Extract start position from BEFORE the loop (where nozzle is positioned)
-                                # Look back through recent output to find last XY position
-                                start_x, start_y = None, None
-                                for recent_line in reversed(recent_output_lines[-20:]):
-                                    if start_x is None and 'X' in recent_line:
-                                        x_match = re.search(r'X([-\d.]+)', recent_line)
-                                        if x_match:
-                                            start_x = float(x_match.group(1))
-                                    if start_y is None and 'Y' in recent_line:
-                                        y_match = re.search(r'Y([-\d.]+)', recent_line)
-                                        if y_match:
-                                            start_y = float(y_match.group(1))
-                                    if start_x is not None and start_y is not None:
-                                        break
+                                # Use global position tracker for loop start position
+                                start_x, start_y = position['x'], position['y']
                                 
                                 for loop_line in loop_lines:
                                     # Check if this is an extrusion move
@@ -3858,11 +4077,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         non_extrusion_commands.insert(0, fan_commands[0])  # First at beginning
                                         non_extrusion_commands.append(fan_commands[-1])    # Last at end
                                 
-                                # Validation: make sure we found extrusion moves and start position
+                                # Validation: make sure we found extrusion moves
                                 if not extrusion_moves:
                                     logging.warning(f"  [BRICKLAYERS WARNING] Layer {current_layer}, Block #{perimeter_block_count}: No extrusion moves found in loop!")
-                                if start_x is None or start_y is None:
-                                    logging.warning(f"  [BRICKLAYERS WARNING] Layer {current_layer}, Block #{perimeter_block_count}: Could not extract start position!")
                                 
                                 # Pass 1: Print at base layer Z
                                 if pre_block_e_value is not None:
@@ -3883,8 +4100,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 # Pass 2: Travel to start, raise Z, print same moves
                                 write_and_track(output_buffer, "G92 E0 ; Reset extruder for pass 2\n", recent_output_lines)
-                                if start_x is not None and start_y is not None:
-                                    write_and_track(output_buffer, f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n", recent_output_lines)
+                                write_and_track(output_buffer, f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n", recent_output_lines)
                                 write_and_track(output_buffer, f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n", recent_output_lines)
                                 
                                 # Output same extrusion moves again at higher Z
@@ -3967,8 +4183,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             while i < len(lines):
                 current_line = lines[i]
                 
-                # Update global position tracker for this line
-                update_position(current_line)
+                # NO position update during collection (output-driven tracking)
                 
                 # CRITICAL: Check for layer change FIRST - restore Z before new layer starts!
                 if current_line.startswith(";LAYER_CHANGE") or current_line.startswith(";LAYER:"):
@@ -4155,6 +4370,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     # CRITICAL: Start with base extrusion (XY distance), ADD extra for Z lift
                                     adjusted_e_for_segment = base_e_for_segment  # Always extrude for XY distance!
                                     applied_adaptive_extrusion = False  # Track if we actually apply it
+                                    segment_feedrate = feedrate  # Default to original feedrate
                                     
                                     if enable_adaptive_extrusion:
                                         # Check if this CELL is marked as 'first of safezone' (benefits from adaptive extrusion)
@@ -4175,6 +4391,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                                 extra_e = base_e_for_segment * lift_in_layers * adaptive_extrusion_multiplier
                                                 adjusted_e_for_segment += extra_e  # ADD to base!
                                                 applied_adaptive_extrusion = True
+                                                
+                                                # CRITICAL: Reduce feedrate proportionally to maintain even distribution
+                                                # If extruding 1.5x material, move at ~67% speed (1/1.5 = 0.67)
+                                                # Add extra slowdown factor (0.5) for safety margin on heavy extrusion
+                                                # This ensures the extra filament is distributed evenly along the path
+                                                if base_e_for_segment > 0 and feedrate is not None:
+                                                    extrusion_ratio = adjusted_e_for_segment / base_e_for_segment
+                                                    segment_feedrate = (feedrate / extrusion_ratio) * 0.5  # Extra 50% slowdown
                                     
                                     # Update current E position
                                     current_e += adjusted_e_for_segment
@@ -4215,7 +4439,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                             'y': sy,
                                             'z': z_mod,
                                             'e_delta': adjusted_e_for_segment,
-                                            'feedrate': feedrate
+                                            'feedrate': segment_feedrate  # Use adaptive feedrate
                                         })
                                     
                                     # Detect valley exit
@@ -4372,10 +4596,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     
                                     # Output segment only if NOT in valley (valley segments are output during fill)
                                     if not in_valley:
-                                        # Output with Z modulation, adjusted E, and boosted feedrate
-                                        if feedrate is not None:
+                                        # Output with Z modulation, adjusted E, and adaptive feedrate
+                                        if segment_feedrate is not None:
                                             write_and_track(output_buffer, 
-                                                f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(feedrate)}\n", recent_output_lines
+                                                f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(segment_feedrate)}\n", recent_output_lines
                                             )
                                         else:
                                             write_and_track(output_buffer, 
@@ -4437,6 +4661,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         elif enable_safe_z_hop and seen_first_layer and line.startswith("G1"):
             
             # Track current E position for retraction management
+            # Save the E value BEFORE this line for potential unretraction
+            previous_e = current_e
             e_match = re.search(r'E([-\d.]+)', line)
             if e_match and not use_relative_e:
                 current_e = float(e_match.group(1))
@@ -4454,21 +4680,18 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # If we're hopped up and about to extrude, drop back down first AND unretract if needed
             if is_hopped and is_extrusion:
-                # Look ahead to see if slicer will add unretraction after drop-down
+                # Check recent OUTPUT lines to see if slicer already added unretraction
+                # We check the OUTPUT buffer, not input lines, because processing might have reordered things
                 slicer_will_unretract = False
-                for j in range(i, min(i + 5, len(lines))):  # Look ahead a few lines
-                    check_line = lines[j]
-                    # Check for positive E move (unretraction) coming up
-                    if check_line.startswith("G1") and "E" in check_line and "X" not in check_line and "Y" not in check_line and "Z" not in check_line:
-                        e_check = re.search(r'E([-\d.]+)', check_line)
+                for recent_line in recent_output_lines:
+                    # Check for positive E move (unretraction) in recent output
+                    if recent_line.startswith("G1") and "E" in recent_line and "X" not in recent_line and "Y" not in recent_line and "Z" not in recent_line:
+                        e_check = re.search(r'E([-\d.]+)', recent_line)
                         if e_check:
                             e_val = float(e_check.group(1))
                             if e_val >= 0:  # Positive E = unretraction
                                 slicer_will_unretract = True
                                 break
-                    # Stop if we hit actual extrusion with X/Y
-                    if check_line.startswith("G1") and ("X" in check_line or "Y" in check_line) and "E" in check_line:
-                        break
                 
                 if not slicer_will_unretract:
                     # Detect retraction feedrate from recent retractions
@@ -4481,10 +4704,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 retract_feedrate = int(f_match.group(1))
                                 break
                     
-                    write_and_track(output_buffer, f"G1 E{current_e:.5f} F{retract_feedrate} ; Unretract after Z-hop\n", recent_output_lines)
+                    # Use previous_e (E before this line) for unretraction, not current_e (E from this line)
+                    write_and_track(output_buffer, f"G1 E{previous_e:.5f} F{retract_feedrate} ; Unretract after Z-hop\n", recent_output_lines)
                 
-                write_and_track(output_buffer, f"G0 Z{working_z:.3f} F8400 ; Drop back to working Z\n", recent_output_lines)
-                current_travel_z = working_z
+                # Drop back to ACTUAL current Z, not base layer Z (working_z)
+                # current_z tracks the real working height including any Z moves since layer start
+                write_and_track(output_buffer, f"G0 Z{current_z:.3f} F8400 ; Drop back to current Z\n", recent_output_lines)
+                current_travel_z = current_z
                 is_hopped = False
             
             # Detect travel moves: G1 with X/Y, F (feedrate), but no E (extrusion)
@@ -4608,13 +4834,17 @@ if __name__ == "__main__":
                        action='store_false', dest='smoothificator_skip_first_layer',
                        help='Process first layer with smoothificator')
     
-    parser.add_argument('-enableBricklayers', '--enable-bricklayers', action='store_true', default=False,
-                       help='Enable Bricklayers Z-shifting (default: disabled)')
+    parser.add_argument('-enableBricklayers', '--enable-bricklayers', action='store_const', const=True, dest='enable_bricklayers', default=None,
+                       help='Enable Bricklayers Z-shifting (default: disabled, enabled with -full)')
+    parser.add_argument('-disableBricklayers', '--disable-bricklayers', action='store_const', const=False, dest='enable_bricklayers',
+                       help='Disable Bricklayers (overrides -full)')
     parser.add_argument('-bricklayersExtrusion', '--bricklayers-extrusion', type=float, default=1.0,
                        help='Extrusion multiplier for Bricklayers shifted blocks (default: 1.0)')
     
-    parser.add_argument('-enableNonPlanar', '--enable-non-planar', action='store_true', default=False,
-                       help='Enable non-planar infill modulation (default: disabled)')
+    parser.add_argument('-enableNonPlanar', '--enable-non-planar', action='store_const', const=True, dest='enable_non_planar', default=None,
+                       help='Enable non-planar infill modulation (default: disabled, enabled with -full)')
+    parser.add_argument('-disableNonPlanar', '--disable-non-planar', action='store_const', const=False, dest='enable_non_planar',
+                       help='Disable non-planar infill (overrides -full)')
     parser.add_argument('-deformType', '--deform-type', type=str, default='sine', choices=['sine', 'noise'],
                        help='Type of deformation pattern: sine (smooth waves) or noise (Perlin noise) (default: sine)')
     parser.add_argument('-segmentLength', '--segment-length', type=float, default=DEFAULT_SEGMENT_LENGTH,
@@ -4635,8 +4865,15 @@ if __name__ == "__main__":
     parser.add_argument('-safeZHopMargin', '--safe-z-hop-margin', type=float, default=DEFAULT_SAFE_Z_HOP_MARGIN,
                        help=f'Safety margin in mm to add above max Z during travel (default: {DEFAULT_SAFE_Z_HOP_MARGIN})')
     
-    parser.add_argument('-enableBridgeDensifier', '--enable-bridge-densifier', action='store_true', default=False,
-                       help='Enable Bridge Densifier to add intermediate lines between bridge extrusions for better bridging (default: disabled, experimental)')
+    parser.add_argument('-enableBridgeDensifier', '--enable-bridge-densifier', action='store_const', const=True, dest='enable_bridge_densifier', default=None,
+                       help='Enable Bridge Densifier to add intermediate lines between bridge extrusions for better bridging (default: disabled, enabled with -full, experimental)')
+    parser.add_argument('-disableBridgeDensifier', '--disable-bridge-densifier', action='store_const', const=False, dest='enable_bridge_densifier',
+                       help='Disable Bridge Densifier (overrides -full)')
+    
+    parser.add_argument('-enableRemoveGapFill', '--enable-remove-gap-fill', action='store_const', const=True, dest='enable_remove_gap_fill', default=None,
+                       help='Enable gap fill removal (default: disabled, enabled with -full)')
+    parser.add_argument('-disableRemoveGapFill', '--disable-remove-gap-fill', action='store_const', const=False, dest='enable_remove_gap_fill',
+                       help='Disable gap fill removal (overrides -full)')
     
     # Debug mode arguments
     debug_group = parser.add_mutually_exclusive_group()
@@ -4676,13 +4913,26 @@ if __name__ == "__main__":
     # Individual feature flags specified after -full can still override
     if args.enable_all:
         logging.info("Full mode enabled - activating all features")
-        if not args.enable_bricklayers:
+        # Only enable features if not explicitly set by user (None = not specified)
+        if args.enable_bricklayers is None:
             args.enable_bricklayers = True
-        if not args.enable_non_planar:
+        if args.enable_non_planar is None:
             args.enable_non_planar = True
-        if not args.enable_bridge_densifier:
+        if args.enable_bridge_densifier is None:
             args.enable_bridge_densifier = True
+        if args.enable_remove_gap_fill is None:
+            args.enable_remove_gap_fill = True
         # Smoothificator and Safe Z-hop are already enabled by default
+    
+    # Convert None to False for features that default to disabled (if user never specified them)
+    if args.enable_bricklayers is None:
+        args.enable_bricklayers = False
+    if args.enable_non_planar is None:
+        args.enable_non_planar = False
+    if args.enable_bridge_densifier is None:
+        args.enable_bridge_densifier = False
+    if args.enable_remove_gap_fill is None:
+        args.enable_remove_gap_fill = False
     
     try:
         logging.info("Calling process_gcode()...")
@@ -4705,6 +4955,7 @@ if __name__ == "__main__":
             enable_safe_z_hop=args.enable_safe_z_hop,
             safe_z_hop_margin=args.safe_z_hop_margin,
             enable_bridge_densifier=args.enable_bridge_densifier,
+            remove_gap_fill=args.enable_remove_gap_fill,
             debug=debug
         )
         
