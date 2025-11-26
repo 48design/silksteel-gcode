@@ -543,6 +543,35 @@ def is_in_safezone(gx, gy, layer, grid_cell_solid_regions):
             return True
     return False
 
+def has_solid_above_blurry(solid_at_grid, gx, gy, layer, radius=1):
+    """
+    Blurry lookup: check a (2r+1)x(2r+1) neighborhood around (gx, gy) for any
+    solid type above the given layer that should trigger un-shift.
+
+    TRIGGERING types: Solid infill, top solid, external perimeters, bridges, etc.
+    NON-triggering types: TYPE_INTERNAL_PERIMETER (will also be bricklayered), TYPE_NONE (empty space)
+
+    Args:
+        solid_at_grid: dict with keys (gx,gy,layer)
+        gx, gy: grid coordinates of the center cell
+        layer: current layer number (we look at layer+1)
+        radius: how many cells to expand in each direction (1 = 8 neighbors)
+
+    Returns:
+        True if any neighbor cell at layer+1 contains actual solid material that blocks full shift.
+    """
+    next_layer = layer + 1
+    for nx in range(gx - radius, gx + radius + 1):
+        for ny in range(gy - radius, gy + radius + 1):
+            key = (nx, ny, next_layer)
+            # Only trigger if cell EXISTS and has actual solid material
+            if key in solid_at_grid:
+                ntype = solid_at_grid[key].get('type', TYPE_NONE)
+                # Trigger on solid types (NOT internal perimeter, NOT empty)
+                if ntype not in [TYPE_NONE, TYPE_INTERNAL_PERIMETER]:
+                    return True
+    return False
+
 def add_inline_comment(gcode_line, comment):
     """
     Helper function to add an inline comment to a G-code line.
@@ -939,6 +968,9 @@ def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_re
             normalized = abs(noise_val) / noise_range
             intensity = int(normalized * 255)
             
+            # Base grayscale from noise
+            r = g = b = intensity
+            
             # Calculate actual Z for this noise value
             z_offset = amplitude * noise_val
             z_mod = layer_z + z_offset
@@ -949,21 +981,16 @@ def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_re
             if cell_key in solid_at_grid:
                 infill_crossings = solid_at_grid[cell_key].get('infill_crossings', 0)
             
-            # Color scheme:
-            # - GREEN channel only: valley (z < layer_z) AND single infill crossing
-            # - RED channel only: valley (z < layer_z) AND multiple infill crossings
-            # - Grayscale: everything else (no infill, or not a valley)
+            # Overlay scheme on top of grayscale base:
+            # - GREEN channel boost: valley (z < layer_z) AND single infill crossing
+            # - RED channel boost: valley (z < layer_z) AND multiple infill crossings
             is_valley = z_mod < layer_z
-            
             if is_valley and infill_crossings > 1:
-                # Valley with multiple crossings: red channel only
-                color = (intensity, 0, 0)
+                r = 255  # crossings/intersections
             elif is_valley and infill_crossings == 1:
-                # Valley with single infill extrusion: green channel only
-                color = (0, intensity, 0)
-            else:
-                # Everything else: grayscale
-                color = (intensity, intensity, intensity)
+                g = 255  # single extrusion line
+            
+            color = (r, g, b)
             
             # Draw filled rectangle for this grid cell
             draw.rectangle(
@@ -1009,7 +1036,6 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
         Tuple of (processed_lines, final_e, final_pos) where processed_lines is the densified G-code, 
         final_e is the updated E position, and final_pos is (x, y) tuple of final position
     """
-    import math
     
     # Extract feedrates from buffered lines
     extrusion_feedrate = None
@@ -1041,8 +1067,6 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
     
     if travel_feedrate is None:
         travel_feedrate = 8400  # Fallback travel speed
-    
-    logging.info(f"[BRIDGE] Extracted feedrates: extrusion={extrusion_feedrate}, travel={travel_feedrate}, bridge_extrusion (after slowdown)={bridge_extrusion_feedrate}")
     
     # Helper function to conditionally add comments based on debug mode
     def comment_if_debug(gcode_line, comment):
@@ -1112,8 +1136,6 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
     
     if len(moves) < 2:
         # Single move - create edges on both sides and output as serpentine
-        logging.info(f"[BRIDGE] Only {len(moves)} move(s) - creating edges for densification")
-        
         if len(moves) == 1:
             move = moves[0]
             
@@ -1245,7 +1267,8 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             # Calculate final E (original E + 2 edges)
             final_e = move['e_end'] + (2 * edge_e_delta)
             
-            logging.info(f"[BRIDGE] Single-move densification complete: E={current_e:.5f} -> {final_e:.5f} (added {2*edge_e_delta:.5f})")
+            if debug >= 2:
+                logging.info(f"[BRIDGE] Single-move densification complete: E={current_e:.5f} -> {final_e:.5f} (added {2*edge_e_delta:.5f})")
             
             return output, final_e, current_pos
         else:
@@ -1280,8 +1303,6 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
     
     # Step 2: Filter by length - keep only long bridge lines (> minimum length threshold)
     long_moves = [m for m in moves if m['length'] >= DEFAULT_BRIDGE_MIN_LENGTH]
-    
-    logging.info(f"[BRIDGE] Parsed {len(moves)} total moves, filtered to {len(long_moves)} long lines (>= {DEFAULT_BRIDGE_MIN_LENGTH}mm)")
     
     # Even if there are no "long" lines, we still want to process short bridge sections
     # So don't return early - continue with densification logic
@@ -1405,7 +1426,7 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                       long_move.get('paired_with_prev') is None)
         
         if is_unpaired:
-            logging.info(f"[BRIDGE] Found single unpaired long line at index {long_idx}: ({long_move['x1']:.3f},{long_move['y1']:.3f}) → ({long_move['x2']:.3f},{long_move['y2']:.3f})")
+            # Unpaired line - add edges on both sides
             
             # Use the default spacing (half the max spacing threshold)
             spacing = DEFAULT_BRIDGE_MAX_SPACING / 2.0
@@ -1434,19 +1455,21 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                 }
             }
             
-            logging.info(f"[BRIDGE] Created edge intermediates on both sides (spacing={spacing:.3f}mm)")
+            # Created edge intermediates on both sides
     
     # Special case: If there are NO long lines but there IS at least one move, 
     # treat the longest move as a "single line" and add edges to it
     if len(long_move_indices) == 0 and len(moves) > 0:
-        logging.info(f"[BRIDGE] No long lines found, but {len(moves)} moves exist - finding longest move")
+        if debug >= 2:
+            logging.info(f"[BRIDGE] No long lines found, but {len(moves)} moves exist - finding longest move")
         
         # Find the longest move
         longest_move = max(moves, key=lambda m: m['length'])
         longest_idx = moves.index(longest_move)
         
         if longest_move['length'] > 1.0:  # At least 1mm to be worth densifying
-            logging.info(f"[BRIDGE] Treating longest move as single line: index {longest_idx}, length {longest_move['length']:.2f}mm")
+            if debug >= 2:
+                logging.info(f"[BRIDGE] Treating longest move as single line: index {longest_idx}, length {longest_move['length']:.2f}mm")
             
             spacing = DEFAULT_BRIDGE_MAX_SPACING / 2.0
             perp_x = -longest_move['dy'] / longest_move['length']
@@ -1470,7 +1493,8 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                 }
             }
             
-            logging.info(f"[BRIDGE] Created edge intermediates for longest move (spacing={spacing:.3f}mm)")
+            if debug >= 2:
+                logging.info(f"[BRIDGE] Created edge intermediates for longest move (spacing={spacing:.3f}mm)")
     
     # Step 5: Calculate edge intermediates for first and last long lines
     # ONLY if they actually have intermediates paired with them
@@ -1508,11 +1532,11 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                     spacing = inter['spacing']
                     paired_idx = inter.get('paired_idx')
                     
-                    logging.info(f"[BRIDGE] ===== CALCULATING EDGE BEFORE (paired line) =====")
-                    logging.info(f"[BRIDGE] Starting position (where we're coming from): ({start_x:.3f}, {start_y:.3f})")
-                    logging.info(f"[BRIDGE] First long line: ({first_long['x1']:.3f},{first_long['y1']:.3f}) → ({first_long['x2']:.3f},{first_long['y2']:.3f})")
-                    logging.info(f"[BRIDGE] Intermediate start: {inter['start']}, end: {inter['end']}")
-                    logging.info(f"[BRIDGE] Intermediate spacing: {spacing:.3f}mm")
+                    # logging.info(f"[BRIDGE] ===== CALCULATING EDGE BEFORE (paired line) =====")
+                    # logging.info(f"[BRIDGE] Starting position (where we're coming from): ({start_x:.3f}, {start_y:.3f})")
+                    # logging.info(f"[BRIDGE] First long line: ({first_long['x1']:.3f},{first_long['y1']:.3f}) → ({first_long['x2']:.3f},{first_long['y2']:.3f})")
+                    # logging.info(f"[BRIDGE] Intermediate start: {inter['start']}, end: {inter['end']}")
+                    # logging.info(f"[BRIDGE] Intermediate spacing: {spacing:.3f}mm")
                     
                     # Get the second long line (the one paired with the first)
                     if paired_idx is not None:
@@ -1638,7 +1662,8 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
     
     # Initialize current position at the start of the first move in this section
     current_pos = (moves[0]['x1'], moves[0]['y1'])
-    logging.info(f"[BRIDGE] Initial current_pos: {current_pos}")
+    if debug >= 2:
+        logging.info(f"[BRIDGE] Initial current_pos: {current_pos}")
     
     # Output all moves in continuous serpentine loop
     # BUT: detect when buffer order doesn't match spatial order and add travel moves
@@ -1652,25 +1677,23 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
         
         # Insert edge BEFORE right before we draw the first LONG line
         if not edge_before_drawn and edge_before_first and move.get('is_long') and not first_long_drawn:
-            logging.info(f"[BRIDGE] ===== INSERTING EDGE BEFORE =====")
-            logging.info(f"[BRIDGE] Current position: {current_pos}")
-            logging.info(f"[BRIDGE] About to draw first long line: ({move['x1']:.3f},{move['y1']:.3f}) → ({move['x2']:.3f},{move['y2']:.3f})")
-            logging.info(f"[BRIDGE] Edge BEFORE start: {edge_before_first['start']}")
-            logging.info(f"[BRIDGE] Edge BEFORE end: {edge_before_first['end']}")
-            
+            if debug >= 2:
+                logging.info(f"[BRIDGE] ===== INSERTING EDGE BEFORE =====")
+                logging.info(f"[BRIDGE] Current position: {current_pos}")
+                logging.info(f"[BRIDGE] About to draw first long line: ({move['x1']:.3f},{move['y1']:.3f}) → ({move['x2']:.3f},{move['y2']:.3f})")
+                logging.info(f"[BRIDGE] Edge BEFORE start: {edge_before_first['start']}")
+                logging.info(f"[BRIDGE] Edge BEFORE end: {edge_before_first['end']}")
             # Find which endpoint of edge BEFORE is closer to current position
             dist_to_start = math.sqrt((edge_before_first['start'][0] - current_pos[0])**2 + 
                                      (edge_before_first['start'][1] - current_pos[1])**2)
             dist_to_end = math.sqrt((edge_before_first['end'][0] - current_pos[0])**2 + 
                                    (edge_before_first['end'][1] - current_pos[1])**2)
-            
-            logging.info(f"[BRIDGE] Distance from current_pos to edge start: {dist_to_start:.3f}mm")
-            logging.info(f"[BRIDGE] Distance from current_pos to edge end: {dist_to_end:.3f}mm")
-            
+            if debug >= 2:
+                logging.info(f"[BRIDGE] Distance from current_pos to edge start: {dist_to_start:.3f}mm")
+                logging.info(f"[BRIDGE] Distance from current_pos to edge end: {dist_to_end:.3f}mm")
             if debug:
                 output.append(f"; [Bridge Densifier] Edge intermediate BEFORE first long line (spacing={edge_before_first['spacing']:.3f}mm)\n")
             set_e_mode('relative')
-            
             if dist_to_start < dist_to_end:
                 # Closer to start - travel to start, then draw start->end
                 if dist_to_start > 0.001:  # Only if we're not already there
@@ -1678,7 +1701,8 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                         f"G0 X{edge_before_first['start'][0]:.3f} Y{edge_before_first['start'][1]:.3f} F{int(travel_feedrate)}\n",
                         f"Edge BEFORE connector {dist_to_start:.2f}mm"
                     ))
-                logging.info(f"[BRIDGE] Drawing edge BEFORE: start->end")
+                if debug >= 2:
+                    logging.info(f"[BRIDGE] Drawing edge BEFORE: start->end")
                 output.append(add_inline_comment(
                     f"G1 X{edge_before_first['end'][0]:.3f} Y{edge_before_first['end'][1]:.3f} E{edge_before_first['e_delta']:.5f} F{bridge_extrusion_feedrate}\n",
                     f"Edge BEFORE start->end, spacing={edge_before_first['spacing']:.3f}mm"
@@ -1699,7 +1723,8 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                 current_pos = (edge_before_first['start'][0], edge_before_first['start'][1])
             
             set_e_mode('absolute')
-            logging.info(f"[BRIDGE] After edge BEFORE, current_pos: {current_pos}")
+            if debug >= 2:
+                logging.info(f"[BRIDGE] After edge BEFORE, current_pos: {current_pos}")
             edge_before_drawn = True
         
         # CRITICAL: Check if this line is "out of sequence"
@@ -1960,16 +1985,6 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
     # Switch back to absolute mode at the end
     set_e_mode('absolute')
     
-    # Count statistics
-    intermediate_count = sum(1 for m in moves if m['intermediate_after'] is not None)
-    edge_count = (1 if edge_before_first else 0) + (1 if edge_after_last else 0)
-    connector_skip_count = sum(1 for m in moves if m['is_connector_to_skip'])
-    kept_count = len([m for m in moves if not m['is_connector_to_skip']])
-    
-    logging.info(f"[BRIDGE] Filtered {len(moves)} moves → {len(long_move_indices)} long bridge lines")
-    logging.info(f"[BRIDGE] Added {intermediate_count} intermediate lines + {edge_count} edge lines")
-    logging.info(f"[BRIDGE] Removed {connector_skip_count} old connectors, kept {kept_count} bridge lines (direction optimized)")
-    
     # Calculate final E from original buffer (for comparison)
     original_final_e = current_e
     for line in buffered_lines:
@@ -1987,7 +2002,8 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                 if e_val > 0:  # Relative mode, positive = extrusion
                     densified_total_e += e_val
     
-    logging.info(f"[BRIDGE] E tracking: start={current_e:.5f}, original_end={original_final_e:.5f}, densified_total={densified_total_e:.5f}")
+    if debug >= 2:
+        logging.info(f"[BRIDGE] E tracking: start={current_e:.5f}, original_end={original_final_e:.5f}, densified_total={densified_total_e:.5f}")
     
     # Return output, final E, and final XY position (where serpentine path ended)
     final_e = current_e + densified_total_e
@@ -2194,8 +2210,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     if enable_bridge_densifier:
         logging.info(f"Bridge densifier connector max length: {bridge_connector_max_length:.3f}mm (2× extrusion width)")
     
-    # Set grid resolution to match extrusion width (no diagonal compensation)
-    grid_resolution = extrusion_width * 1.4444  # 44% larger ensures diagonal coverage
+    # Set grid resolution to a coarser value for a slightly "blurry" grid
+    # Using 1.4444× the extrusion width maintains good diagonal coverage while reducing precision
+    grid_resolution = extrusion_width * 1.4444
     
     solid_at_grid = {}  # (grid_x, grid_y, layer_num) -> True if solid exists
     z_layer_map = {}    # layer_num -> Z height
@@ -2205,7 +2222,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info("\n" + "="*70)
         logging.info("PASS 1: Building 3D solid occupancy grid")
         logging.info("="*70)
-        logging.info(f"Grid resolution: {grid_resolution:.3f}mm (matches extrusion width)")
+        logging.info(f"Grid resolution: {grid_resolution:.3f}mm (~1.44× extrusion width for coarse grid)")
         logging.info("="*70)
         
         # First, scan to find all Z layers and print bounds
@@ -2450,11 +2467,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     # Mark current cell as solid with type information
                                     cell_key = (current_cell_x, current_cell_y, current_layer_num)
                                     if cell_key not in solid_at_grid:
-                                        solid_at_grid[cell_key] = {'solid': True, 'infill_crossings': 0, 'type': current_type}
+                                        solid_at_grid[cell_key] = {'solid': True, 'infill_crossings': 0, 'type': current_type, 'bricklayer_type': None}
                                     else:
                                         solid_at_grid[cell_key]['solid'] = True
-                                        # Keep the first type encountered (or could use last, or prioritize certain types)
-                                        if 'type' not in solid_at_grid[cell_key]:
+                                        # PRIORITY: Internal perimeters always overwrite other types
+                                        # This ensures bricklayers focuses on perimeter-to-perimeter contact
+                                        if current_type == TYPE_INTERNAL_PERIMETER:
+                                            solid_at_grid[cell_key]['type'] = current_type
+                                        elif 'type' not in solid_at_grid[cell_key]:
                                             solid_at_grid[cell_key]['type'] = current_type
                                     cells_marked += 1
                                     
@@ -2908,9 +2928,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # Cache grid bounds (optimization: calculate once, reuse everywhere)
         grid_bounds_cached = calculate_grid_bounds(solid_at_grid)
         
-        # Prepare grid visualization G-code to insert at layer 0 (only if debug enabled)
+        # Prepare grid visualization G-code to insert at layer 0 (only if full debug enabled)
         grid_visualization_gcode = []
-        if debug >= 1 and grid_bounds_cached:
+        if debug >= 2 and grid_bounds_cached:
             grid_x_min, grid_x_max, grid_y_min, grid_y_max, grid_width, grid_height = grid_bounds_cached
             
             grid_visualization_gcode.append("; ========================================\n")
@@ -3573,9 +3593,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 i += 1
                 continue
         
-        # Progress logging every 10,000 lines
-        if line_count_processed % 10000 == 0:
-            logging.info(f"  Processed {line_count_processed}/{len(lines)} lines ({100*line_count_processed/len(lines):.1f}%)")
+        # Progress indicator every 10,000 lines (less verbose)
+        if i > 0 and i % 10000 == 0:
+            progress = (i / total_lines) * 100
+            print(f"  Progress: {i}/{total_lines} lines ({progress:.1f}%)", end='\r')
         
         # Detect layer changes and get adaptive layer height
         if ";LAYER_CHANGE" in line:
@@ -3597,8 +3618,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     if layer_match:
                         current_layer = int(layer_match.group(1))
                         layer_found = True
-                        if current_layer % 5 == 0:
-                            print(f"  Processing layer {current_layer}...")
                         break
             
             if not layer_found:
@@ -3632,7 +3651,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     height_match = re.search(r';HEIGHT:([\d.]+)', lines[j])
                     if height_match:
                         current_layer_height = float(height_match.group(1))
-                        logging.info(f"Layer {current_layer} HEIGHT marker: layer_height={current_layer_height:.3f}")
                         break
             
             # Generate LUT visualization for the current layer
@@ -3909,7 +3927,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Use the global position tracker - it's always accurate!
             start_pos = (position['x'], position['y'])
-            logging.info(f"  [SMOOTHIFICATOR] Start position from position tracker: X{start_pos[0]:.3f} Y{start_pos[1]:.3f}")
             
             for pass_num in range(passes_needed):
                 # Calculate Z for this pass (work DOWN from current_z)
@@ -4048,45 +4065,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             block_travel_x = entry_x
                             block_travel_y = entry_y
                         
-                        # Detect if this layer is a base or top of a solid region
-                        # Use grid position of the perimeter block to check solid layers above/below
-                        is_base_layer = False
-                        is_top_layer = False
-                        
-                        if block_travel_x is not None and block_travel_y is not None:
-                            gx = int(round(block_travel_x / grid_resolution))
-                            gy = int(round(block_travel_y / grid_resolution))
-                            
-                            # Check if layer BELOW has solid (this is base layer - first layer of internal perimeters)
-                            # Look at layer - 1 to see if it has NO solid (then we're starting a new region)
-                            if current_layer > 0:
-                                prev_layer_key = (gx, gy, current_layer - 1)
-                                if prev_layer_key not in solid_at_grid or not solid_at_grid[prev_layer_key].get('solid', False):
-                                    is_base_layer = True
-                                    #logging.info(f"  [BRICKLAYERS DEBUG] Layer {current_layer}, Block #{perimeter_block_count}: Detected BASE layer (no solid below)")
-                            else:
-                                is_base_layer = True  # Layer 0 is always base
-                            
-                            # Check if layer ABOVE has BLOCKING solid (not internal perimeters)
-                            # Blocking types: external perimeters, solid infill, bridge infill, etc.
-                            # Non-blocking: internal perimeters (they will also be shifted)
-                            next_layer_key = (gx, gy, current_layer + 1)
-                            if next_layer_key in solid_at_grid:
-                                next_type = solid_at_grid[next_layer_key].get('type', TYPE_NONE)
-                                # Internal perimeters don't block (they will also be bricklayered)
-                                # Everything else blocks (external perimeters, solid infill, bridges, etc.)
-                                if next_type != TYPE_INTERNAL_PERIMETER and next_type != TYPE_NONE:
-                                    is_top_layer = True
-                                    #logging.info(f"  [BRICKLAYERS DEBUG] Layer {current_layer}, Block #{perimeter_block_count}: Detected TOP layer (blocking solid type {next_type} above)")
-                        
-                        # On base layers: all blocks are base blocks (no shifting)
-                        # On other layers: alternate between shifted and base
-                        if is_base_layer:
-                            is_shifted = False  # All base blocks on base layers
-                        else:
-                            is_shifted = perimeter_block_count % 2 == 1
-                        
-                        # Collect this perimeter loop
+                        # Collect this perimeter loop first
                         loop_lines = []
                         loop_lines.append(current_line)
                         j += 1
@@ -4102,145 +4081,285 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             loop_lines.append(line)
                             j += 1
                         
-                        # Now output this loop with bricklayer pattern
-                        if is_shifted:
-                            # Shifted block: single pass at Z + 0.5h
-                            # On top layers, use 0.75x height (0.5 → 0.375 shift) for flat top
-                            z_shift_adjusted = z_shift * 0.75 if is_top_layer else z_shift
-                            adjusted_z = current_z + z_shift_adjusted
-                            extrusion_factor = 1.0
-                            
-                            # Track actual max Z for this layer (for safe Z-hop)
-                            if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
-                                actual_layer_max_z[current_layer] = adjusted_z
-                            
-                            write_and_track(output_buffer, f"G0 Z{adjusted_z:.3f} ; Bricklayers shifted block #{perimeter_block_count}\n", recent_output_lines)
-                            #logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Shifted at Z={adjusted_z:.3f} (extrusion: {extrusion_factor}x)")
-                            
-                            # Adjust extrusion based on whether it's the last layer
-                            for loop_line in loop_lines:
-                                if "E" in loop_line:
-                                    e_value = extract_e(loop_line)
-                                    if e_value is not None:
-                                        new_e_value = e_value * extrusion_factor * bricklayers_extrusion_multiplier
-                                        loop_line = replace_e(loop_line, new_e_value)
-                                write_and_track(output_buffer, loop_line, recent_output_lines)
-                            
-                            # Reset Z
-                            write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
+                        # Detect if this layer is a base or top of a solid region
+                        # Sample along the actual perimeter path to check what's above
+                        is_base_layer = False
+                        is_top_layer = False
                         
+                        # Collect all XY positions along this perimeter loop for sampling
+                        sample_positions = []
+                        for loop_line in loop_lines:
+                            if loop_line.startswith("G1") and ("X" in loop_line or "Y" in loop_line):
+                                x = extract_x(loop_line)
+                                y = extract_y(loop_line)
+                                if x is not None and y is not None:
+                                    sample_positions.append((x, y))
+                        
+                        # Check if stackable: only apply bricklayers if TYPE_INTERNAL_PERIMETER above
+                        # (otherwise just output as regular internal perimeter)
+                        has_perimeter_above = False
+                        if len(sample_positions) > 0:
+                            for x, y in sample_positions[::5]:  # Sample every 5th position
+                                gx = int(x / grid_resolution)
+                                gy = int(y / grid_resolution)
+                                next_layer_key = (gx, gy, current_layer + 1)
+                                if next_layer_key in solid_at_grid:
+                                    next_type = solid_at_grid[next_layer_key].get('type', TYPE_NONE)
+                                    if next_type == TYPE_INTERNAL_PERIMETER:
+                                        has_perimeter_above = True
+                                        break
+                        
+                        # Skip bricklayers entirely if no stackable perimeter above
+                        if not has_perimeter_above:
+                            # Output as regular internal perimeter (no bricklayers modification)
+                            for loop_line in loop_lines:
+                                write_and_track(output_buffer, loop_line, recent_output_lines)
+                            perimeter_block_count += 1
+                            # Don't use continue here - it would loop forever!
+                            # Just move to next j and let the loop continue naturally
                         else:
-                            # Base block (non-shifted)
-                            # Use two-pass on base layers (start of solid regions), single pass otherwise
-                            if is_base_layer:
-                                # Base layer: TWO passes at 0.75h each (total 1.5h)
-                                pass1_z = current_z  # Start at normal layer Z
-                                pass2_z = current_z + (current_layer_height * 0.75)  # Raise by 0.75h for second pass
-                                
-                                # Track actual max Z for this layer (for safe Z-hop)
-                                if current_layer not in actual_layer_max_z or pass2_z > actual_layer_max_z[current_layer]:
-                                    actual_layer_max_z[current_layer] = pass2_z
-                                
-                                #logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base in 2 passes at Z={pass1_z:.3f} and Z={pass2_z:.3f}")
-                                
-                                # Separate extrusion moves from non-extrusion commands
-                                # Extrusion moves: G1 with X, Y, and E (the actual printing)
-                                # Non-extrusion: WIDTH comments, G92, retractions, travel, etc.
-                                # Fan commands (M106/M107): Keep only first and last
-                                extrusion_moves = []
-                                non_extrusion_commands = []
-                                fan_commands = []  # Collect all fan commands separately
-                                
-                                # Use global position tracker for loop start position
-                                start_x, start_y = position['x'], position['y']
-                                
-                                for loop_line in loop_lines:
-                                    # Check if this is an extrusion move
-                                    is_extrusion = loop_line.startswith("G1") and "X" in loop_line and "Y" in loop_line and "E" in loop_line and "E-" not in loop_line
-                                    # Check if this is a fan command
-                                    is_fan_command = loop_line.startswith("M106") or loop_line.startswith("M107")
-                                    
-                                    if is_extrusion:
-                                        extrusion_moves.append(loop_line)
-                                    elif is_fan_command:
-                                        # Collect fan commands separately
-                                        fan_commands.append(loop_line)
-                                    else:
-                                        # Everything else (WIDTH comments, G92, retraction, travel)
-                                        non_extrusion_commands.append(loop_line)
-                                
-                                # Keep only first and last fan command
-                                if fan_commands:
-                                    if len(fan_commands) == 1:
-                                        non_extrusion_commands.insert(0, fan_commands[0])
-                                    else:
-                                        non_extrusion_commands.insert(0, fan_commands[0])  # First at beginning
-                                        non_extrusion_commands.append(fan_commands[-1])    # Last at end
-                                
-                                # Validation: make sure we found extrusion moves
-                                if not extrusion_moves:
-                                    logging.warning(f"  [BRICKLAYERS WARNING] Layer {current_layer}, Block #{perimeter_block_count}: No extrusion moves found in loop!")
-                                
-                                # Pass 1: Print at base layer Z
-                                if pre_block_e_value is not None:
-                                    write_and_track(output_buffer, f"G1 Z{pass1_z:.3f} E{pre_block_e_value:.5f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n", recent_output_lines)
-                                else:
-                                    write_and_track(output_buffer, f"G1 Z{pass1_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n", recent_output_lines)
-                                
-                                # Reset E after Z move so extrusion values start fresh
-                                write_and_track(output_buffer, "G92 E0\n", recent_output_lines)
-                                
-                                # Output all extrusion moves with adjusted E values (0.75x height)
-                                for line in extrusion_moves:
-                                    e_value = extract_e(line)
-                                    if e_value is not None:
-                                        new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
-                                        line = replace_e(line, new_e_value)
-                                    write_and_track(output_buffer, line, recent_output_lines)
-                                
-                                # Pass 2: Travel to start, raise Z, print same moves
-                                write_and_track(output_buffer, "G92 E0 ; Reset extruder for pass 2\n", recent_output_lines)
-                                write_and_track(output_buffer, f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n", recent_output_lines)
-                                write_and_track(output_buffer, f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n", recent_output_lines)
-                                
-                                # Output same extrusion moves again at higher Z
-                                for line in extrusion_moves:
-                                    e_value = extract_e(line)
-                                    if e_value is not None:
-                                        new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
-                                        line = replace_e(line, new_e_value)
-                                    write_and_track(output_buffer, line, recent_output_lines)
-                                
-                                # Output non-extrusion commands once (M107, WIDTH, G92, retraction, travel, etc.)
-                                for cmd in non_extrusion_commands:
-                                    write_and_track(output_buffer, cmd, recent_output_lines)
-                                
-                                # Reset Z back to layer height
-                                write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
+                            # Base layer logic:
+                            # - Two-pass at 0.75h: (nothing below OR solid below) AND NO solid above
+                            # - This is the START of a stackable brick region
+                            
+                            # Check what's below - differentiate between regular internal perimeter and bricklayer
+                            has_bricklayer_below = False  # shifted or base bricklayer (stackable)
+                            has_regular_perimeter_below = False  # non-bricklayer internal perimeter
+                            has_non_perimeter_below = False  # solid/infill/etc
+                            if current_layer > 0 and len(sample_positions) > 0:
+                                for x, y in sample_positions[::5]:
+                                    gx = int(x / grid_resolution)
+                                    gy = int(y / grid_resolution)
+                                    prev_layer_key = (gx, gy, current_layer - 1)
+                                    if prev_layer_key in solid_at_grid:
+                                        prev_type = solid_at_grid[prev_layer_key].get('type', TYPE_NONE)
+                                        if prev_type == TYPE_INTERNAL_PERIMETER:
+                                            # Check if it's a bricklayer or regular perimeter
+                                            prev_bricklayer = solid_at_grid[prev_layer_key].get('bricklayer_type', None)
+                                            if prev_bricklayer in ['base', 'shifted']:
+                                                has_bricklayer_below = True
+                                            else:
+                                                has_regular_perimeter_below = True
+                                        elif prev_type != TYPE_NONE:
+                                            has_non_perimeter_below = True
+                                        if has_bricklayer_below or has_regular_perimeter_below or has_non_perimeter_below:
+                                            break
+                            
+                            # Check what's above (solid = solid infill, NOT internal perimeters)
+                            has_solid_above = False
+                            if len(sample_positions) > 0:
+                                for x, y in sample_positions[::5]:
+                                    gx = int(x / grid_resolution)
+                                    gy = int(y / grid_resolution)
+                                    next_layer_key = (gx, gy, current_layer + 1)
+                                    if next_layer_key in solid_at_grid:
+                                        next_type = solid_at_grid[next_layer_key].get('type', TYPE_NONE)
+                                        # Solid types that block bricklayering
+                                        if next_type in [TYPE_SOLID_INFILL, TYPE_TOP_SOLID_INFILL]:
+                                            has_solid_above = True
+                                            break
+                            
+                            # Base layer = (nothing OR solid below OR regular perimeter) AND NO solid above AND NO bricklayer below
+                            # Only if we have a bricklayer below do we use alternating shift pattern
+                            if not has_bricklayer_below and not has_solid_above:
+                                is_base_layer = True
                             else:
-                                # Non-base layers: Single pass at Z + 0.5h (sits on previous layer's shifted block)
-                                # On top layers, use 0.75x height for flat top
-                                z_shift_adjusted = z_shift * 0.75 if is_top_layer else z_shift
-                                adjusted_z = current_z + z_shift_adjusted
-                                extrusion_factor = 1.0
+                                is_base_layer = False
+                            
+                            # Top layer detection for flush shift (when solid above)
+                            is_top_layer = has_solid_above
+                            
+                            # Re-determine shift status based on updated base layer detection
+                            if is_base_layer:
+                                is_shifted = False  # Two-pass base layer (no shift)
+                            else:
+                                is_shifted = perimeter_block_count % 2 == 1  # Alternating shift pattern
+                            
+                            # Now output this loop with bricklayer pattern
+                            if is_shifted:
+                                # Shifted block: check if ANY part of loop has solid above
+                                # If yes, reduce shift to 0.5x for entire loop (flush with externals)
+                                has_solid_above_loop = False
+                                for x, y in sample_positions[::5]:  # Sample every 5th position
+                                    gx = int(x / grid_resolution)
+                                    gy = int(y / grid_resolution)
+                                    next_layer_key = (gx, gy, current_layer + 1)
+                                    if next_layer_key in solid_at_grid:
+                                        above_type = solid_at_grid[next_layer_key].get('type', TYPE_NONE)
+                                        # Solid types that require reduced shift
+                                        if above_type not in [TYPE_NONE, TYPE_INTERNAL_PERIMETER]:
+                                            has_solid_above_loop = True
+                                            break
+                                
+                                # Apply shift for entire loop based on detection
+                                if has_solid_above_loop:
+                                    # Reduce shift to 0.5x when solid above (flush with external perimeters)
+                                    adjusted_z = current_z + (z_shift * 0.5)
+                                    extrusion_factor = 0.5
+                                else:
+                                    # Full shift when no solid above
+                                    adjusted_z = current_z + z_shift
+                                    extrusion_factor = 1.0
                                 
                                 # Track actual max Z for this layer (for safe Z-hop)
                                 if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
                                     actual_layer_max_z[current_layer] = adjusted_z
                                 
-                                write_and_track(output_buffer, f"G0 Z{adjusted_z:.3f} ; Bricklayers base block #{perimeter_block_count}\n", recent_output_lines)
-                                #logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base at Z={adjusted_z:.3f} (extrusion: {extrusion_factor}x)")
+                                write_and_track(output_buffer, f"G0 Z{adjusted_z:.3f} ; Bricklayers shifted block #{perimeter_block_count}\n", recent_output_lines)
                                 
+                                # Output all lines with adjusted extrusion
                                 for loop_line in loop_lines:
-                                    if "E" in loop_line:
+                                    if loop_line.startswith("G1") and ("X" in loop_line or "Y" in loop_line) and "E" in loop_line:
                                         e_value = extract_e(loop_line)
                                         if e_value is not None:
-                                            new_e_value = e_value * extrusion_factor * bricklayers_extrusion_multiplier
-                                            loop_line = replace_e(loop_line, new_e_value)
+                                            prev_e = position.get('e', 0.0)
+                                            e_delta = e_value - prev_e
+                                            if e_delta > 0:
+                                                new_e_value = prev_e + (e_delta * extrusion_factor * bricklayers_extrusion_multiplier)
+                                                loop_line = replace_e(loop_line, new_e_value)
                                     write_and_track(output_buffer, loop_line, recent_output_lines)
                                 
                                 # Reset Z
                                 write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
+                                
+                                # Mark grid cells as shifted bricklayer
+                                for x, y in sample_positions:
+                                    gx = int(x / grid_resolution)
+                                    gy = int(y / grid_resolution)
+                                    cell_key = (gx, gy, current_layer)
+                                    if cell_key in solid_at_grid:
+                                        solid_at_grid[cell_key]['bricklayer_type'] = 'shifted'
+                        
+                            else:
+                                # Base block (non-shifted)
+                                # Use two-pass on base layers (start of solid regions), single pass otherwise
+                                if is_base_layer:
+                                    # Base layer: TWO passes at 0.75h each (total 1.5h)
+                                    pass1_z = current_z  # Start at normal layer Z
+                                    pass2_z = current_z + (current_layer_height * 0.75)  # Raise by 0.75h for second pass
+                                    
+                                    # Track actual max Z for this layer (for safe Z-hop)
+                                    if current_layer not in actual_layer_max_z or pass2_z > actual_layer_max_z[current_layer]:
+                                        actual_layer_max_z[current_layer] = pass2_z
+                                    
+                                    #logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base in 2 passes at Z={pass1_z:.3f} and Z={pass2_z:.3f}")
+                                    
+                                    # Separate extrusion moves from non-extrusion commands
+                                    # Extrusion moves: G1 with X, Y, and E (the actual printing)
+                                    # Non-extrusion: WIDTH comments, G92, retractions, travel, etc.
+                                    # Fan commands (M106/M107): Keep only first and last
+                                    extrusion_moves = []
+                                    non_extrusion_commands = []
+                                    fan_commands = []  # Collect all fan commands separately
+                                    
+                                    # Use global position tracker for loop start position
+                                    start_x, start_y = position['x'], position['y']
+                                    
+                                    for loop_line in loop_lines:
+                                        # Check if this is an extrusion move
+                                        is_extrusion = loop_line.startswith("G1") and "X" in loop_line and "Y" in loop_line and "E" in loop_line and "E-" not in loop_line
+                                        # Check if this is a fan command
+                                        is_fan_command = loop_line.startswith("M106") or loop_line.startswith("M107")
+                                        
+                                        if is_extrusion:
+                                            extrusion_moves.append(loop_line)
+                                        elif is_fan_command:
+                                            # Collect fan commands separately
+                                            fan_commands.append(loop_line)
+                                        else:
+                                            # Everything else (WIDTH comments, G92, retraction, travel)
+                                            non_extrusion_commands.append(loop_line)
+                                    
+                                    # Keep only first and last fan command
+                                    if fan_commands:
+                                        if len(fan_commands) == 1:
+                                            non_extrusion_commands.insert(0, fan_commands[0])
+                                        else:
+                                            non_extrusion_commands.insert(0, fan_commands[0])  # First at beginning
+                                            non_extrusion_commands.append(fan_commands[-1])    # Last at end
+                                    
+                                    # Validation: make sure we found extrusion moves
+                                    if not extrusion_moves:
+                                        logging.warning(f"  [BRICKLAYERS WARNING] Layer {current_layer}, Block #{perimeter_block_count}: No extrusion moves found in loop!")
+                                    
+                                    # Pass 1: Print at base layer Z
+                                    if pre_block_e_value is not None:
+                                        write_and_track(output_buffer, f"G1 Z{pass1_z:.3f} E{pre_block_e_value:.5f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n", recent_output_lines)
+                                    else:
+                                        write_and_track(output_buffer, f"G1 Z{pass1_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n", recent_output_lines)
+                                    
+                                    # Reset E after Z move so extrusion values start fresh
+                                    write_and_track(output_buffer, "G92 E0\n", recent_output_lines)
+                                    
+                                    # Output all extrusion moves with adjusted E values (0.75x height)
+                                    for line in extrusion_moves:
+                                        e_value = extract_e(line)
+                                        if e_value is not None:
+                                            new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
+                                            line = replace_e(line, new_e_value)
+                                        write_and_track(output_buffer, line, recent_output_lines)
+                                    
+                                    # Pass 2: Travel to start, raise Z, print same moves
+                                    write_and_track(output_buffer, "G92 E0 ; Reset extruder for pass 2\n", recent_output_lines)
+                                    write_and_track(output_buffer, f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n", recent_output_lines)
+                                    write_and_track(output_buffer, f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n", recent_output_lines)
+                                    
+                                    # Output same extrusion moves again at higher Z
+                                    for line in extrusion_moves:
+                                        e_value = extract_e(line)
+                                        if e_value is not None:
+                                            new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
+                                            line = replace_e(line, new_e_value)
+                                        write_and_track(output_buffer, line, recent_output_lines)
+                                    
+                                    # Output non-extrusion commands once (M107, WIDTH, G92, retraction, travel, etc.)
+                                    for cmd in non_extrusion_commands:
+                                        write_and_track(output_buffer, cmd, recent_output_lines)
+                                    
+                                    # Reset Z back to layer height
+                                    write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
+                                    
+                                    # Mark grid cells as base bricklayer
+                                    for x, y in sample_positions:
+                                        gx = int(x / grid_resolution)
+                                        gy = int(y / grid_resolution)
+                                        cell_key = (gx, gy, current_layer)
+                                        if cell_key in solid_at_grid:
+                                            solid_at_grid[cell_key]['bricklayer_type'] = 'base'
+                                else:
+                                    # Non-base layers: Single pass at Z + 0.5h (sits on previous layer's shifted block)
+                                    # On top layers, use 0.75x height for flat top
+                                    z_shift_adjusted = z_shift * 0.75 if is_top_layer else z_shift
+                                    adjusted_z = current_z + z_shift_adjusted
+                                    extrusion_factor = 1.0
+                                    
+                                    # Track actual max Z for this layer (for safe Z-hop)
+                                    if current_layer not in actual_layer_max_z or adjusted_z > actual_layer_max_z[current_layer]:
+                                        actual_layer_max_z[current_layer] = adjusted_z
+                                    
+                                    write_and_track(output_buffer, f"G0 Z{adjusted_z:.3f} ; Bricklayers base block #{perimeter_block_count}\n", recent_output_lines)
+                                    #logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base at Z={adjusted_z:.3f} (extrusion: {extrusion_factor}x)")
+                                    
+                                    for loop_line in loop_lines:
+                                        if "E" in loop_line:
+                                            e_value = extract_e(loop_line)
+                                            if e_value is not None:
+                                                new_e_value = e_value * extrusion_factor * bricklayers_extrusion_multiplier
+                                                loop_line = replace_e(loop_line, new_e_value)
+                                        write_and_track(output_buffer, loop_line, recent_output_lines)
+                                    
+                                    # Reset Z
+                                    write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
+                                    
+                                    # Mark grid cells as base bricklayer (single pass)
+                                    for x, y in sample_positions:
+                                        gx = int(x / grid_resolution)
+                                        gy = int(y / grid_resolution)
+                                        cell_key = (gx, gy, current_layer)
+                                        if cell_key in solid_at_grid:
+                                            solid_at_grid[cell_key]['bricklayer_type'] = 'base'
+                            
+                            perimeter_block_count += 1
                     
                     else:
                         # Non-extrusion line (comments, etc)
@@ -4267,9 +4386,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             infill_current_x = position['x']
             infill_current_y = position['y']
             infill_current_e = position['e']
-            
-            if debug >= 1:
-                logging.info(f"[INFILL] Starting position: X={infill_current_x:.3f}, Y={infill_current_y:.3f}, E={infill_current_e:.5f}")
             
             # Valley filling tracking
             # Valley filling is applied PER-CELL based on infill_at_grid metadata
@@ -5020,8 +5136,7 @@ if __name__ == "__main__":
             args.enable_non_planar = True
         if args.enable_bridge_densifier is None:
             args.enable_bridge_densifier = True
-        if args.enable_remove_gap_fill is None:
-            args.enable_remove_gap_fill = True
+        # Gap fill removal is too buggy, don't enable it with -full
         # Smoothificator and Safe Z-hop are already enabled by default
     
     # Convert None to False for features that default to disabled (if user never specified them)
