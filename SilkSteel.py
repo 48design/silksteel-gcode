@@ -2174,6 +2174,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     working_z = 0.0  # Track the Z where extrusion should happen (before any hop)
     is_hopped = False  # Track if we're currently hopped up above working Z
     seen_first_layer = False  # Don't apply Z-hop until we've started printing
+    has_extruded_on_layer = False  # Track if we've done any extrusions on current layer (Z-hop only after first extrusion)
     current_e = 0.0  # Track current E position for retraction/unretraction
     use_relative_e = False  # Track if using relative E mode (G91)
     
@@ -3633,6 +3634,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             perimeter_block_count = 0  # Reset block counter for new layer
             move_history = []  # Clear move history for new layer
             is_hopped = False  # Reset hop state for new layer
+            has_extruded_on_layer = False  # Reset extrusion flag for new layer
             
             # Look ahead for HEIGHT and Z markers to update current_z
             for j in range(i + 1, min(i + 10, len(lines))):
@@ -4872,130 +4874,203 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             continue
         
-        # ========== SAFE Z-HOP: Apply Z-hop to ALL TRAVEL MOVES ==========
-        # CRITICAL: Travel moves don't extrude, so they can collide with non-planar geometry from any layer below
-        elif enable_safe_z_hop and seen_first_layer and line.startswith("G1"):
-            
-            # Track current E position for retraction management
-            # Save the E value BEFORE this line for potential unretraction
-            previous_e = current_e
-            e_match = re.search(r'E([-\d.]+)', line)
-            if e_match and not use_relative_e:
-                current_e = float(e_match.group(1))
-            
-            # Track current Z if this line has Z (but don't update working_z - only layer Z changes do that)
-            z_match = re.search(r'Z([-\d.]+)', line)
-            if z_match:
-                new_z = float(z_match.group(1))
-                current_travel_z = new_z
-                # Don't update working_z here - it's only updated by explicit layer Z changes
-                # If this is a non-planar Z, we don't want to use it as working_z
-            
-            # Check if this is an extrusion move (has E parameter)
-            is_extrusion = 'E' in line
-            
-            # If we're hopped up and about to extrude, drop back down first AND unretract if needed
-            if is_hopped and is_extrusion:
-                # Check recent OUTPUT lines to see if slicer already added unretraction
-                # We check the OUTPUT buffer, not input lines, because processing might have reordered things
-                slicer_will_unretract = False
-                for recent_line in recent_output_lines:
-                    # Check for positive E move (unretraction) in recent output
-                    if recent_line.startswith("G1") and "E" in recent_line and "X" not in recent_line and "Y" not in recent_line and "Z" not in recent_line:
-                        e_check = re.search(r'E([-\d.]+)', recent_line)
-                        if e_check:
-                            e_val = float(e_check.group(1))
-                            if e_val >= 0:  # Positive E = unretraction
-                                slicer_will_unretract = True
-                                break
-                
-                if not slicer_will_unretract:
-                    # Detect retraction feedrate from recent retractions
-                    retract_feedrate = 3900  # Default from slicer
-                    for j in range(max(0, i - 20), i):
-                        check_line = lines[j]
-                        if "G1" in check_line and "E-" in check_line and "F" in check_line:
-                            f_match = re.search(r'F(\d+)', check_line)
-                            if f_match:
-                                retract_feedrate = int(f_match.group(1))
-                                break
-                    
-                    # Use previous_e (E before this line) for unretraction, not current_e (E from this line)
-                    write_and_track(output_buffer, f"G1 E{previous_e:.5f} F{retract_feedrate} ; Unretract after Z-hop\n", recent_output_lines)
-                
-                # Drop back to ACTUAL current Z, not base layer Z (working_z)
-                # current_z tracks the real working height including any Z moves since layer start
-                write_and_track(output_buffer, f"G0 Z{current_z:.3f} F8400 ; Drop back to current Z\n", recent_output_lines)
-                current_travel_z = current_z
-                is_hopped = False
-            
-            # Detect travel moves: G1 with X/Y, F (feedrate), but no E (extrusion)
-            if ('X' in line or 'Y' in line) and 'F' in line and not is_extrusion:
-                # Skip Z-hops for travel moves within bridge infill (tracked via TYPE markers)
-                if in_bridge_infill:
-                    write_and_track(output_buffer, line, recent_output_lines)
-                    i += 1
-                    continue
-                
-                # This is a travel move - apply Z-hop if needed
-                # SMART: Only check CURRENT layer's max Z (all deformations build on top of current layer)
-                # No need to check ancient layers below - they're already covered by new layers!
-                layer_max_z = 0.0
-                if current_layer in actual_layer_max_z:
-                    layer_max_z = actual_layer_max_z[current_layer]
-                
-                if layer_max_z > 0:
-                    safe_z = layer_max_z + safe_z_hop_margin
-                    
-                    # Only hop if we're not already above safe_z
-                    if current_travel_z < safe_z:
-                        # Check if slicer already retracted right before this travel
-                        slicer_already_retracted = False
-                        retract_feedrate = 3900  # Default from slicer
-                        
-                        for j in range(max(0, i - 5), i):  # Look back a few lines
-                            check_line = lines[j]
-                            # Check for retraction (negative E move)
-                            if check_line.startswith("G1") and "E-" in check_line:
-                                slicer_already_retracted = True
-                                # Extract the feedrate the slicer used
-                                f_match = re.search(r'F(\d+)', check_line)
-                                if f_match:
-                                    retract_feedrate = int(f_match.group(1))
-                                break
-                        
-                        # Only add retraction if slicer didn't already do it
-                        if not slicer_already_retracted:
-                            retracted_e = current_e - z_hop_retraction
-                            write_and_track(output_buffer, f"G1 E{retracted_e:.5f} F{retract_feedrate} ; Retract before Z-hop\n", recent_output_lines)
-                            current_e = retracted_e  # Update E position after retraction
-                        
-                        write_and_track(output_buffer, f"G0 Z{safe_z:.3f} F8400 ; Safe Z-hop\n", recent_output_lines)
-                        # Do the travel move (without Z since we just set it)
-                        # Remove Z from the travel line if it exists
-                        travel_line = REGEX_Z_SUB.sub('', line)
-                        write_and_track(output_buffer, travel_line, recent_output_lines)
-                        current_travel_z = safe_z
-                        is_hopped = True  # Mark that we're hopped up
-                        i += 1
-                        continue
-            
-            # Not a travel move or no Z-hop needed - just output as is
-            write_and_track(output_buffer, line, recent_output_lines)
-            i += 1
-            continue
-        
         else:
             write_and_track(output_buffer, line, recent_output_lines)
             i += 1
 
     # Write the modified G-code
     print(f"\n[OK] Processed {current_layer} layers")
-    print(f"Writing modified G-code to: {os.path.basename(output_file)}...")
     
-    # Get the complete output from StringIO buffer
-    modified_gcode = output_buffer.getvalue()
-    output_buffer.close()
+    # ========================================================================
+    # FINAL PASS: Apply Z-hop to all travel moves
+    # ========================================================================
+    # This final pass processes the complete output G-code to insert Z-hop
+    # (retract + lift) before travel moves and drop (lower + unretract) before
+    # the next extrusion. This approach is cleaner than trying to inject Z-hop
+    # logic during feature processing, which can interfere with carefully crafted
+    # feature output (Smoothificator passes, Bricklayers Z-shifts, etc.).
+    
+    if enable_safe_z_hop:
+        print("Applying Safe Z-hop to travel moves...")
+        logging.info("\n" + "="*70)
+        logging.info("FINAL PASS: Applying Safe Z-hop")
+        logging.info("="*70)
+        
+        # Get the processed G-code lines
+        modified_gcode = output_buffer.getvalue()
+        output_buffer.close()
+        gcode_lines = modified_gcode.splitlines(keepends=True)
+        
+        # State tracking for Z-hop pass
+        zhop_current_layer = 0
+        zhop_seen_first_layer = False
+        zhop_current_e = 0.0
+        zhop_current_z = 0.0
+        zhop_working_z = 0.0  # Base Z for current layer (where extrusion happens)
+        zhop_is_hopped = False
+        zhop_use_relative_e = False
+        zhop_has_extruded_on_layer = False
+        in_bridge = False
+        
+        # Build final output with Z-hop insertions
+        final_output = StringIO()
+        
+        # Simple state: are we currently hopped?
+        is_hopped = False
+        last_x, last_y = 0.0, 0.0
+        
+        for line_idx, line in enumerate(gcode_lines):
+            # Track layer changes
+            if ";LAYER_CHANGE" in line or ";LAYER:" in line:
+                if ";LAYER:" in line:
+                    layer_match = re.search(r';LAYER:(\d+)', line)
+                    if layer_match:
+                        zhop_current_layer = int(layer_match.group(1))
+                else:
+                    zhop_current_layer += 1
+                
+                zhop_seen_first_layer = True
+                is_hopped = False  # Reset hop state on layer change
+                zhop_has_extruded_on_layer = False
+                final_output.write(line)
+                continue
+            
+            # Track Z markers to update working_z
+            if ";Z:" in line:
+                z_marker_match = re.search(r';Z:([-\d.]+)', line)
+                if z_marker_match:
+                    zhop_current_z = float(z_marker_match.group(1))
+                    zhop_working_z = zhop_current_z
+                final_output.write(line)
+                continue
+            
+            # Track bridge infill (affects lifting but we still allow dropping)
+            if ";TYPE:" in line:
+                if "Bridge infill" in line or "Internal bridge infill" in line:
+                    in_bridge = True
+                else:
+                    in_bridge = False
+                final_output.write(line)
+                continue
+            
+            # Track standalone Z moves (update working Z)
+            # Also handles G0 Z moves (e.g., from Smoothificator)
+            if (line.startswith("G1") or line.startswith("G0")) and "Z" in line and "X" not in line and "Y" not in line and "E" not in line:
+                z_match = re.search(r'Z([-\d.]+)', line)
+                if z_match:
+                    zhop_current_z = float(z_match.group(1))
+                    zhop_working_z = zhop_current_z
+                    is_hopped = False  # Explicit Z move = at working height, ready for extrusion
+                final_output.write(line)
+                continue
+            
+            # DETECT TRAVEL MOVES: G0 or (G1 with X/Y but NO E)
+            # This is the KEY fix - don't try to track E values, just check if E parameter exists
+            if zhop_seen_first_layer and (line.startswith("G0") or line.startswith("G1")):
+                params = parse_gcode_line(line)
+                has_xy = params['x'] is not None or params['y'] is not None
+                has_e = params['e'] is not None
+                has_z = params['z'] is not None
+                
+                # Preserve previous position for travel path sampling BEFORE updating
+                prev_x, prev_y = last_x, last_y
+                if params['x'] is not None:
+                    last_x = params['x']
+                if params['y'] is not None:
+                    last_y = params['y']
+                
+                # If this move has Z parameter, update working Z (e.g., Smoothificator, Bricklayers)
+                if has_z:
+                    zhop_current_z = params['z']
+                    zhop_working_z = params['z']
+                    is_hopped = False  # Explicit Z in move = at working height
+                
+                # TRAVEL MOVE = has X/Y but NO E parameter (and no Z)
+                is_travel = has_xy and not has_e and not has_z
+                
+                # EXTRUSION = has X/Y AND has E parameter
+                is_extrusion = has_xy and has_e
+                
+                if is_travel and not is_hopped:
+                    # Calculate safe Z for THIS SPECIFIC TRAVEL PATH
+                    # Check grid cells along the travel line
+                    start_x, start_y = prev_x, prev_y
+                    end_x = last_x
+                    end_y = last_y
+                    
+                    # Find maximum Z along the travel path
+                    path_max_z = 0.0
+                    if 'grid_resolution' in locals() and 'solid_at_grid' in locals():
+                        # Sample points along the travel line
+                        travel_dist = ((end_x - start_x)**2 + (end_y - start_y)**2)**0.5
+                        num_samples = max(5, int(travel_dist / grid_resolution) + 1)
+                        if travel_dist < 0.01:
+                            # Ignore micro-travel; no hop needed
+                            num_samples = 0
+                        
+                        if num_samples == 0:
+                            path_max_z = 0.0
+                        else:
+                            for i in range(num_samples):
+                                t = i / max(1, num_samples - 1)
+                                sample_x = start_x + t * (end_x - start_x)
+                                sample_y = start_y + t * (end_y - start_y)
+                                gx = int(sample_x / grid_resolution)
+                                gy = int(sample_y / grid_resolution)
+                                # Check this grid cell and neighbors for solid material
+                                for dx in [-1, 0, 1]:
+                                    for dy in [-1, 0, 1]:
+                                        check_key = (gx + dx, gy + dy, zhop_current_layer)
+                                        if check_key in solid_at_grid and solid_at_grid[check_key].get('solid', False):
+                                            if zhop_current_layer in z_layer_map:
+                                                cell_z = z_layer_map[zhop_current_layer]
+                                                path_max_z = max(path_max_z, cell_z)
+                    
+                    # Fallback to layer-wide max if grid not available or no solid found
+                    if path_max_z == 0.0:
+                        path_max_z = actual_layer_max_z.get(zhop_current_layer, layer_max_z.get(zhop_current_layer, 0.0))
+                    
+                    if path_max_z > 0 and not in_bridge:  # never lift during bridge infill
+                        safe_z = path_max_z + safe_z_hop_margin
+                        if zhop_working_z < safe_z:
+                            final_output.write(f"G0 Z{safe_z:.3f} F8400 ; Z-hop lift\n")
+                            is_hopped = True
+                    
+                    # Write the travel line
+                    final_output.write(line)
+                    continue
+                
+                if is_extrusion and is_hopped:
+                    # Drop before extrusion - but DON'T drop if this move already has Z parameter
+                    # (Smoothificator, Bricklayers, etc. set their own Z)
+                    if not has_z:
+                        final_output.write(f"G0 Z{zhop_working_z:.3f} F8400 ; Z-hop drop\n")
+                    is_hopped = False
+                    zhop_has_extruded_on_layer = True
+                    # Write the extrusion line
+                    final_output.write(line)
+                    continue
+                
+                if is_extrusion:
+                    zhop_has_extruded_on_layer = True
+                
+                # All other G0/G1: pass through
+                final_output.write(line)
+                continue
+            
+            # All other lines: pass through
+            final_output.write(line)
+        
+        # Get the final output with Z-hop applied
+        modified_gcode = final_output.getvalue()
+        final_output.close()
+        logging.info(f"Z-hop pass complete")
+    else:
+        # Z-hop disabled, use output as-is
+        modified_gcode = output_buffer.getvalue()
+        output_buffer.close()
+    
+    print(f"Writing modified G-code to: {os.path.basename(output_file)}...")
     
     # Write to file
     with open(output_file, 'w') as outfile:
