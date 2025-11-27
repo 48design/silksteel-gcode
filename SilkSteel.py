@@ -4923,11 +4923,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # State tracking for Z-hop pass
         zhop_current_layer = 0
         zhop_seen_first_layer = False
-        zhop_current_e = 0.0
         zhop_current_z = 0.0
         zhop_working_z = 0.0  # Base Z for current layer (where extrusion happens)
-        zhop_is_hopped = False
-        zhop_use_relative_e = False
         zhop_has_extruded_on_layer = False
         in_bridge = False
         
@@ -4937,6 +4934,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # Simple state: are we currently hopped?
         is_hopped = False
         last_x, last_y = 0.0, 0.0
+        
+        # Statistics
+        zhop_lift_count = 0
+        zhop_drop_count = 0
+        zhop_skipped_micro_travel = 0
+        zhop_skipped_already_safe = 0
         
         for line_idx, line in enumerate(gcode_lines):
             # Track layer changes
@@ -5017,30 +5020,33 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     end_x = last_x
                     end_y = last_y
                     
+                    # Calculate travel distance first
+                    travel_dist = ((end_x - start_x)**2 + (end_y - start_y)**2)**0.5
+                    if travel_dist < 0.01:
+                        # Ignore micro-travel; no hop needed
+                        zhop_skipped_micro_travel += 1
+                        final_output.write(line)
+                        continue
+                    
                     # Find maximum Z along the travel path by sampling noise LUT
                     path_max_z = 0.0
                     if 'grid_resolution' in locals() and 'noise_lut' in locals() and 'amplitude' in locals():
-                        # Sample points along the travel line
-                        travel_dist = ((end_x - start_x)**2 + (end_y - start_y)**2)**0.5
-                        num_samples = max(5, int(travel_dist / grid_resolution) + 1)
-                        if travel_dist < 0.01:
-                            # Ignore micro-travel; no hop needed
-                            num_samples = 0
+                        # Cache layer base Z lookup
+                        layer_base_z = z_layer_map.get(zhop_current_layer, zhop_working_z)
                         
-                        if num_samples > 0:
-                            # Get current layer base Z
-                            layer_base_z = z_layer_map.get(zhop_current_layer, zhop_working_z)
+                        # Sample points along the travel line
+                        num_samples = max(5, int(travel_dist / grid_resolution) + 1)
                             
-                            for i in range(num_samples):
-                                t = i / max(1, num_samples - 1)
-                                sample_x = start_x + t * (end_x - start_x)
-                                sample_y = start_y + t * (end_y - start_y)
-                                
-                                # Calculate non-planar Z using helper function (no taper for travel path)
-                                actual_z = calculate_nonplanar_z(noise_lut, sample_x, sample_y, layer_base_z, amplitude, taper_factor=1.0)
-                                
-                                # Track maximum Z encountered
-                                path_max_z = max(path_max_z, actual_z)
+                        for i in range(num_samples):
+                            t = i / max(1, num_samples - 1)
+                            sample_x = start_x + t * (end_x - start_x)
+                            sample_y = start_y + t * (end_y - start_y)
+                            
+                            # Calculate non-planar Z using helper function (no taper for travel path)
+                            actual_z = calculate_nonplanar_z(noise_lut, sample_x, sample_y, layer_base_z, amplitude, taper_factor=1.0)
+                            
+                            # Track maximum Z encountered
+                            path_max_z = max(path_max_z, actual_z)
                     
                     # Fallback to layer-wide max if LUT not available
                     if path_max_z == 0.0:
@@ -5048,9 +5054,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     
                     if path_max_z > 0 and not in_bridge:  # never lift during bridge infill
                         safe_z = path_max_z + safe_z_hop_margin
-                        if zhop_working_z < safe_z:
+                        # Only hop if difference is significant (> 0.1mm threshold)
+                        hop_distance = safe_z - zhop_working_z
+                        if hop_distance > 0.1:
                             final_output.write(f"G0 Z{safe_z:.3f} F8400 ; Z-hop lift\n")
                             is_hopped = True
+                            zhop_lift_count += 1
+                        else:
+                            zhop_skipped_already_safe += 1
                     
                     # Write the travel line
                     final_output.write(line)
@@ -5061,6 +5072,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     # (Smoothificator, Bricklayers, etc. set their own Z)
                     if not has_z:
                         final_output.write(f"G0 Z{zhop_working_z:.3f} F8400 ; Z-hop drop\n")
+                        zhop_drop_count += 1
                     is_hopped = False
                     zhop_has_extruded_on_layer = True
                     # Write the extrusion line
@@ -5080,7 +5092,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # Get the final output with Z-hop applied
         modified_gcode = final_output.getvalue()
         final_output.close()
-        logging.info(f"Z-hop pass complete")
+        logging.info(f"Z-hop pass complete: {zhop_lift_count} lifts, {zhop_drop_count} drops")
+        logging.info(f"  Skipped: {zhop_skipped_micro_travel} micro-travels, {zhop_skipped_already_safe} already safe")
     else:
         # Z-hop disabled, use output as-is
         modified_gcode = output_buffer.getvalue()
