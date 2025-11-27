@@ -897,6 +897,29 @@ def sample_3d_noise_lut(lut, x, y, z):
     
     return result
 
+def calculate_nonplanar_z(noise_lut, x, y, layer_base_z, amplitude, taper_factor=1.0):
+    """
+    Calculate the actual Z height for non-planar infill at given XY coordinates.
+    
+    Args:
+        noise_lut: The 3D noise lookup table
+        x, y: Coordinates to sample
+        layer_base_z: Base Z height of the current layer
+        amplitude: Noise amplitude (in mm)
+        taper_factor: Tapering factor for wall proximity (0.0 to 1.0, default 1.0 = full modulation)
+    
+    Returns:
+        Actual Z height after applying non-planar modulation
+    """
+    # Sample 3D noise at this point
+    noise_value = sample_3d_noise_lut(noise_lut, x, y, layer_base_z)
+    
+    # Apply amplitude with optional tapering
+    z_offset = amplitude * taper_factor * noise_value
+    z_actual = layer_base_z + z_offset
+    
+    return z_actual
+
 def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_resolution, 
                                 solid_at_grid, grid_cell_solid_regions, script_dir, logging):
     """
@@ -4556,12 +4579,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         # Smooth using cosine for gentler transition
                                         taper_factor = (1.0 - math.cos(t * math.pi)) / 2.0
                                     
-                                    # Sample 3D noise at this point
-                                    noise_value = sample_3d_noise_lut(noise_lut, sx, sy, layer_z)
-                                    
-                                    # Apply amplitude with wall-proximity tapering
-                                    z_offset = amplitude * taper_factor * noise_value
-                                    z_mod = layer_z + z_offset
+                                    # Calculate non-planar Z using helper function
+                                    z_mod = calculate_nonplanar_z(noise_lut, sx, sy, layer_z, amplitude, taper_factor)
                                     
                                     # Get safezone bounds for this grid cell
                                     local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
@@ -4993,14 +5012,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 
                 if is_travel and not is_hopped:
                     # Calculate safe Z for THIS SPECIFIC TRAVEL PATH
-                    # Check grid cells along the travel line
+                    # Sample noise LUT along travel line to find maximum non-planar infill height
                     start_x, start_y = prev_x, prev_y
                     end_x = last_x
                     end_y = last_y
                     
-                    # Find maximum Z along the travel path
+                    # Find maximum Z along the travel path by sampling noise LUT
                     path_max_z = 0.0
-                    if 'grid_resolution' in locals() and 'solid_at_grid' in locals():
+                    if 'grid_resolution' in locals() and 'noise_lut' in locals() and 'amplitude' in locals():
                         # Sample points along the travel line
                         travel_dist = ((end_x - start_x)**2 + (end_y - start_y)**2)**0.5
                         num_samples = max(5, int(travel_dist / grid_resolution) + 1)
@@ -5008,25 +5027,22 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # Ignore micro-travel; no hop needed
                             num_samples = 0
                         
-                        if num_samples == 0:
-                            path_max_z = 0.0
-                        else:
+                        if num_samples > 0:
+                            # Get current layer base Z
+                            layer_base_z = z_layer_map.get(zhop_current_layer, zhop_working_z)
+                            
                             for i in range(num_samples):
                                 t = i / max(1, num_samples - 1)
                                 sample_x = start_x + t * (end_x - start_x)
                                 sample_y = start_y + t * (end_y - start_y)
-                                gx = int(sample_x / grid_resolution)
-                                gy = int(sample_y / grid_resolution)
-                                # Check this grid cell and neighbors for solid material
-                                for dx in [-1, 0, 1]:
-                                    for dy in [-1, 0, 1]:
-                                        check_key = (gx + dx, gy + dy, zhop_current_layer)
-                                        if check_key in solid_at_grid and solid_at_grid[check_key].get('solid', False):
-                                            if zhop_current_layer in z_layer_map:
-                                                cell_z = z_layer_map[zhop_current_layer]
-                                                path_max_z = max(path_max_z, cell_z)
+                                
+                                # Calculate non-planar Z using helper function (no taper for travel path)
+                                actual_z = calculate_nonplanar_z(noise_lut, sample_x, sample_y, layer_base_z, amplitude, taper_factor=1.0)
+                                
+                                # Track maximum Z encountered
+                                path_max_z = max(path_max_z, actual_z)
                     
-                    # Fallback to layer-wide max if grid not available or no solid found
+                    # Fallback to layer-wide max if LUT not available
                     if path_max_z == 0.0:
                         path_max_z = actual_layer_max_z.get(zhop_current_layer, layer_max_z.get(zhop_current_layer, 0.0))
                     
