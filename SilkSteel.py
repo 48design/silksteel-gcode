@@ -292,7 +292,7 @@ DEFAULT_EXTRUSION_WIDTH = 0.45  # Default extrusion width in mm (typical value)
 
 # Safe Z-hop constants
 DEFAULT_ENABLE_SAFE_Z_HOP = True  # Enabled by default
-DEFAULT_SAFE_Z_HOP_MARGIN = 0.75  # mm - safety margin above max Z in layer
+DEFAULT_SAFE_Z_HOP_MARGIN = 0.5  # mm - safety margin above max Z in layer
 DEFAULT_Z_HOP_RETRACTION = 1.5  # mm - retraction distance during Z-hop to prevent stringing
 
 # Bridge densifier constants
@@ -1109,10 +1109,10 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
         if current_e_mode != target_mode:
             if target_mode == 'absolute':
                 output.append(f"M82 ; Absolute E mode\n")
-                logging.debug(f"[BRIDGE] Switched to ABSOLUTE E mode")
+                # logging.debug(f"[BRIDGE] Switched to ABSOLUTE E mode")
             else:
                 output.append(f"M83 ; Relative E mode\n")
-                logging.debug(f"[BRIDGE] Switched to RELATIVE E mode")
+                # logging.debug(f"[BRIDGE] Switched to RELATIVE E mode")
             current_e_mode = target_mode
     
     # Step 1: Parse all extrusion moves
@@ -1290,8 +1290,8 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             # Calculate final E (original E + 2 edges)
             final_e = move['e_end'] + (2 * edge_e_delta)
             
-            if debug >= 2:
-                logging.info(f"[BRIDGE] Single-move densification complete: E={current_e:.5f} -> {final_e:.5f} (added {2*edge_e_delta:.5f})")
+            # if debug >= 2:
+            #     logging.info(f"[BRIDGE] Single-move densification complete: E={current_e:.5f} -> {final_e:.5f} (added {2*edge_e_delta:.5f})")
             
             return output, final_e, current_pos
         else:
@@ -4927,6 +4927,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         zhop_working_z = 0.0  # Base Z for current layer (where extrusion happens)
         zhop_has_extruded_on_layer = False
         in_bridge = False
+        in_wipe = False
         
         # Build final output with Z-hop insertions
         final_output = StringIO()
@@ -4972,6 +4973,17 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     in_bridge = True
                 else:
                     in_bridge = False
+                final_output.write(line)
+                continue
+
+            # Track WIPE sequences to suppress Z-hop lifts inside wipes
+            if ";WIPE" in line:
+                lu = line.upper()
+                if "WIPE_START" in lu or "WIPE START" in lu:
+                    in_wipe = True
+                elif "WIPE_END" in lu or "WIPE END" in lu:
+                    in_wipe = False
+                # Always pass through wipe comments
                 final_output.write(line)
                 continue
             
@@ -5052,7 +5064,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     if path_max_z == 0.0:
                         path_max_z = actual_layer_max_z.get(zhop_current_layer, layer_max_z.get(zhop_current_layer, 0.0))
                     
-                    if path_max_z > 0 and not in_bridge:  # never lift during bridge infill
+                    if path_max_z > 0 and not in_bridge and not in_wipe:  # never lift during bridge or wipe
                         safe_z = path_max_z + safe_z_hop_margin
                         # Only hop if difference is significant (> 0.1mm threshold)
                         hop_distance = safe_z - zhop_working_z
