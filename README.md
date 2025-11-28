@@ -91,6 +91,11 @@ Prevents nozzle collisions during travel moves:
 - Configurable safety margin (default: 0.5mm)
 - Essential when using Bricklayers or Non-planar features
 
+Notes and heuristics:
+- The Z-hop logic samples the same non-planar LUT used by the infill to compute an accurate maximum Z along each travel path and adds the configured margin.
+- The processor will never insert a lift during bridge infill sections or wipe sequences (it recognizes `;TYPE:Bridge infill` and `;WIPE` markers). However, drops (lowering back to printing height) are still inserted before the next extrusion so the nozzle never prints mid-air.
+- To exclude particular wipe/comment conventions from suppression, you can edit the script or add explicit `;WIPE_START` / `;WIPE_END` markers in slicer post-processing.
+
 **Best for:** All prints, especially with Z-shifting features enabled
 
 ### 🌉 Bridge Densifier (Optional, `-enableBridgeDensifier`)
@@ -124,6 +129,7 @@ Removes gap fill sections from G-code:
 ### Requirements
 - Python 3.7+
 - NumPy (for non-planar noise generation)
+ - Pillow (optional) — required only for visualization (`-debug-full`) and PNG generation
 
 ### Setup
 ```bash
@@ -133,6 +139,8 @@ cd silksteel-gcode
 
 # Install dependencies
 pip install numpy
+# Optional: install Pillow for visualization features
+pip install pillow
 ```
 
 ---
@@ -450,11 +458,19 @@ python SilkSteel.py model.gcode -o output.gcode -full
 
 ## 🙏 Credits & Acknowledgments
 
-**SilkSteel** is developed by **48DESIGN GmbH** (Fabian Groß).
+SilkSteel is developed and maintained by 48DESIGN GmbH (Fabian Groß).
 
-Special thanks to **Roman Tenger** for the original concepts and inspiration:
+Company:
+- 48DESIGN GmbH
+- Karlsruhe, Germany
+
+Contact & Support:
+- Website: https://www.48design.com
+- Issues / Feature Requests: https://github.com/48design/silksteel-gcode/
+
+Special thanks to Roman Tenger for the original concepts and inspiration:
 - Smoothificator technique for multi-pass external perimeters
-- Bricklayers Z-shifting concept for improved layer bonding  
+- Bricklayers Z-shifting concept for improved layer bonding
 - Non-planar infill modulation for mechanical interlocking
 
 SilkSteel represents a complete rewrite and optimization of these concepts, with significant enhancements:
