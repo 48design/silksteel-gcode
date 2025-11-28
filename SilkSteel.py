@@ -56,6 +56,10 @@ except ImportError:
         print(f"  To enable, manually install with: pip install Pillow")
         pass  # PIL is optional - only needed for debug PNG generation
 
+    # Counters for diagnostics
+    # Incremented when we reclassify bridge TYPE comments during grid building
+    reclassified_bridge_count = 0
+
 # =============================================================================
 # PRE-COMPILED REGEX PATTERNS (for performance)
 # =============================================================================
@@ -515,6 +519,121 @@ def voxel_traversal(x0, y0, x1, y1, grid_resolution):
             error += dx
     
     return cells
+
+
+def detect_bridge_over_air(lines, start_idx, current_layer_num, solid_at_grid, grid_resolution, parse_gcode_line, voxel_traversal, max_lookahead=60, min_points=2, first_n_segments=10):
+    """
+    Heuristic to decide whether a forthcoming ';TYPE:Bridge infill' block
+    is actually spanning air (a real bridge) by sampling the FIRST few
+    extrusion segments and checking the layer below at the CENTER cell of
+    each segment. Many slicers (e.g., PrusaSlicer) draw the initial bridge
+    extrusions anchored over nearby solid walls — checking the first
+    segments detects this cheaply.
+
+    Returns True if the bridge appears to be over air (no solid directly below
+    in the sampled first segments), False if any sampled center cell has
+    supporting solid beneath (treat as internal bridge).
+
+    Notes:
+    - We only check the center CELL of each segment (cheap) instead of all
+      traversed cells along the segment.
+    - If we cannot collect at least `min_points` extrusion coordinates,
+      return False (conservative: treat as internal).
+    """
+    prev_layer = current_layer_num - 1
+    if prev_layer < 0:
+        # No layer below -> treat as a real bridge (over air)
+        return True
+
+    # If the occupancy grid is empty at this point, be conservative and treat
+    # as internal (do not densify). This avoids accidentally triggering the
+    # densifier when grid-building hasn't populated previous layers yet.
+    if not solid_at_grid:
+        if globals().get('debug', 0) >= 2:
+            logging.info(f"[BRIDGE-DETECT] solid_at_grid empty at layer {current_layer_num}, treating as internal")
+        return False
+
+    pts = []
+    end_idx = min(len(lines), start_idx + max_lookahead)
+    for j in range(start_idx, end_idx):
+        l = lines[j]
+        # stop at next TYPE/LAYER marker
+        if ';TYPE:' in l or ';LAYER:' in l or ';LAYER_CHANGE' in l:
+            break
+        if l.strip().startswith('G1') and 'X' in l and 'Y' in l and 'E' in l:
+            params = parse_gcode_line(l)
+            if params['x'] is not None and params['y'] is not None and params['e'] is not None:
+                # Only consider positive extrusion (skip retractions)
+                if params['e'] >= 0:
+                    pts.append((params['x'], params['y']))
+
+    # Not enough sample points -> conservative: treat as internal (do not densify)
+    if len(pts) < min_points:
+        if globals().get('debug', 0) >= 2:
+            logging.info(f"[BRIDGE-DETECT] insufficient extrusion points ({len(pts)}) for bridge detection at layer {current_layer_num}")
+        return False
+
+    # We'll inspect up to `first_n_segments` initial segment-center cells,
+    # but only counting segments whose euclidean length >= min_segment_length.
+    # This ignores tiny bridging steps that are just curve-connectors and
+    # focuses on meaningful extrusion segments.
+    # Use configured bridge min length to ignore tiny connector segments
+    min_segment_length = globals().get('DEFAULT_BRIDGE_MIN_LENGTH', DEFAULT_BRIDGE_MIN_LENGTH)
+    if globals().get('debug', 0) >= 2:
+        logging.info(f"[BRIDGE-DETECT] evaluating up to {first_n_segments} segments (min_segment_length={min_segment_length}mm) for bridge at layer {current_layer_num}")
+
+    valid_seen = 0
+    scanned = 0
+    # iterate through consecutive segments until we have evaluated enough valid ones
+    for k in range(len(pts) - 1):
+        x0, y0 = pts[k]
+        x1, y1 = pts[k + 1]
+        # distance of this segment
+        seg_len = math.hypot(x1 - x0, y1 - y0)
+        if seg_len < min_segment_length:
+            if globals().get('debug', 0) >= 3:
+                logging.info(f"[BRIDGE-DETECT] skipping tiny segment {k} length={seg_len:.3f}mm")
+            continue
+
+        # This is a valid segment to consider
+        valid_seen += 1
+        scanned += 1
+        mx = (x0 + x1) / 2.0
+        my = (y0 + y1) / 2.0
+        gx = int(mx / grid_resolution)
+        gy = int(my / grid_resolution)
+        key = (gx, gy, prev_layer)
+
+        present = key in solid_at_grid
+        cell = solid_at_grid.get(key, {})
+        infill_crossings = cell.get('infill_crossings', 0)
+        cell_type = cell.get('type', TYPE_NONE)
+
+        if globals().get('debug', 0) >= 2:
+            logging.info(f"[BRIDGE-DETECT] valid seg {k}: len={seg_len:.3f}mm center ({mx:.3f},{my:.3f}) -> cell {key}: present={present}, type={cell_type}, infill_crossings={infill_crossings}")
+
+        # If internal infill exists under this center cell -> internal bridge
+        if infill_crossings > 0 or cell_type == TYPE_INTERNAL_INFILL:
+            if globals().get('debug', 0) >= 2:
+                logging.info(f"[BRIDGE-DETECT] detected internal infill under segment {k}, classifying as internal bridge")
+            return False
+
+        # If cell is absent -> air below; since we did not see internal infill in
+        # the first valid segments, this indicates an external bridge
+        if not present:
+            if globals().get('debug', 0) >= 2:
+                logging.info(f"[BRIDGE-DETECT] detected air under valid segment {k}, classifying as external bridge")
+            return True
+
+        # Otherwise cell present but not internal infill -> continue scanning
+        if valid_seen >= first_n_segments:
+            break
+
+    # If we didn't find any supporting internal infill or air in the first
+    # evaluated segments, conservatively treat as internal
+    if globals().get('debug', 0) >= 2:
+        logging.info(f"[BRIDGE-DETECT] evaluated {valid_seen} valid segments (scanned {scanned}), no internal infill or air found; classifying as internal bridge")
+    return False
 
 def is_in_safezone(gx, gy, layer, grid_cell_solid_regions):
     """
@@ -2368,6 +2487,37 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 in_solid_infill = True
                 in_internal_infill = False
                 current_type = get_type_from_marker(line)
+                # If this is a Bridge infill marker from slicer, some slicers (Prusa)
+                # don't distinguish internal bridge infill. Detect whether the
+                # upcoming bridge run actually spans air by sampling the middle
+                # of the extrusion path and checking the layer below. If it's
+                # NOT over air, treat it as internal bridge infill to prevent
+                # running the densifier.
+                try:
+                    if current_type == TYPE_BRIDGE_INFILL:
+                        # use line_number (1-based) -> next line index is line_number
+                        start_idx_for_scan = line_number
+                        over_air = detect_bridge_over_air(lines, start_idx_for_scan, current_layer_num, solid_at_grid, grid_resolution, parse_gcode_line, voxel_traversal)
+                        if not over_air:
+                            current_type = TYPE_INTERNAL_BRIDGE_INFILL
+                            if debug >= 2:
+                                logging.info(f"[BRIDGE-DETECT] Treated Bridge infill as Internal at layer {current_layer_num} (line {line_number})")
+                            # Also rewrite the literal TYPE comment in the source lines so
+                            # downstream passes that inspect the raw G-code see the
+                            # corrected type (easier to trace in outputs / debug).
+                            try:
+                                idx = line_number - 1
+                                if 0 <= idx < len(lines) and ';TYPE:Bridge infill' in lines[idx]:
+                                    lines[idx] = lines[idx].replace(';TYPE:Bridge infill', ';TYPE:Internal bridge infill')
+                                    # increment module-level counter (use globals to avoid needing a local global decl)
+                                    globals()['reclassified_bridge_count'] = globals().get('reclassified_bridge_count', 0) + 1
+                                    if debug >= 2:
+                                        logging.info(f"[BRIDGE-DETECT] Rewrote TYPE comment to Internal bridge infill at line {line_number}")
+                            except Exception as e:
+                                logging.warning(f"[BRIDGE-DETECT] failed to rewrite TYPE comment at line {line_number}: {e}")
+                except Exception as e:
+                    # Never fail the processing on detection errors — log and continue
+                    logging.warning(f"[BRIDGE-DETECT] detection error at line {line_number}: {e}")
                 # Initialize solid tracking from current global position
                 last_solid_coords = (grid_build_pos['x'], grid_build_pos['y'])
                 last_solid_pos = (int(grid_build_pos['x'] / grid_resolution), int(grid_build_pos['y'] / grid_resolution))
@@ -5120,6 +5270,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     logging.info("\n" + "="*70)
     logging.info("G-code processing completed successfully")
     logging.info("="*70)
+    # Diagnostic summary for reclassified bridge TYPE comments (only logged when debug enabled)
+    try:
+        if debug >= 1:
+            logging.info(f"Bridge TYPE comments reclassified: {reclassified_bridge_count}")
+    except NameError:
+        # If debug or counter not defined (shouldn't happen), skip
+        pass
     
     # Print summary to console
     print("\n" + "=" * 85)
