@@ -598,32 +598,44 @@ def detect_bridge_over_air(lines, start_idx, current_layer_num, solid_at_grid, g
         # This is a valid segment to consider
         valid_seen += 1
         scanned += 1
-        mx = (x0 + x1) / 2.0
-        my = (y0 + y1) / 2.0
-        gx = int(mx / grid_resolution)
-        gy = int(my / grid_resolution)
-        key = (gx, gy, prev_layer)
+        # For longer segments, sample multiple points along the segment (25%,50%,75%)
+        # to avoid missing support that only touches near the ends or center.
+        sample_points = []
+        multi_sample_threshold = 3.0 * min_segment_length
+        if seg_len >= multi_sample_threshold:
+            # sample at 25%, 50%, 75%
+            sample_points = [0.25, 0.5, 0.75]
+        else:
+            # cheap center-only check
+            sample_points = [0.5]
 
-        present = key in solid_at_grid
-        cell = solid_at_grid.get(key, {})
-        infill_crossings = cell.get('infill_crossings', 0)
-        cell_type = cell.get('type', TYPE_NONE)
+        for frac in sample_points:
+            sx = x0 + frac * (x1 - x0)
+            sy = y0 + frac * (y1 - y0)
+            gx = int(sx / grid_resolution)
+            gy = int(sy / grid_resolution)
+            key = (gx, gy, prev_layer)
 
-        if globals().get('debug', 0) >= 2:
-            logging.info(f"[BRIDGE-DETECT] valid seg {k}: len={seg_len:.3f}mm center ({mx:.3f},{my:.3f}) -> cell {key}: present={present}, type={cell_type}, infill_crossings={infill_crossings}")
+            present = key in solid_at_grid
+            cell = solid_at_grid.get(key, {})
+            infill_crossings = cell.get('infill_crossings', 0)
+            cell_type = cell.get('type', TYPE_NONE)
 
-        # If internal infill exists under this center cell -> internal bridge
-        if infill_crossings > 0 or cell_type == TYPE_INTERNAL_INFILL:
             if globals().get('debug', 0) >= 2:
-                logging.info(f"[BRIDGE-DETECT] detected internal infill under segment {k}, classifying as internal bridge")
-            return False
+                logging.info(f"[BRIDGE-DETECT] valid seg {k} (len={seg_len:.3f}mm) sample {int(frac*100)}% -> center ({sx:.3f},{sy:.3f}) -> cell {key}: present={present}, type={cell_type}, infill_crossings={infill_crossings}")
 
-        # If cell is absent -> air below; since we did not see internal infill in
-        # the first valid segments, this indicates an external bridge
-        if not present:
-            if globals().get('debug', 0) >= 2:
-                logging.info(f"[BRIDGE-DETECT] detected air under valid segment {k}, classifying as external bridge")
-            return True
+            # If internal infill exists under any sampled point -> internal bridge
+            if infill_crossings > 0 or cell_type == TYPE_INTERNAL_INFILL:
+                if globals().get('debug', 0) >= 2:
+                    logging.info(f"[BRIDGE-DETECT] detected internal infill under segment {k} at {int(frac*100)}%, classifying as internal bridge")
+                return False
+
+            # If sampled cell is absent -> air below; since we did not see internal
+            # infill in the first valid segments, this indicates an external bridge
+            if not present:
+                if globals().get('debug', 0) >= 2:
+                    logging.info(f"[BRIDGE-DETECT] detected air under segment {k} at {int(frac*100)}%, classifying as external bridge")
+                return True
 
         # Otherwise cell present but not internal infill -> continue scanning
         if valid_seen >= first_n_segments:
