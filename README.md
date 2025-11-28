@@ -10,7 +10,7 @@ A powerful G-code post-processor that transforms your 3D prints by creating silk
 
 ## 🎯 What is SilkSteel?
 
-SilkSteel is an advanced G-code post-processing tool that applies multiple optimization techniques to your sliced files:
+SilkSteel is an advanced G-code post-processing tool developed by [48DESIGN](https://www.48design.de) that applies multiple optimization techniques to your sliced files:
 
 - **Smoothificator**: Splits thick external perimeters into multiple ultra-thin passes for glass-smooth surfaces
 - **Bricklayers**: Z-shifts alternating internal perimeters to create interlocking "brick pattern" for superior layer adhesion
