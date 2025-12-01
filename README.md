@@ -47,6 +47,7 @@ The result? Prints with **silk-smooth exteriors** and **steel-strong interiors**
 Creates ultra-smooth external surfaces by splitting thick perimeter walls into multiple thin passes:
 - Converts single thick wall (e.g., 0.4mm) into 2-3 ultra-thin passes (e.g., 0.15mm each)
 - Each pass is printed at a lower Z height, building up gradually
+- Smoothing the outside without the need to raise the printing times of the whole print
 - Eliminates visible layer lines on vertical surfaces
 - Perfect for aesthetic parts, mechanical surfaces, and light-diffusing prints
 
