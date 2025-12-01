@@ -54,10 +54,10 @@ Creates ultra-smooth external surfaces by splitting thick perimeter walls into m
 
 ### 🧱 Bricklayers (Optional, `-enableBricklayers`)
 Strengthens parts by creating a brick-like interlocking pattern with internal perimeters:
-- **Layer 0**: All perimeter blocks printed in 2 passes at 0.75h each (total 1.5h)
-- **Layer 1+**: Alternating blocks are Z-shifted by +0.5h (shifted) or printed normally (base)
+- **First layer of internal perimiters**: All perimeter blocks printed in 2 passes at 0.75h each (total 1.5h)
+- **Internal perimiters above**: Perimiters are Z-shifted by +0.5h (shifted) or printed normally (base) if solid surface above
 - Creates mechanical interlocking between layers
-- Dramatically improves layer adhesion and structural strength
+- Can dramatically improve layer adhesion and structural strength
 - Properly handles E values and travel moves to prevent artifacts
 
 **Best for:** Functional parts, mechanical components, parts under stress
