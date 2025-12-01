@@ -281,8 +281,9 @@ input_file              Input G-code file (required)
 2. Use **variable layer heights** if desired (SilkSteel handles them correctly)
 3. For Smoothificator: Set external perimeter extrusion width to 0.4-0.5mm
 4. For Bricklayers: Enable at least 2 perimeters
-5. For Non-planar: Use 10-20% infill with rectilinear or grid pattern
+5. For Non-planar: Use 20-50% infill with rectilinear or grid pattern (others work, too)
 6. For Bridge Densifier: Enable "Detect bridging perimeters" in slicer (usually default)
+7. Make sure that your slicer uses comments for layer changes and extrusion types (shoild be enabled by default)
 
 ### Recommended Feature Combinations
 
