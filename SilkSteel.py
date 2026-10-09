@@ -1269,173 +1269,27 @@ def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_re
 def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_y,
                            connector_max_length, logging, debug=False,
                            bridge_feedrate_slowdown=0.6, initial_relative=False):
-    """Conservatively reinforce gaps BETWEEN consecutive parallel bridge lines.
+    """Plan a continuous serpentine within confirmed adjacent bridge rasters.
 
-    The original slicer commands are emitted byte-for-byte and in their
-    original order. Only a short, internal intermediate strand is added
-    between verified adjacent bridge lines. This avoids the old serpentine
-    reconstruction, which dropped commands, duplicated retracts, and
-    assumed M82 even under M83.
-
-    Every extra extrusion runs under M83. For M82 sources, restore M82 and
-    G92 to the *source* E coordinate before continuing. In M83 sources,
-    keep the original relative mode and E-only pressure moves untouched.
-    Never extrapolate outside the original bridge outline.
+    Fail closed: if the source is not a simple U-connected set of parallel
+    strokes, emit it unchanged. Never create strands outside adjacent raster
+    endpoints and never re-emit source retractions.
     """
-    output = []
-    px, py, pz, pe = start_x, start_y, current_z, current_e
-    relative_e = initial_relative
-    modal_f = None
-    previous_long = None
-    inserted = 0
+    from tools.bridge_serpentine import build_bridge_serpentine
 
-    # A relative-XY bridge cannot be safely interpolated using absolute
-    # endpoints. Leave it entirely untouched until a modal XY parser is
-    # implemented.
-    if any(re.match(r'^G91(?:\s|$)', line.split(';', 1)[0].strip())
-           for line in buffered_lines):
-        return list(buffered_lines), current_e, (start_x, start_y)
-
-    for line in buffered_lines:
-        code = line.split(';', 1)[0].strip()
-
-        if re.match(r'^M83(?:\s|$)', code):
-            relative_e = True
-            previous_long = None
-        elif re.match(r'^M82(?:\s|$)', code):
-            relative_e = False
-            previous_long = None
-        elif re.match(r'^G92(?:\s|$)', code):
-            reset = parse_gcode_line(code)['e']
-            if reset is not None:
-                pe = reset
-            previous_long = None
-
-        is_motion = re.match(r'^G0?[01](?:\s|$)', code) is not None
-        if not is_motion:
-            output.append(line)
-            continue
-
-        p = parse_gcode_line(code)
-        nx = p['x'] if p['x'] is not None else px
-        ny = p['y'] if p['y'] is not None else py
-        nz = p['z'] if p['z'] is not None else pz
-        distance = math.hypot(nx - px, ny - py)
-        delta = (p['e'] if relative_e else p['e'] - pe) if p['e'] is not None else 0.0
-        if p['f'] is not None:
-            modal_f = p['f']
-
-        long_extrusion = (
-            code.startswith("G1") and
-            (p['x'] is not None or p['y'] is not None) and
-            p['z'] is None and delta > 0 and
-            distance >= DEFAULT_BRIDGE_MIN_LENGTH
-        )
-        current_long = None
-        if long_extrusion:
-            current_long = {
-                'a': (px, py), 'b': (nx, ny),
-                'length': distance, 'volume': delta,
-            }
-
-        output.append(line)  # Preserve every original slicer command.
-
-        if current_long and previous_long:
-            ax = previous_long['b'][0] - previous_long['a'][0]
-            ay = previous_long['b'][1] - previous_long['a'][1]
-            bx = nx - px
-            by = ny - py
-            dot = (ax * bx + ay * by) / (distance * previous_long['length'])
-            perp_distance = abs(
-                (px - previous_long['a'][0]) * ay -
-                (py - previous_long['a'][1]) * ax
-            ) / previous_long['length']
-
-            # Measure overlap along the first line, not merely parallelism:
-            # unrelated nearby segments must not be connected with plastic.
-            ux, uy = ax / previous_long['length'], ay / previous_long['length']
-            p0 = (px - previous_long['a'][0]) * ux + (py - previous_long['a'][1]) * uy
-            p1 = (nx - previous_long['a'][0]) * ux + (ny - previous_long['a'][1]) * uy
-            lower = max(0.0, min(p0, p1))
-            upper = min(previous_long['length'], max(p0, p1))
-            overlap = max(0.0, upper - lower)
-
-            if (abs(dot) >= 0.98 and
-                0.12 <= perp_distance < DEFAULT_BRIDGE_MAX_SPACING and
-                overlap >= 0.8 * min(previous_long['length'], distance)):
-                # Reconstruct an interior, aligned midpoint strand.
-                first0 = previous_long['a']
-                first1 = previous_long['b']
-                second0 = (px, py) if dot >= 0 else (nx, ny)
-                second1 = (nx, ny) if dot >= 0 else (px, py)
-                mid0 = ((first0[0] + second0[0]) / 2,
-                        (first0[1] + second0[1]) / 2)
-                mid1 = ((first1[0] + second1[0]) / 2,
-                        (first1[1] + second1[1]) / 2)
-                mid_length = math.hypot(mid1[0] - mid0[0], mid1[1] - mid0[1])
-
-                if mid_length > 1.0:
-                    e_per_mm = (
-                        previous_long['volume'] / previous_long['length'] +
-                        delta / distance
-                    ) / 2
-                    extra_e = round(
-                        mid_length * e_per_mm * DEFAULT_BRIDGE_EXTRUSION_COMPENSATION, 5)
-                    if extra_e > 0:
-                        # The original move ended at (nx, ny). Start the
-                        # added path at the closer midpoint endpoint.
-                        if math.hypot(nx - mid0[0], ny - mid0[1]) <= math.hypot(
-                                nx - mid1[0], ny - mid1[1]):
-                            entry, exit_point = mid0, mid1
-                        else:
-                            entry, exit_point = mid1, mid0
-
-                        output.append(
-                            "; SilkSteel: Bridge Densifier intermediate between parallel strands\n")
-                        if not relative_e:
-                            output.append("M83 ; Bridge Densifier temporary relative E\n")
-                        output.append(
-                            f"G0 X{entry[0]:.3f} Y{entry[1]:.3f} F8400 ; Bridge intermediate entry\n")
-                        bridge_f = max(60, int(
-                            (modal_f if modal_f is not None else 1800)
-                            * bridge_feedrate_slowdown))
-                        output.append(
-                            f"G1 X{exit_point[0]:.3f} Y{exit_point[1]:.3f} "
-                            f"E{extra_e:.5f} F{bridge_f} ; Bridge intermediate extrusion\n")
-                        output.append(
-                            f"G0 X{nx:.3f} Y{ny:.3f} F8400 ; Bridge return to source endpoint\n")
-                        if relative_e:
-                            # Under M83 the inserted E is a real addition
-                            # to the accumulated output position. Do not
-                            # mistake it for a source-only E target.
-                            pe += extra_e
-                        if not relative_e:
-                            output.append("M82 ; Bridge Densifier restore absolute E\n")
-                            # Added relative E must NOT shift slicer's M82
-                            # coordinate system or next retract/prime.
-                            source_target = p['e'] if p['e'] is not None else pe
-                            output.append(
-                                f"G92 E{source_target:.5f} ; Bridge Densifier E sync\n")
-                        if modal_f is not None:
-                            output.append(
-                                f"G1 F{modal_f:g} ; Bridge Densifier restore feedrate\n")
-                        inserted += 1
-
-        # A short connector inside a bridge weave is fine, but travels,
-        # Z changes, pressure moves and long/unknown paths break adjacency.
-        if current_long:
-            previous_long = current_long
-        elif (p['z'] is not None or p['e'] is None or delta <= 0 or
-              distance > connector_max_length):
-            previous_long = None
-
-        px, py, pz = nx, ny, nz
-        if p['e'] is not None:
-            pe = pe + delta if relative_e else p['e']
-
-    if inserted and debug:
-        logging.info("[BRIDGE] Inserted %d safe interior bridge strands", inserted)
-    return output, pe, (px, py)
+    transformed, final_e, final_xy, inserted = build_bridge_serpentine(
+        buffered_lines, current_z, current_e, start_x, start_y,
+        connector_max_length, parse_gcode_line,
+        initial_relative=initial_relative,
+        min_length=DEFAULT_BRIDGE_MIN_LENGTH,
+        extrusion_width=connector_max_length/2,
+        flow_fraction=DEFAULT_BRIDGE_EXTRUSION_COMPENSATION,
+        slowdown=bridge_feedrate_slowdown,
+    )
+    if debug and inserted:
+        logging.info("[BRIDGE] Serpentine placed %d additional interior strands",
+                     inserted)
+    return transformed, final_e, final_xy
 
 
 def process_gcode(input_file, output_file=None, outer_layer_height=None,
