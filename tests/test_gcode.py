@@ -1,5 +1,7 @@
 import contextlib
 import io
+import math
+import ast
 import os
 import tempfile
 import unittest
@@ -58,6 +60,48 @@ class GCodeSafetyTests(unittest.TestCase):
                                    enable_safe_z_hop=use_zhop, **settings)
             with open(dst, encoding="utf-8") as stream:
                 return stream.read()
+
+    def test_long_relative_e_orphan_loop_is_smoothified(self):
+        # Previously only the first 100 segments were inspected, and the
+        # heuristic assumed absolute E increases monotonically. Both fail
+        # for densely sampled closed contours with relative E (M83).
+        source = [
+            "; layer_height = 0.28", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M83",
+        ]
+        for layer, z in enumerate((0.2, 0.48)):
+            source.extend([
+                ";LAYER_CHANGE", f";Z:{z}", ";HEIGHT:0.28", f";LAYER:{layer}",
+                f"G1 Z{z} F1200", ";TYPE:Custom unlabeled wall",
+                "G1 X20 Y12 F8400",
+            ])
+            for n in range(1, 181):
+                angle = n * 2.0 * math.pi / 180
+                x = 12 + 8 * math.cos(angle)
+                y = 12 + 8 * math.sin(angle)
+                amount = 0.04 + (n % 4) * 0.005
+                source.append(f"G1 X{x:.4f} Y{y:.4f} E{amount:.5f} F1200")
+            source.append(";TYPE:Solid infill")
+        output = self.process("\n".join(source) + "\n",
+                              enable_smoothificator=True)
+        self.assertGreaterEqual(output.count("AUTO-ADDED by Smoothificator"), 2)
+        layer2 = output.split(";LAYER:1")[-1]
+        self.assertIn("SMOOTHIFICATOR START: 3 passes", layer2)
+
+        # Explicitly labelled internal perimeters must NEVER be guessed to
+        # be outer just because they happen to trace a closed contour.
+        internal = "\n".join(source).replace(
+            ";TYPE:Custom unlabeled wall", ";TYPE:Internal perimeter") + "\n"
+        internal_output = self.process(internal, enable_smoothificator=True)
+        self.assertNotIn("AUTO-ADDED by Smoothificator", internal_output)
+
+    def test_cli_has_no_interactive_enter_pause(self):
+        # Slicer post-processors must never wait for keyboard interaction.
+        with open(silk.__file__, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name) and n.func.id == "input"]
+        self.assertEqual(calls, [])
 
     def test_smoothificator_retract_does_not_skip_whole_outer_wall(self):
         # One TYPE section can contain multiple walls with retracts between
