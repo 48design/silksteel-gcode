@@ -42,6 +42,7 @@ def audit(path):
                     "line": no, "types": [],
                     "counts": Counter(), "first_xy_e": None,
                     "first_extrusion_type": None,
+                    "brick_z": {"base": [], "shifted": []},
                 })
                 # Slicer viewers may reset the role on a layer boundary.
                 active_type = "(none)"
@@ -62,6 +63,14 @@ def audit(path):
             for name, needle in COUNTERS.items():
                 if needle in line:
                     current["counts"][name] += 1
+
+            # A G-code marker only means the feature ran. The actual
+            # interlocking requires different PHYSICAL nozzle Z heights.
+            if "Bricklayers shifted block #" in line or "Bricklayers base block #" in line:
+                z_match = re.match(r"^G0 Z([-+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+))", line)
+                if z_match:
+                    role = "shifted" if "shifted block #" in line else "base"
+                    current["brick_z"][role].append(float(z_match.group(1)))
     return layers
 
 
@@ -79,6 +88,14 @@ def report(layers, layer=None, summary=False):
             print(f"  First XY/E move: {entry['first_xy_e']}, TYPE: {entry['first_extrusion_type']}")
             print("  Counts: " + ", ".join(f"{key}={value}" for key, value in
                                          entry["counts"].items()))
+            z_base = sorted(set(entry["brick_z"]["base"]))
+            z_shifted = sorted(set(entry["brick_z"]["shifted"]))
+            print(f"  Actual Bricklayers Z: base={z_base}, shifted={z_shifted}")
+            if z_base and z_shifted:
+                if set(z_base) & set(z_shifted):
+                    print("  WARNING: base and shifted blocks share the same Z!")
+                else:
+                    print("  OK: base and shifted blocks have distinct nozzle heights")
             print("  TYPE comments (first 15):")
             for line, kind in entry["types"][:15]:
                 print(f"    {line}: ;TYPE:{kind}")
@@ -94,6 +111,12 @@ def report(layers, layer=None, summary=False):
         print("Total markers: " + ", ".join(
             f"{key}={all_counts[key]}" for key in COUNTERS))
         print(f"Noncanonical TYPE comments: {all_counts['unrecognized_type_comments']}")
+        collapsed = [n for n, entry in sorted(layers.items())
+                     if (set(entry["brick_z"]["base"]) &
+                         set(entry["brick_z"]["shifted"]))]
+        print(f"Layers with equal base/shifted Z ({len(collapsed)}): "
+              + (", ".join(map(str, collapsed[:100])) or "none")
+              + (" ..." if len(collapsed) > 100 else ""))
         print(f"Layers with no Bricklayers markers ({len(empty)}): "
               + ", ".join(map(str, empty[:100]))
               + (" ..." if len(empty) > 100 else ""))
