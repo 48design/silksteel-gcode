@@ -192,7 +192,7 @@ class GCodeSafetyTests(unittest.TestCase):
     def test_zero_length_xy_priming_preserves_extrusion(self):
         source = fixture(relative=True).replace(
             "G1 X0 Y5 F8400",
-            "G1 X0 Y5 F8400\\nG1 X0 Y5 E0.25 F800",
+            "G1 X0 Y5 F8400\nG1 X0 Y5 E0.25 F800",
             1
         )
         output = self.process(source, enable_smoothificator=False,
