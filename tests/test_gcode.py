@@ -591,6 +591,30 @@ class GCodeSafetyTests(unittest.TestCase):
                 self.assertIn("X0.000 Y0.400 E1.00000", output)
                 self.assertIn(";TYPE:Bridge infill", output)
 
+    def test_bridge_serpentine_optimizes_three_strokes_together(self):
+        # Two adjacent U gaps need just one middle strand EACH.
+        # Previously forcing even count PER gap wasted two extra passes.
+        source = [
+            ";TYPE:Bridge infill\n",
+            "G1 X10 Y0 E1.00000 F1400\n",
+            "M117 Printing bridge\n",
+            "G1 X10 Y0.43 E1.04000\n",
+            "G1 X0 Y0.43 E2.04000\n",
+            "G1 X0 Y0.87 E2.08000\n",
+            "G1 X10 Y0.87 E3.08000\n",
+            "G1 E2.78000 F3900\n",
+        ]
+        output, final_e, xy = silk.process_bridge_section(
+            source, 0.4, 0.0, 0.0, 0.0, 0.9, silk.logging)
+        text = "".join(output)
+        self.assertEqual(text.count("Bridge serpentine intermediate"), 2)
+        self.assertEqual(text.count("Bridge serpentine original strand"), 3)
+        self.assertEqual(text.count("M117 Printing bridge"), 1)
+        self.assertEqual(text.count("G1 E2.78000 F3900"), 1)
+        self.assertNotIn("Bridge return to source endpoint", text)
+        self.assertEqual(xy, (10.0, 0.87))
+        self.assertAlmostEqual(final_e, 2.78)
+
     def test_bridge_densifier_fills_wider_gaps_in_same_snake(self):
         # Previously spacing >= 0.6mm was ignored. Now add multiple
         # intermediate strands BETWEEN validated U-connected walls.
