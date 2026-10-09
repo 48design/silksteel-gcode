@@ -115,6 +115,11 @@ class GCodeSafetyTests(unittest.TestCase):
                                       amplitude=0.1, frequency=6,
                                       segment_length=1.0)
                 self.assertIn("Bricklayers base pass", output)
+                layer_one = output.split(";LAYER:1", 1)[1].split(";LAYER_CHANGE", 1)[0]
+                # With two stackable internal contours we must see both
+                # parity states on a non-base layer, not always odd.
+                self.assertIn("Bricklayers shifted block #1", layer_one)
+                self.assertIn("Bricklayers base block #2", layer_one)
                 self.assertIn("Bricklayers contour E sync" if not relative
                               else "Bricklayers base pass", output)
                 self.assertEqual(output.count("G1 E-1.00000 F3900"), 8)
@@ -176,6 +181,10 @@ class GCodeSafetyTests(unittest.TestCase):
                 self.assertEqual(layer_2.count("CONTINUED across layer boundary"), 1)
                 self.assertIn("; SilkSteel: CONTINUED across layer boundary\n"
                               ";TYPE:External perimeter\n", layer_2)
+                self.assertIn(";LAYER:1\n"
+                              "; SilkSteel: CONTINUED across layer boundary\n"
+                              ";TYPE:External perimeter\n"
+                              "G1 Z0.48", output)
                 self.assertNotIn(";TYPE:External perimeter ;", layer_2)
                 self.assertEqual(layer_2.count("SMOOTHIFICATOR START: 3 passes"), 1)
                 first_internal = layer_2.split(";TYPE:Internal perimeter")[0]
