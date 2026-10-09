@@ -4091,8 +4091,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # ========== SMOOTHIFICATOR: External Perimeter Processing ==========
         elif enable_smoothificator and (smoothificator_skip_first_layer and current_layer > 0 or not smoothificator_skip_first_layer) and (";TYPE:External perimeter" in line or ";TYPE:Outer wall" in line or ";TYPE:Overhang perimeter" in line):
             
-            external_block_lines = []
-            external_block_lines.append(line)
+            external_block_lines = [line]
+            external_block_indices = [i]
             i += 1
             
             # Collect all lines until next TYPE change OR layer change
@@ -4124,8 +4124,23 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     break
                     
                 external_block_lines.append(current_line)
+                external_block_indices.append(i)
                 i += 1
             
+            # Replaying E-only retracts or mode changes multiple times can
+            # leave the extruder depressurized; preserve such blocks unchanged.
+            unsafe_block = any(
+                b.strip().startswith(('G92', 'M82', 'M83')) or
+                (b.startswith(('G0 ', 'G1 ')) and extract_e(b) is not None
+                 and extract_x(b) is None and extract_y(b) is None)
+                for b in external_block_lines
+            )
+            if unsafe_block:
+                logging.warning("Preserved Smoothificator block with E-only move or mode change")
+                for original_line in external_block_lines:
+                    write_and_track(output_buffer, original_line, recent_output_lines)
+                continue
+
             #logging.info(f"  [SMOOTHIFICATOR] Collected external perimeter block with {len(external_block_lines)} lines")
             
             # Calculate effective layer height
@@ -4165,8 +4180,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 height_per_pass = effective_layer_height
                 extrusion_multiplier = 1.0
             
-            # SIMPLE APPROACH: Just duplicate the block N times with adjusted Z and E
-            current_e = 0.0
+            # Maintain output E independently of the slicer's original E origin.
+            current_e = position['e']
             
             # Use the global position tracker - it's always accurate!
             start_pos = (position['x'], position['y'])
@@ -4192,45 +4207,33 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 if pass_num > 0 and start_pos:
                     write_and_track(output_buffer, f"G1 X{start_pos[0]:.3f} Y{start_pos[1]:.3f} F8400 ; Travel to start\n", recent_output_lines)
                 
-                # Now copy ALL lines from the block, adjusting E values
-                previous_e = None
-                for block_line in external_block_lines:
-                    # Skip TYPE markers on subsequent passes
+                # Rebase source extrusion *deltas* on the current output E origin.
+                for block_idx, block_line in enumerate(external_block_lines):
                     if pass_num > 0 and ";TYPE:" in block_line:
                         continue
-                    
-                    # Skip Z moves in the block (we already set Z above)
                     if "G1 Z" in block_line and "X" not in block_line and "Y" not in block_line:
                         continue
-                    
-                    # If line has Z coordinate with X/Y, remove the Z part
                     if "G1" in block_line and "Z" in block_line:
                         block_line = REGEX_Z_SUB.sub('', block_line)
-                    
-                    # Adjust E values
-                    if "G1" in block_line and "E" in block_line:
-                        original_e = extract_e(block_line)
-                        if original_e is not None:
-                            
-                            if previous_e is None:
-                                # First E in this pass
-                                if pass_num == 0:
-                                    current_e = original_e * extrusion_multiplier
-                                else:
-                                    delta = original_e * extrusion_multiplier
-                                    current_e += delta
-                            else:
-                                # Calculate delta from previous
-                                delta = (original_e - previous_e) * extrusion_multiplier
-                                current_e += delta
-                            
-                            previous_e = original_e
-                            
-                            # Replace E value
-                            block_line = replace_e(block_line, current_e)
-                    
+
+                    source_idx = external_block_indices[block_idx]
+                    if block_line.startswith(('G0 ', 'G1 ')) and extract_e(block_line) is not None:
+                        delta = source_e_deltas[source_idx]
+                        if delta > 0 and (extract_x(block_line) is not None or extract_y(block_line) is not None):
+                            delta *= extrusion_multiplier
+                        current_e += delta
+                        target_e = delta if source_relative_modes[source_idx] else current_e
+                        block_line = replace_e(block_line, target_e)
                     write_and_track(output_buffer, block_line, recent_output_lines)
-            
+
+            # G92 changes the coordinate only, without extruding/retracting;
+            # future untouched slicer commands can safely use their original E.
+            if not source_relative_modes[external_block_indices[-1]]:
+                write_and_track(output_buffer,
+                    f"G92 E{source_e_targets[external_block_indices[-1]]:.5f} ; Smoothificator E sync\n",
+                    recent_output_lines)
+                current_e = position['e']
+
             continue
         
         # ========== BRICKLAYERS: Internal Perimeter Processing ==========
