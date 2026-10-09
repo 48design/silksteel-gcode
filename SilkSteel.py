@@ -212,8 +212,11 @@ def restore_layer_continued_wall_types(lines):
             if re.match(r'^G0?[01](?:\s|$)', code):
                 p = parse_gcode_line(code)
                 if p["x"] is not None or p["y"] is not None:
-                    updated.append(pending_outer +
-                                   " ; CONTINUED across layer boundary (SilkSteel)\n")
+                    # Keep TYPE comments exact: G-code viewers often
+                    # recognize only the canonical slicer feature names.
+                    # Provenance belongs on its own comment line.
+                    updated.append("; SilkSteel: CONTINUED across layer boundary\n")
+                    updated.append(pending_outer + "\n")
                     inherited += 1
                     pending_outer = None
 
@@ -3570,7 +3573,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 
                 if is_likely_perimeter:
                     # This is an orphan external perimeter!
-                    annotated_lines.append(";TYPE:External perimeter ; AUTO-ADDED by Smoothificator (heuristic)\n")
+                    annotated_lines.append("; SilkSteel: AUTO-ADDED by Smoothificator (heuristic)\n")
+                    annotated_lines.append(";TYPE:External perimeter\n")
                     current_type = ";TYPE:External perimeter"
                     orphans_found += 1
                     if debug >= 1:
