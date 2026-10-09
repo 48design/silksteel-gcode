@@ -3364,11 +3364,61 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     else:
         noise_lut = None
     
+def restore_layer_continued_wall_types(lines):
+    """Reintroduce omitted TYPE markers at layer starts when the last type
+    explicitly set by the slicer was an exterior wall.
+
+    Prusa/Orca may carry ;TYPE:External perimeter across ;LAYER_CHANGE
+    without restating it. Smoothificator is TYPE-triggered and would
+    otherwise leave the first exterior contour of the next layer untouched.
+    Only infer from an *explicit prior exterior TYPE*, never from shape.
+    Wait until positive XY extrusion, so G92, prime/retract, travel and
+    feedrate lines stay in their original positions before processing.
+    """
+    original_deltas, _, _ = scan_source_extrusion(lines)
+    updated = []
+    active_type = None
+    pending_outer = None
+    inherited = 0
+    outer_types = (";TYPE:External perimeter", ";TYPE:Outer wall",
+                   ";TYPE:Overhang perimeter")
+
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(";TYPE:"):
+            active_type = next((kind for kind in outer_types
+                                if stripped.startswith(kind)), None)
+            pending_outer = None
+        elif stripped.startswith(";LAYER_CHANGE") or stripped.startswith(";LAYER:"):
+            pending_outer = active_type
+        elif pending_outer and original_deltas[index] > 0:
+            code = line.split(";", 1)[0].strip()
+            if re.match(r'^G0?[01](?:\\s|$)', code):
+                p = parse_gcode_line(code)
+                if p["x"] is not None or p["y"] is not None:
+                    updated.append(pending_outer +
+                                   " ; CONTINUED across layer boundary (SilkSteel)\n")
+                    inherited += 1
+                    pending_outer = None
+
+        updated.append(line)
+
+    return updated, inherited
+
+
     # Main processing pass
     logging.info("\n" + "="*70)
     logging.info("PASS 1: Detect and annotate orphan external perimeters")
     logging.info("="*70)
     
+    # Preserve the slicer's feature-type continuity across a layer boundary.
+    # This specifically fixes exterior contours that begin immediately after
+    # ;LAYER_CHANGE with no repeated ;TYPE:External perimeter marker.
+    if enable_smoothificator:
+        lines, inherited_outer_types = restore_layer_continued_wall_types(lines)
+        logging.info("Restored %d implicit outer-wall TYPE markers at layer boundaries",
+                     inherited_outer_types)
+
     # Pass 1: Heuristic-based orphan detection
     # External perimeters are typically continuous extrusion paths that form loops
     annotated_lines = []
@@ -4264,8 +4314,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 and params['z'] is None)
                 f_only = (is_move and not has_xy and params['z'] is None
                           and params['e'] is None and params['f'] is not None)
+                # Slicers periodically insert status/progress commands in
+                # the middle of an otherwise continuous exterior contour.
+                # Keep them at their original place in pass 1 instead of
+                # splitting a 700+ mm wall into many tiny paths.
+                status_only = re.match(r'^M(?:117|73)(?:\\s|$)', code) is not None
 
-                if is_extrusion:
+                if status_only and path_lines:
+                    path_lines.append(original)
+                    path_indices.append(source_idx)
+                elif is_extrusion:
                     if not path_lines:
                         path_entry_x, path_entry_y = position['x'], position['y']
                     path_lines.append(original)
