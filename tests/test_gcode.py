@@ -178,5 +178,37 @@ class GCodeSafetyTests(unittest.TestCase):
 
 
 
+    def test_segment_line_respects_max_length(self):
+        segments = silk.segment_line(0, 0, 2.1, 0, 0.5)
+        self.assertGreater(len(segments), 4)
+        self.assertNotEqual(segments[0], (0.0, 0.0))
+        previous = (0, 0)
+        for p in segments:
+            self.assertLessEqual(abs(p[0] - previous[0]), 0.500001)
+            previous = p
+        self.assertEqual(segments[-1], (2.1, 0))
+        self.assertEqual(silk.segment_line(2, 2, 2, 2, 0.5), [])
+
+    def test_zero_length_xy_priming_preserves_extrusion(self):
+        source = fixture(relative=True).replace(
+            "G1 X0 Y5 F8400",
+            "G1 X0 Y5 F8400\\nG1 X0 Y5 E0.25 F800",
+            1
+        )
+        output = self.process(source, enable_smoothificator=False,
+                              enable_nonplanar=True, segment_length=0.5,
+                              amplitude=0.2, frequency=6)
+        self.assertIn("G1 X0 Y5 E0.25 F800", output)
+
+    def test_relative_bridge_densifier_is_safely_skipped(self):
+        source = fixture(relative=True).replace(
+            ";TYPE:Solid infill", ";TYPE:Bridge infill")
+        output = self.process(source, enable_smoothificator=False,
+                              enable_nonplanar=False,
+                              enable_bridge_densifier=True)
+        self.assertNotIn("[Bridge Densifier]", output)
+        self.assertIn(";TYPE:Bridge infill", output)
+
+
 if __name__ == "__main__":
     unittest.main()
