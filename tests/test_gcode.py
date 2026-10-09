@@ -289,7 +289,7 @@ class GCodeSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path = os.path.join(root, "post.gcode")
             with open(path, "w", encoding="utf-8") as stream:
-                stream.write("\\n".join(lines) + "\\n")
+                stream.write("\n".join(lines) + "\n")
             found = feature_audit.audit(path)[40]
         self.assertEqual(found["first_extrusion_type"], "External perimeter")
         self.assertEqual(found["counts"]["carried_outer"], 1)
