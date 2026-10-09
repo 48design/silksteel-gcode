@@ -2399,6 +2399,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     # Bricklayers variables
     perimeter_block_count = 0
+    bricklayers_preserved_count = 0  # Unsupported pressure/mode changes; passed through unchanged
     is_shifted = False
     
     # Non-planar infill variables
@@ -4303,7 +4304,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                      and extract_x(b) is None and extract_y(b) is None)
                     for b in perimeter_block_lines
                 ):
-                    logging.warning("Preserving Bricklayers block with retractions or E-mode changes")
+                    bricklayers_preserved_count += 1
+                    if debug >= 2:
+                        logging.info("Bricklayers: preserved original block at layer %d, input line %d (retract / E-mode change)",
+                                     current_layer, perimeter_block_indices[0] + 1 if perimeter_block_indices else i)
                     for original in perimeter_block_lines:
                         write_and_track(output_buffer, original, recent_output_lines)
                     continue
@@ -5364,6 +5368,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # If debug or counter not defined (shouldn't happen), skip
         pass
     
+    if bricklayers_preserved_count:
+        logging.info("Bricklayers: safely preserved %d sections containing retracts or E-mode changes",
+                     bricklayers_preserved_count)
+
     # Print summary to console
     print("\n" + "=" * 85)
     print("  [OK] SILKSTEEL POST-PROCESSING COMPLETE")
@@ -5549,8 +5557,8 @@ if __name__ == "__main__":
         print(f"  {str(e)}", file=sys.stderr)
         print(f"\n  📄 Check the log file for details: {log_file}", file=sys.stderr)
         print("=" * 85, file=sys.stderr)
-        if sys.stdin.isatty():
-            input("\n  Press ENTER to close this window...")
+        # Never block slicer post-processing, even when stdin is a console.
+        # The traceback is in SilkSteel_log.txt and exit 2 signals failure.
         sys.exit(2)
     
     # Check for warnings/errors and pause if any occurred (after successful completion)
@@ -5564,6 +5572,5 @@ if __name__ == "__main__":
             print(f"  ⚠️  Warnings: {_warning_count}")
         print(f"\n  📄 Check the log file for details: {log_file}")
         print("=" * 85)
-        if sys.stdin.isatty():
-            input("\n  Press ENTER to close this window...")
+        # Warnings are non-fatal; leave a console/log summary and exit normally.
 
