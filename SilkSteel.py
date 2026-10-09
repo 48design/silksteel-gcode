@@ -41,24 +41,9 @@ try:
     from PIL import Image, ImageDraw
     HAS_PIL = True
 except ImportError:
-    # Try to auto-install Pillow if not present
-    print("PIL/Pillow not found. Attempting to install...")
-    try:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow", "--quiet"])
-        print("✓ Pillow installed successfully!")
-        # Try importing again
-        from PIL import Image, ImageDraw
-        HAS_PIL = True
-    except Exception as e:
-        print(f"⚠ Could not auto-install Pillow: {e}")
-        print(f"  Debug PNG generation will be disabled.")
-        print(f"  To enable, manually install with: pip install Pillow")
-        pass  # PIL is optional - only needed for debug PNG generation
+    pass  # Optional dependency: never install packages when processing print files.
 
-    # Counters for diagnostics
-    # Incremented when we reclassify bridge TYPE comments during grid building
-    reclassified_bridge_count = 0
+reclassified_bridge_count = 0
 
 # =============================================================================
 # PRE-COMPILED REGEX PATTERNS (for performance)
@@ -70,7 +55,7 @@ REGEX_X = re.compile(r'X([-+]?\d*\.?\d+)')
 REGEX_Y = re.compile(r'Y([-+]?\d*\.?\d+)')
 REGEX_Z = re.compile(r'Z([-+]?\d*\.?\d+)')
 REGEX_E = re.compile(r'E([-+]?\d*\.?\d+)')
-REGEX_F = re.compile(r'F(\d+)')
+REGEX_F = re.compile(r'F([-+]?\d*\.?\d+)')
 REGEX_E_SUB = re.compile(r'E[-\d.]+')
 REGEX_Z_SUB = re.compile(r'Z[-\d.]+\s*')
 
@@ -102,7 +87,7 @@ def extract_e(line):
 def extract_f(line):
     """Extract F (feedrate) value from G-code line"""
     match = REGEX_F.search(line)
-    return int(match.group(1)) if match else None
+    return float(match.group(1)) if match else None
 
 def replace_e(line, new_e):
     """Replace E value in G-code line"""
@@ -110,7 +95,7 @@ def replace_e(line, new_e):
 
 def replace_f(line, new_f):
     """Replace F (feedrate) value in G-code line"""
-    return re.sub(r'F\d+\.?\d*', f'F{new_f}', line)
+    return REGEX_F.sub(f'F{new_f}', line, count=1)
 
 def remove_z(line):
     """Remove Z parameter from G-code line"""
@@ -164,9 +149,70 @@ def parse_gcode_line(line):
     
     f_match = REGEX_F.search(code_part)
     if f_match:
-        result['f'] = int(f_match.group(1))
+        result['f'] = float(f_match.group(1))
     
     return result
+
+def scan_source_extrusion(lines):
+    """Original E deltas, target coordinates and M82/M83 mode per input line."""
+    value = 0.0
+    relative = False
+    deltas, targets, modes = [], [], []
+    for line in lines:
+        code = line.split(';', 1)[0].strip()
+        if re.match(r'^M83(?:\s|$)', code):
+            relative = True
+        elif re.match(r'^M82(?:\s|$)', code):
+            relative = False
+        if re.match(r'^G92(?:\s|$)', code):
+            reset = parse_gcode_line(code)['e']
+            if reset is not None:
+                value = reset
+        delta = 0.0
+        if re.match(r'^G0?[01](?:\s|$)', code):
+            e = parse_gcode_line(code)['e']
+            if e is not None:
+                delta = e if relative else e - value
+                value += delta
+        deltas.append(delta)
+        targets.append(value)
+        modes.append(relative)
+    return deltas, targets, modes
+
+
+def restore_extrusion_feedrates(gcode, safe_fallback=1800):
+    """Reassert print speed after a travel command changes modal F."""
+    result, modal_f, print_f, changed, restorations = [], None, None, False, 0
+    for line in gcode.splitlines(keepends=True):
+        code = line.split(';', 1)[0].strip()
+        if re.match(r'^G0?[01](?:\s|$)', code):
+            params = parse_gcode_line(code)
+            xy = params['x'] is not None or params['y'] is not None
+            e = params['e'] is not None
+            f = params['f']
+            if f is not None:
+                modal_f = f
+                if xy and e:
+                    print_f, changed = f, False
+                elif not xy and not e and code.startswith('G1'):
+                    print_f, changed = f, False
+                elif not e:
+                    changed = True
+            if xy and e and f is None:
+                if changed:
+                    target = print_f if print_f is not None else safe_fallback
+                    if modal_f is None or abs(modal_f - target) > 0.01:
+                        head, sep, comment = line.partition(';')
+                        line = head.rstrip() + f' F{target:g}' + ((' ;' + comment) if sep else '\n')
+                        modal_f = target
+                        restorations += 1
+                    changed = False
+                if print_f is None and modal_f is not None:
+                    print_f = modal_f
+        result.append(line)
+    logging.info("Restored print feedrate after %d travel moves", restorations)
+    return ''.join(result)
+
 
 def write_line(buffer, line):
     """Write a line to output buffer, ensuring it has a newline"""
@@ -3442,6 +3488,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     # Use annotated lines for Pass 2
     lines = annotated_lines
+    source_e_deltas, source_e_targets, source_relative_modes = scan_source_extrusion(lines)
     
     # Main processing pass
     logging.info("\n" + "="*70)
@@ -3497,10 +3544,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # CRITICAL: All features MUST use this tracker as their entry position when starting a new TYPE section
     # DO NOT do backwards lookups through lines - always trust the global position tracker!
     position = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'e': 0.0}
+    output_relative_e = False
     
     def update_position(line_str):
         """Update global position tracker from a G-code line.
         Call this EVERY time you read a line from the input, regardless of processing mode."""
+        nonlocal output_relative_e
+        if re.match(r'^M83(?:\s|$)', line_str):
+            output_relative_e = True
+        elif re.match(r'^M82(?:\s|$)', line_str):
+            output_relative_e = False
         if line_str.startswith("G1") or line_str.startswith("G0"):
             # Use parse_gcode_line for efficient parameter extraction
             params = parse_gcode_line(line_str)
@@ -3513,7 +3566,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             if params['z'] is not None:
                 position['z'] = params['z']
             if params['e'] is not None:
-                position['e'] = params['e']
+                if output_relative_e:
+                    position['e'] += params['e']
+                else:
+                    position['e'] = params['e']
         elif line_str.startswith("G92"):
             # G92 resets positions (usually E0)
             e_val = extract_e(line_str)
@@ -5273,6 +5329,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         modified_gcode = output_buffer.getvalue()
         output_buffer.close()
     
+    modified_gcode = restore_extrusion_feedrates(modified_gcode)
     print(f"Writing modified G-code to: {os.path.basename(output_file)}...")
     
     # Write to file
@@ -5473,7 +5530,8 @@ if __name__ == "__main__":
         print(f"  {str(e)}", file=sys.stderr)
         print(f"\n  📄 Check the log file for details: {log_file}", file=sys.stderr)
         print("=" * 85, file=sys.stderr)
-        input("\n  Press ENTER to close this window...")
+        if sys.stdin.isatty():
+            input("\n  Press ENTER to close this window...")
         sys.exit(2)
     
     # Check for warnings/errors and pause if any occurred (after successful completion)
@@ -5487,5 +5545,6 @@ if __name__ == "__main__":
             print(f"  ⚠️  Warnings: {_warning_count}")
         print(f"\n  📄 Check the log file for details: {log_file}")
         print("=" * 85)
-        input("\n  Press ENTER to close this window...")
+        if sys.stdin.isatty():
+            input("\n  Press ENTER to close this window...")
 
