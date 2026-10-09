@@ -4234,6 +4234,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     write_and_track(output_buffer,
                         f"G92 E{source_e_targets[last_idx]:.5f} ; Smoothificator E sync\n",
                         recent_output_lines)
+                # Diagnostic provenance marker. It has no effect on the
+                # printer and distinguishes transformed vs untouched walls.
+                write_and_track(output_buffer,
+                    "; ====== SMOOTHIFICATOR END ======\n", recent_output_lines)
                 path_lines = []
                 path_indices = []
 
