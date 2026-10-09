@@ -124,5 +124,59 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertNotIn("Non-planar E sync", output)
 
 
+    def test_partial_axis_nonplanar_moves_are_processed(self):
+        source = fixture().replace("G1 X10 Y5 E", "G1 X10 E").replace(
+            "G1 X10 Y6 E", "G1 X10 E")
+        output = self.process(source, enable_smoothificator=False,
+                              enable_nonplanar=True, segment_length=1,
+                              amplitude=0.25, frequency=6)
+        self.assertGreater(output.count("G1 X1.000"), 0)
+        self.assertIn("Non-planar E sync", output)
+
+    def test_invalid_nonplanar_segment_length_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.process(fixture(), enable_smoothificator=False,
+                         enable_nonplanar=True, segment_length=0)
+
+    def test_bricklayers_does_not_scale_absolute_e_coordinate(self):
+        lines = [
+            "; layer_height = 0.2", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M82", "G92 E100",
+        ]
+        e = 100.0
+        for layer, z in enumerate((0.2, 0.4, 0.6, 0.8)):
+            lines += [
+                ";LAYER_CHANGE", f";Z:{z:.2f}",
+                ";HEIGHT:0.2", f";LAYER:{layer}",
+                f"G1 Z{z:.2f} F1200", ";TYPE:Internal perimeter",
+                "G0 X0 Y0 F8400",
+            ]
+            for x, y in ((10, 0), (10, 10), (0, 10), (0, 0)):
+                e += 0.4
+                lines.append(f"G1 X{x} Y{y} E{e:.5f} F1200")
+            lines += [";TYPE:Internal infill", "G0 X3 Y5 F8400"]
+            e += 0.4
+            lines.append(f"G1 X7 Y5 E{e:.5f} F1500")
+        output = self.process("\n".join(lines) + "\n",
+                              enable_smoothificator=False,
+                              enable_bricklayers=True, enable_nonplanar=True,
+                              amplitude=0.1, frequency=6,
+                              segment_length=1.0)
+        self.assertIn("Bricklayers E sync", output)
+        self.assertIn("Bricklayers base pass", output)
+        e_deltas, _, modes = silk.scan_source_extrusion(output.splitlines())
+        self.assertFalse(any(modes))
+        positive = [delta for line, delta in zip(output.splitlines(), e_deltas)
+                    if line.startswith("G1 ") and silk.extract_x(line) is not None and delta > 0]
+        self.assertTrue(positive)
+        self.assertLess(max(positive), 1.0)
+
+    def test_feedrate_after_z_hop_before_extrusion(self):
+        source = "G1 X0 Y0 E1 F1350\nG0 Z2 F8400\nG0 X2 Y2 F8400\nG1 X8 Y2 E1.3\n"
+        fixed = silk.restore_extrusion_feedrates(source)
+        self.assertIn("G1 X8 Y2 E1.3 F1350", fixed)
+
+
+
 if __name__ == "__main__":
     unittest.main()
