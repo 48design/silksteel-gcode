@@ -4389,7 +4389,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # We do not write this now; Bricklayers will emit its own Z moves
                     
                     # Stop collecting at next TYPE marker OR layer change
-                    if ";TYPE:" in current_line or ";LAYER_CHANGE" in current_line:
+                    if (";TYPE:" in current_line or ";LAYER_CHANGE" in current_line
+                            or current_line.startswith(";LAYER:")):
                         break
                     
                     perimeter_block_lines.append(current_line)
@@ -4448,7 +4449,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             part = perimeter_block_lines[j]
                             part_idx = perimeter_block_indices[j]
                             code = part.split(';', 1)[0].strip()
-                            if not code or re.match(r'^M(?:117|73)(?:\s|$)', code):
+                            # Non-motion status/fan commands do not end
+                            # a contour. The two-pass base writes these once;
+                            # shifted/ordinary paths retain original order.
+                            # A wipe marker, however, is a real path barrier.
+                            harmless_control = re.match(
+                                r'^M(?:117|73|106|107)(?:\s|$)', code)
+                            if (not code and ';WIPE' not in part.upper()) or harmless_control:
                                 loop_lines.append(part)
                                 loop_indices.append(part_idx)
                                 j += 1
