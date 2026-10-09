@@ -5236,11 +5236,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 if params['y'] is not None:
                     last_y = params['y']
                 
-                # If this move has Z parameter, update working Z (e.g., Smoothificator, Bricklayers)
-                if has_z:
+                # A G1 X/Y/Z/E is a *simultaneous* motion: its Z is the END
+                # height, not proof that a pending Z-hop has already dropped.
+                # Keep the pre-hop printing height until we restore it below.
+                z_extrusion_from_hop = is_hopped and has_xy and has_e
+                if has_z and not z_extrusion_from_hop:
                     zhop_current_z = params['z']
                     zhop_working_z = params['z']
-                    is_hopped = False  # Explicit Z in move = at working height
+                    is_hopped = False  # An explicit non-extruding Z move sets the physical height
                 
                 # TRAVEL MOVE = has X/Y but NO E parameter (and no Z)
                 is_travel = has_xy and not has_e and not has_z
@@ -5303,14 +5306,19 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     continue
                 
                 if is_extrusion and is_hopped:
-                    # Drop before extrusion - but DON'T drop if this move already has Z parameter
-                    # (Smoothificator, Bricklayers, etc. set their own Z)
-                    if not has_z:
-                        final_output.write(f"G0 Z{zhop_working_z:.3f} F8400 ; Z-hop drop\n")
-                        zhop_drop_count += 1
+                    # ALWAYS restore the pre-hop height *before* extrusion.
+                    # In non-planar infill each segment carries its own Z target.
+                    # Without this separate drop the nozzle extrudes diagonally
+                    # from the elevated hop height, producing vertical spikes.
+                    final_output.write(f"G0 Z{zhop_working_z:.3f} F8400 ; Z-hop drop\n")
+                    zhop_drop_count += 1
                     is_hopped = False
                     zhop_has_extruded_on_layer = True
-                    # Write the extrusion line
+                    # Only after the drop may a Z-bearing extrusion update
+                    # the printing-height tracker for subsequent travels.
+                    if has_z:
+                        zhop_current_z = params['z']
+                        zhop_working_z = params['z']
                     final_output.write(line)
                     continue
                 
