@@ -52,11 +52,43 @@ class GCodeSafetyTests(unittest.TestCase):
             dst = os.path.join(root, "output.gcode")
             with open(src, "w", encoding="utf-8") as stream:
                 stream.write(gcode)
+            use_zhop = settings.pop("enable_safe_z_hop", False)
             with contextlib.redirect_stdout(io.StringIO()):
                 silk.process_gcode(src, dst, outer_layer_height=0.1,
-                                   enable_safe_z_hop=False, **settings)
+                                   enable_safe_z_hop=use_zhop, **settings)
             with open(dst, encoding="utf-8") as stream:
                 return stream.read()
+
+    def test_zhop_drops_before_z_bearing_nonplanar_extrusion(self):
+        # Regression: G1 X/Y/Z/E moves all axes simultaneously. A segment's
+        # explicit Z must NOT cancel a pending hop without a separate Z drop.
+        output = self.process(fixture(), enable_smoothificator=False,
+                              enable_nonplanar=True, enable_safe_z_hop=True,
+                              segment_length=1.0, amplitude=0.25, frequency=6.0)
+        lines = output.splitlines()
+        lifted = False
+        restored_before_z_extrusion = 0
+        for idx, line in enumerate(lines):
+            if "; Z-hop lift" in line:
+                lifted = True
+            elif "; Z-hop drop" in line:
+                self.assertTrue(lifted)
+                lifted = False
+            elif (";LAYER_CHANGE" in line or ";LAYER:" in line or
+                  line.startswith(("G0 ", "G1 ")) and
+                  silk.extract_z(line) is not None and
+                  silk.extract_x(line) is None and silk.extract_y(line) is None and
+                  silk.extract_e(line) is None):
+                # An independent Z command explicitly repositions the nozzle.
+                lifted = False
+            if (line.startswith("G1 ") and silk.extract_e(line) is not None and
+                silk.extract_z(line) is not None and
+                (silk.extract_x(line) is not None or
+                 silk.extract_y(line) is not None)):
+                self.assertFalse(lifted, f"Extrusion begins above print at line {idx}: {line}")
+                if idx > 0 and "; Z-hop drop" in lines[idx - 1]:
+                    restored_before_z_extrusion += 1
+        self.assertGreater(restored_before_z_extrusion, 0)
 
     def test_modal_feedrate_does_not_inherit_fast_travel(self):
         src = "G1 X10 Y0 E1 F1200\nG0 Z0.5 F8400\nG1 X20 Y0 E2\n"
