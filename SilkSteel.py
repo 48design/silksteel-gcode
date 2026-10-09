@@ -4118,19 +4118,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Include WIPE moves and everything up to the next TYPE marker
             while i < len(lines):
                 current_line = lines[i]
-                # OUTPUT-DRIVEN POSITION TRACKING: We normally don't update during collection.
-                # HOWEVER: If we encounter a standalone Z move (no X/Y) we must capture it as the
-                # base Z before Smoothificator replaces Z handling. Otherwise we lose the true
-                # layer Z (e.g., initial drop from priming height 0.8 -> 0.2).
-                if current_line.startswith("G1") and "Z" in current_line and "X" not in current_line and "Y" not in current_line:
-                    z_match = re.search(r'Z([-+]?\d*\.?\d+)', current_line)
-                    if z_match:
-                        old_z = current_z
-                        current_z = float(z_match.group(1))
-                        working_z = current_z  # Update working/base Z for passes
-                        # We do NOT write this original Z move; passes will emit their own
-                        # But we now have the correct base Z (e.g., 0.2 instead of prior 0.8)
-                
                 # Stop at layer boundary to prevent crossing layers
                 if ";LAYER_CHANGE" in current_line:
                     break
@@ -4146,113 +4133,125 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 external_block_indices.append(i)
                 i += 1
             
-            # Replaying E-only retracts or mode changes multiple times can
-            # leave the extruder depressurized; preserve such blocks unchanged.
-            unsafe_block = any(
-                b.strip().startswith(('G92', 'M82', 'M83')) or
-                (b.startswith(('G0 ', 'G1 ')) and extract_e(b) is not None
-                 and extract_x(b) is None and extract_y(b) is None)
-                for b in external_block_lines
-            )
-            if unsafe_block:
-                logging.warning("Preserved Smoothificator block with E-only move or mode change")
-                for original_line in external_block_lines:
-                    write_and_track(output_buffer, original_line, recent_output_lines)
-                continue
+            # The slicer may retract, prime, wipe and travel *inside* one
+            # outer-wall TYPE section. Replaying these commands in every pass
+            # is unsafe; skipping the whole section loses the thin walls.
+            # Split it into consecutive positive-extrusion paths instead.
+            smooth_paths = 0
+            raw_moves = 0
+            path_lines = []
+            path_indices = []
+            path_entry_x = position['x']
+            path_entry_y = position['y']
 
-            #logging.info(f"  [SMOOTHIFICATOR] Collected external perimeter block with {len(external_block_lines)} lines")
-            
-            # Calculate effective layer height
-            if current_layer_height > 0.01:
-                effective_layer_height = current_layer_height
-            elif current_z > old_z + 0.001:
-                effective_layer_height = current_z - old_z
-            else:
-                effective_layer_height = outer_layer_height
-            
-            # Calculate how many passes we need
-            if effective_layer_height > outer_layer_height:
-                passes_ceil = math.ceil(effective_layer_height / outer_layer_height)
-                passes_floor = math.floor(effective_layer_height / outer_layer_height)
-                
-                height_per_pass_ceil = effective_layer_height / passes_ceil
-                height_per_pass_floor = effective_layer_height / passes_floor if passes_floor > 0 else float('inf')
-                
-                diff_ceil = abs(height_per_pass_ceil - outer_layer_height)
-                diff_floor = abs(height_per_pass_floor - outer_layer_height)
-                diff_original = abs(effective_layer_height - outer_layer_height)
-                
-                if diff_original <= diff_ceil and diff_original <= diff_floor:
-                    passes_needed = 1
-                    height_per_pass = effective_layer_height
-                elif diff_ceil < diff_floor:
-                    passes_needed = passes_ceil
-                    height_per_pass = height_per_pass_ceil
+            def flush_outer_path():
+                nonlocal path_lines, path_indices, path_entry_x, path_entry_y
+                nonlocal smooth_paths
+                if not path_lines:
+                    return
+
+                effective_height = current_layer_height if current_layer_height > 0.01 else outer_layer_height
+                if effective_height > outer_layer_height:
+                    above = math.ceil(effective_height / outer_layer_height)
+                    below = max(1, math.floor(effective_height / outer_layer_height))
+                    options = [(1, effective_height), (above, effective_height / above),
+                               (below, effective_height / below)]
+                    passes_needed, height_per_pass = min(
+                        options, key=lambda item: abs(item[1] - outer_layer_height))
                 else:
-                    passes_needed = passes_floor
-                    height_per_pass = height_per_pass_floor
-                
-                extrusion_multiplier = 1.0 / passes_needed
-                #logging.info(f"  [SMOOTHIFICATOR] Layer {current_layer}: {passes_needed} passes at {height_per_pass:.4f}mm each")
-            else:
-                passes_needed = 1
-                height_per_pass = effective_layer_height
-                extrusion_multiplier = 1.0
-            
-            # Maintain output E independently of the slicer's original E origin.
-            current_e = position['e']
-            
-            # Use the global position tracker - it's always accurate!
-            start_pos = (position['x'], position['y'])
-            
-            for pass_num in range(passes_needed):
-                # Calculate Z for this pass (work DOWN from current_z)
-                if passes_needed == 1:
-                    pass_z = current_z
+                    passes_needed, height_per_pass = 1, effective_height
+
+                # A path begins at the nozzle's *actual* previous XY, after
+                # any travel/retract commands were applied exactly once.
+                origin_x, origin_y = path_entry_x, path_entry_y
+                path_z = current_z
+                if passes_needed > 1:
+                    smooth_paths += 1
+                for pass_num in range(passes_needed):
+                    pass_z = path_z - (passes_needed - pass_num - 1) * height_per_pass
+                    actual_layer_max_z[current_layer] = max(
+                        actual_layer_max_z.get(current_layer, pass_z), pass_z)
+                    if pass_num == 0:
+                        write_and_track(output_buffer,
+                            f"; ====== SMOOTHIFICATOR START: {passes_needed} passes at {height_per_pass:.4f}mm each ======\n",
+                            recent_output_lines)
+                    elif math.hypot(position['x'] - origin_x, position['y'] - origin_y) > 0.001:
+                        write_and_track(output_buffer,
+                            f"G0 X{origin_x:.3f} Y{origin_y:.3f} F8400 ; Smoothificator return to path start\n",
+                            recent_output_lines)
+                    write_and_track(output_buffer,
+                        f"G0 Z{pass_z:.3f} ; Smoothificator pass {pass_num + 1}/{passes_needed}\n",
+                        recent_output_lines)
+
+                    for source_idx, original in zip(path_indices, path_lines):
+                        code = original.split(';', 1)[0].strip()
+                        if not re.match(r'^G0?[01](?:\\s|$)', code):
+                            # Comments are metadata, not repeated commands.
+                            if pass_num == 0:
+                                write_and_track(output_buffer, original, recent_output_lines)
+                            continue
+                        if extract_e(code) is None:
+                            # Repeating a modal F-only instruction is safe.
+                            write_and_track(output_buffer, original, recent_output_lines)
+                            continue
+                        delta = source_e_deltas[source_idx] / passes_needed
+                        e_value = delta if source_relative_modes[source_idx] else position['e'] + delta
+                        write_and_track(output_buffer,
+                            replace_e(original, e_value), recent_output_lines)
+
+                # Rebase to the slicer's absolute E coordinate so the
+                # following unmodified retract/prime can use its native E.
+                last_idx = path_indices[-1]
+                if not source_relative_modes[last_idx]:
+                    write_and_track(output_buffer,
+                        f"G92 E{source_e_targets[last_idx]:.5f} ; Smoothificator E sync\n",
+                        recent_output_lines)
+                path_lines = []
+                path_indices = []
+
+            for source_idx, original in zip(external_block_indices, external_block_lines):
+                code = original.split(';', 1)[0].strip()
+                if not code:
+                    if path_lines:
+                        path_lines.append(original)
+                        path_indices.append(source_idx)
+                    else:
+                        write_and_track(output_buffer, original, recent_output_lines)
+                    continue
+
+                is_move = re.match(r'^G0?[01](?:\\s|$)', code) is not None
+                params = parse_gcode_line(code) if is_move else None
+                has_xy = is_move and (params['x'] is not None or params['y'] is not None)
+                delta = source_e_deltas[source_idx]
+                is_extrusion = (is_move and has_xy and delta > 0
+                                and params['z'] is None)
+                f_only = (is_move and not has_xy and params['z'] is None
+                          and params['e'] is None and params['f'] is not None)
+
+                if is_extrusion:
+                    if not path_lines:
+                        path_entry_x, path_entry_y = position['x'], position['y']
+                    path_lines.append(original)
+                    path_indices.append(source_idx)
+                elif f_only and path_lines:
+                    path_lines.append(original)
+                    path_indices.append(source_idx)
                 else:
-                    pass_z = current_z - ((passes_needed - pass_num - 1) * height_per_pass)
-                
-                # Track actual max Z for this layer (for safe Z-hop)
-                if current_layer not in actual_layer_max_z or pass_z > actual_layer_max_z[current_layer]:
-                    actual_layer_max_z[current_layer] = pass_z
-                
-                if pass_num == 0:
-                    write_and_track(output_buffer, f"; ====== SMOOTHIFICATOR START: {passes_needed} passes at {height_per_pass:.4f}mm each ======\n", recent_output_lines)
-                
-                # Output Z move
-                write_and_track(output_buffer, f"G0 Z{pass_z:.3f} ; Pass {pass_num + 1} of {passes_needed}\n", recent_output_lines)
-                
-                # For pass 2+, travel back to TRUE start position (where we were before the block)
-                if pass_num > 0 and start_pos:
-                    write_and_track(output_buffer, f"G1 X{start_pos[0]:.3f} Y{start_pos[1]:.3f} F8400 ; Travel to start\n", recent_output_lines)
-                
-                # Rebase source extrusion *deltas* on the current output E origin.
-                for block_idx, block_line in enumerate(external_block_lines):
-                    if pass_num > 0 and ";TYPE:" in block_line:
-                        continue
-                    if "G1 Z" in block_line and "X" not in block_line and "Y" not in block_line:
-                        continue
-                    if "G1" in block_line and "Z" in block_line:
-                        block_line = REGEX_Z_SUB.sub('', block_line)
+                    # A barrier can be a retract/unretract, travel, G92,
+                    # mode switch, Z move or other motion/control command.
+                    # Flush the previous wall FIRST, then execute it once.
+                    flush_outer_path()
+                    write_and_track(output_buffer, original, recent_output_lines)
+                    if is_move and params['z'] is not None:
+                        current_z = params['z']
+                        working_z = current_z
+                    if is_move and has_xy and params['e'] is not None and delta > 0:
+                        raw_moves += 1
 
-                    source_idx = external_block_indices[block_idx]
-                    if block_line.startswith(('G0 ', 'G1 ')) and extract_e(block_line) is not None:
-                        delta = source_e_deltas[source_idx]
-                        if delta > 0 and (extract_x(block_line) is not None or extract_y(block_line) is not None):
-                            delta *= extrusion_multiplier
-                        current_e += delta
-                        target_e = delta if source_relative_modes[source_idx] else current_e
-                        block_line = replace_e(block_line, target_e)
-                    write_and_track(output_buffer, block_line, recent_output_lines)
-
-            # G92 changes the coordinate only, without extruding/retracting;
-            # future untouched slicer commands can safely use their original E.
-            if not source_relative_modes[external_block_indices[-1]]:
-                write_and_track(output_buffer,
-                    f"G92 E{source_e_targets[external_block_indices[-1]]:.5f} ; Smoothificator E sync\n",
-                    recent_output_lines)
-                current_e = position['e']
-
+            flush_outer_path()
+            if debug >= 1:
+                logging.info("Smoothificator outer-wall block: %d subdivided paths, %d unsupported XYZ-E paths preserved",
+                             smooth_paths, raw_moves)
             continue
         
         # ========== BRICKLAYERS: Internal Perimeter Processing ==========
