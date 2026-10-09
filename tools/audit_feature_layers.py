@@ -67,7 +67,7 @@ def audit(path):
             # A G-code marker only means the feature ran. The actual
             # interlocking requires different PHYSICAL nozzle Z heights.
             if "Bricklayers shifted block #" in line or "Bricklayers base block #" in line:
-                z_match = re.match(r"^G0 Z([-+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+))", line)
+                z_match = re.match(r"^G0 Z([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))", line)
                 if z_match:
                     role = "shifted" if "shifted block #" in line else "base"
                     current["brick_z"][role].append(float(z_match.group(1)))
