@@ -2284,6 +2284,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     print(f"Loaded {len(lines)} lines")
 
+    if enable_bridge_densifier and any(re.match(r'^\s*M83(?:\s|$)', l) for l in lines):
+        logging.warning("Bridge Densifier disabled: relative-E (M83) source is unsupported")
+        enable_bridge_densifier = False
+    elif enable_bridge_densifier:
+        logging.warning("Experimental Bridge Densifier enabled: E-mode/flow requires printer validation")
+
     # Get layer heights from G-code
     base_layer_height = get_layer_height(lines)
     if base_layer_height is None:
@@ -5097,6 +5103,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 infill_current_e = position['e']
                 i += 1
 
+            if in_valley:
+                flush_pending_valley(min(i, len(lines) - 1))
+
             # Return to the slicer's original E coordinate before other
             # sections are passed through unchanged.
             if i > 0 and not source_relative_modes[i - 1]:
@@ -5418,7 +5427,7 @@ if __name__ == "__main__":
                        help=f'Safety margin in mm to add above max Z during travel (default: {DEFAULT_SAFE_Z_HOP_MARGIN})')
     
     parser.add_argument('-enableBridgeDensifier', '--enable-bridge-densifier', action='store_const', const=True, dest='enable_bridge_densifier', default=None,
-                       help='Enable Bridge Densifier to add intermediate lines between bridge extrusions for better bridging (default: disabled, enabled with -full, experimental)')
+                       help='Enable Bridge Densifier to add intermediate lines between bridge extrusions for better bridging (experimental, requires explicit opt-in; not enabled by -full)')
     parser.add_argument('-disableBridgeDensifier', '--disable-bridge-densifier', action='store_const', const=False, dest='enable_bridge_densifier',
                        help='Disable Bridge Densifier (overrides -full)')
     
@@ -5470,8 +5479,10 @@ if __name__ == "__main__":
             args.enable_bricklayers = True
         if args.enable_non_planar is None:
             args.enable_non_planar = True
+        # Experimental bridge reconstruction has unresolved E-mode bugs.
+        # Require an explicit opt-in rather than enabling it in -full.
         if args.enable_bridge_densifier is None:
-            args.enable_bridge_densifier = True
+            args.enable_bridge_densifier = False
         # Gap fill removal is too buggy, don't enable it with -full
         # Smoothificator and Safe Z-hop are already enabled by default
     
