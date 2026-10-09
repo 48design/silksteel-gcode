@@ -4119,7 +4119,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             while i < len(lines):
                 current_line = lines[i]
                 # Stop at layer boundary to prevent crossing layers
-                if ";LAYER_CHANGE" in current_line or re.match(r'^;LAYER:\\d+', current_line):
+                if ";LAYER_CHANGE" in current_line or current_line.startswith(";LAYER:"):
                     break
                 
                 # Stop at different type marker (this is the real end of external perimeter block)
