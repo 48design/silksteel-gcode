@@ -1508,11 +1508,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     print(f"Loaded {len(lines)} lines")
 
-    if enable_bridge_densifier and any(re.match(r'^\s*M83(?:\s|$)', l) for l in lines):
-        logging.warning("Bridge Densifier disabled: relative-E (M83) source is unsupported")
-        enable_bridge_densifier = False
-    elif enable_bridge_densifier:
-        logging.warning("Experimental Bridge Densifier enabled: E-mode/flow requires printer validation")
+    if enable_bridge_densifier:
+        logging.warning("Experimental Bridge Densifier enabled: inspect bridge paths in the viewer before printing")
 
     # Get layer heights from G-code
     base_layer_height = get_layer_height(lines)
@@ -1634,6 +1631,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Bridge densifier variables
     bridge_buffer = []  # Buffer to collect bridge section lines
     bridge_start_e = 0.0  # E value at start of bridge section
+    bridge_start_relative_e = False  # E mode at buffer entry
     bridge_start_x = 0.0  # X position at start of bridge section
     bridge_start_y = 0.0  # Y position at start of bridge section
     in_bridge_section = False  # Track when we're buffering a bridge section
@@ -2855,6 +2853,24 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             if e_val is not None:
                 position['e'] = e_val
 
+    def flush_bridge_buffer():
+        nonlocal bridge_buffer, in_bridge_section, current_e
+        if bridge_buffer:
+            processed, final_e, final_xy = process_bridge_section(
+                bridge_buffer, current_z, bridge_start_e,
+                bridge_start_x, bridge_start_y, bridge_connector_max_length,
+                logging, debug=debug, bridge_feedrate_slowdown=0.6,
+                initial_relative=bridge_start_relative_e,
+            )
+            for generated_line in processed:
+                write_and_track(output_buffer, generated_line, recent_output_lines)
+            if (math.hypot(position['x'] - final_xy[0], position['y'] - final_xy[1]) > 0.002
+                or abs(position['e'] - final_e) > 0.0001):
+                logging.error("Bridge Densifier output E/XY mismatch; inspect section before printing")
+            current_e = position['e']
+        bridge_buffer = []
+        in_bridge_section = False
+
     # Register output-driven position update callback
     global _update_position_for_output
     _update_position_for_output = update_position
@@ -2869,251 +2885,50 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # Position is updated ONLY when lines are written (see write_and_track).
         # This ensures position always reflects ACTUAL nozzle state in the modified G-code.
         
-        # Track TYPE markers for Z-hop exclusion logic and bridge densifier
+        # Preserve original source commands across bridge TYPE/layer/retract
+        # boundaries, including original pressure and E-mode commands.
         if ";TYPE:" in line:
+            if (enable_bridge_densifier and in_bridge_section and
+                ("Bridge infill" not in line or "Internal bridge infill" in line)):
+                flush_bridge_buffer()
+
             current_type = line.strip()
-            
-            # BRIDGE DENSIFIER: Process buffered bridge section when exiting bridge
-            if enable_bridge_densifier and in_bridge_section:
-                # Check if we're leaving bridge infill (only "Bridge infill", NOT "Internal bridge infill")
-                if "Bridge infill" not in current_type or "Internal bridge infill" in current_type:
-                    # Process the buffered bridge section
-                    logging.info(f"[BRIDGE] Exiting bridge section, processing {len(bridge_buffer)} buffered lines")
-                    densified_lines, final_e, final_pos = process_bridge_section(
-                        bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug, bridge_feedrate_slowdown=0.6
-                    )
-                    
-                    # Output densified bridge lines
-                    for densified_line in densified_lines:
-                        write_and_track(output_buffer, densified_line, recent_output_lines)
-                    
-                    # Find where the original G-code expects to continue from (last XY move in bridge buffer)
-                    # Also look for un-retract command that needs to be preserved
-                    last_x, last_y = None, None
-                    unretract_line = None
-                    last_move_idx = -1
-                    
-                    for idx in range(len(bridge_buffer) - 1, -1, -1):
-                        buf_line = bridge_buffer[idx]
-                        if buf_line.startswith("G1") and "X" in buf_line and "Y" in buf_line:
-                            params = parse_gcode_line(buf_line)
-                            if params['x'] is not None:
-                                last_x = params['x']
-                            if params['y'] is not None:
-                                last_y = params['y']
-                            if last_x is not None and last_y is not None:
-                                last_move_idx = idx
-                                break
-                    
-                    # Look for un-retract command after the last move (E-only move with E >= 0)
-                    if last_move_idx >= 0:
-                        for idx in range(last_move_idx + 1, len(bridge_buffer)):
-                            buf_line = bridge_buffer[idx]
-                            if buf_line.startswith("G1") and "E" in buf_line and "X" not in buf_line and "Y" not in buf_line:
-                                params = parse_gcode_line(buf_line)
-                                if params['e'] is not None and params['e'] >= 0:
-                                    # This is an un-retract command
-                                    unretract_line = buf_line
-                                    logging.info(f"[BRIDGE] Found un-retract command: {buf_line.strip()}")
-                                    break
-                    
-                    # Check if densified path ended at a different position than expected
-                    if last_x is not None and last_y is not None:
-                        dist = math.sqrt((final_pos[0] - last_x)**2 + (final_pos[1] - last_y)**2)
-                        if dist > 0.01:  # More than 0.01mm away
-                            # Need to travel to expected position
-                            write_and_track(output_buffer, 
-                                add_inline_comment(f"G0 X{last_x:.3f} Y{last_y:.3f} F8400\n", 
-                                                 "[Bridge Densifier] Return to expected position"),
-                                recent_output_lines)
-                            position['x'] = last_x
-                            position['y'] = last_y
-                            logging.info(f"[BRIDGE] Added travel to expected position: X={last_x:.3f} Y={last_y:.3f}, distance={dist:.3f}mm")
-                        else:
-                            # Already at expected position
-                            position['x'] = final_pos[0]
-                            position['y'] = final_pos[1]
-                    else:
-                        # No last position found, use final position
-                        position['x'] = final_pos[0]
-                        position['y'] = final_pos[1]
-                    
-                    # DON'T output un-retract command when exiting on TYPE change
-                    # The unretract belongs to the NEXT section, not the bridge
-                    # It will be processed normally by the main loop
-                    # (Only preserve unretract when exiting on retraction, which happens below)
-                    
-                    # Update E position after bridge
-                    position['e'] = final_e
-                    current_e = final_e
-                    
-                    # Clear buffer but keep TYPE marker if present
-                    bridge_buffer = []
-                    in_bridge_section = False
-                    logging.info(f"[BRIDGE] Bridge section processed, E={final_e:.5f}")
-            
-            # BRIDGE DENSIFIER: Start buffering when entering bridge (only "Bridge infill", NOT "Internal bridge infill")
-            if enable_bridge_densifier:
-                if "Bridge infill" in current_type and "Internal bridge infill" not in current_type:
-                    if not in_bridge_section:
-                        in_bridge_section = True
-                        bridge_buffer = []
-                        bridge_start_e = position['e']
-                        bridge_start_x = position['x']
-                        bridge_start_y = position['y']
-                        logging.info(f"[BRIDGE] Entering bridge section at X={bridge_start_x:.3f} Y={bridge_start_y:.3f} E={bridge_start_e:.5f}")
-            
-            # Track when we're in bridge infill (any kind) for Z-hop logic
-            if "Bridge infill" in current_type or "Internal bridge infill" in current_type:
-                in_bridge_infill = True
-            else:
-                in_bridge_infill = False
-        
-        # BRIDGE DENSIFIER: Buffer lines when in bridge section
+            if enable_bridge_densifier and (
+                ";TYPE:Bridge infill" in line and
+                ";TYPE:Internal bridge infill" not in line
+            ) and not in_bridge_section:
+                in_bridge_section = True
+                bridge_buffer = []
+                bridge_start_e = position['e']
+                bridge_start_x = position['x']
+                bridge_start_y = position['y']
+                bridge_start_relative_e = output_relative_e
+
+            in_bridge_infill = ("Bridge infill" in current_type)
+
         if enable_bridge_densifier and in_bridge_section:
-            # Check if we hit a layer boundary - stop buffering immediately!
-            if ";LAYER_CHANGE" in line or ";LAYER:" in line:
-                # Process what we have so far
-                if bridge_buffer:
-                    logging.info(f"[BRIDGE] Hit layer boundary, processing {len(bridge_buffer)} buffered lines")
-                    densified_lines, final_e, final_pos = process_bridge_section(
-                        bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug, bridge_feedrate_slowdown=0.6
-                    )
-                    
-                    # Output densified bridge lines
-                    for densified_line in densified_lines:
-                        write_and_track(output_buffer, densified_line, recent_output_lines)
-                    
-                    # Update position
-                    position['x'] = final_pos[0]
-                    position['y'] = final_pos[1]
-                    position['e'] = final_e
-                    current_e = final_e
-                    
-                    # Clear buffer
-                    bridge_buffer = []
-                    in_bridge_section = False
-                
-                # Don't buffer the LAYER_CHANGE line - let it be processed normally
-                # DON'T continue - fall through so the line gets processed by other handlers
-                # The `if` check below will not match since we cleared in_bridge_section
+            if ";LAYER_CHANGE" in line or line.startswith(";LAYER:"):
+                flush_bridge_buffer()
+                # Process layer marker normally below.
             else:
-                # Check if this line is a retraction (negative E move)
-                # If so, we've reached the end of this bridge section
-                is_retraction = False
-                if line.strip().startswith("G1") and "E" in line:
-                    params = parse_gcode_line(line)
-                    if params['e'] is not None and params['e'] < 0:
-                        is_retraction = True
-                        logging.info(f"[BRIDGE] Detected retraction during bridge buffering, will process bridge section")
-                
-                # Buffer this line BEFORE processing (retraction belongs to bridge section)
                 bridge_buffer.append(line)
-                
-                # If retraction detected, process the bridge section now
-                if is_retraction:
-                    logging.info(f"[BRIDGE] Processing bridge section due to retraction, {len(bridge_buffer)} buffered lines")
-                    densified_lines, final_e, final_pos = process_bridge_section(
-                        bridge_buffer, current_z, bridge_start_e, bridge_start_x, bridge_start_y, bridge_connector_max_length, logging, debug, bridge_feedrate_slowdown=0.6
-                    )
-                    
-                    # Output densified bridge lines
-                    for densified_line in densified_lines:
-                        write_and_track(output_buffer, densified_line, recent_output_lines)
-                    
-                    # Find where the original G-code expects to continue from (last XY move in bridge buffer)
-                    # Also look for un-retract command that needs to be preserved
-                    last_x, last_y = None, None
-                    unretract_line = None
-                    last_move_idx = -1
-                    
-                    for idx in range(len(bridge_buffer) - 1, -1, -1):
-                        buf_line = bridge_buffer[idx]
-                        if buf_line.startswith("G1") and "X" in buf_line and "Y" in buf_line:
-                            params = parse_gcode_line(buf_line)
-                            if params['x'] is not None:
-                                last_x = params['x']
-                            if params['y'] is not None:
-                                last_y = params['y']
-                            if last_x is not None and last_y is not None:
-                                last_move_idx = idx
-                                break
-                    
-                    # Look for un-retract command after the last move (E-only move with E >= 0)
-                    # BUT this won't exist yet since we just saw the retraction!
-                    # The un-retract will come AFTER the travel move in subsequent lines
-                    
-                    # Check if densified path ended at a different position than expected
-                    if last_x is not None and last_y is not None:
-                        dist = math.sqrt((final_pos[0] - last_x)**2 + (final_pos[1] - last_y)**2)
-                        if dist > 0.01:  # More than 0.01mm away
-                            # Need to travel to expected position
-                            write_and_track(output_buffer, 
-                                add_inline_comment(f"G0 X{last_x:.3f} Y{last_y:.3f} F8400\n", "[Bridge Densifier] Return to expected position"),
-                                recent_output_lines)
-                            position['x'] = last_x
-                            position['y'] = last_y
-                            logging.info(f"[BRIDGE] Added travel to expected position: X={last_x:.3f} Y={last_y:.3f}, distance={dist:.3f}mm")
-                        else:
-                            # Already at expected position
-                            position['x'] = final_pos[0]
-                            position['y'] = final_pos[1]
-                    else:
-                        # No last position found, use final position
-                        position['x'] = final_pos[0]
-                        position['y'] = final_pos[1]
-                    
-                    # Update E position after bridge
-                    position['e'] = final_e
-                    current_e = final_e
-                    
-                    # Output the retraction command (this will reduce E)
-                    retract_e = extract_e(line)
-                    write_and_track(output_buffer, 
-                        add_inline_comment(line, "[Bridge Densifier] Original retraction"),
-                        recent_output_lines)
-                    
-                    # Update position tracking after retraction
-                    if retract_e is not None:
-                        position['e'] = retract_e
-                        current_e = retract_e
-                    
-                    # Clear buffer and exit bridge mode
-                    bridge_buffer = []
-                    in_bridge_section = False
-                    logging.info(f"[BRIDGE] Bridge section processed, E after densification={final_e:.5f}, E after retract={position['e']:.5f}")
-                    
-                    # Check if we should immediately re-enter bridge mode
-                    # (We're still in Bridge infill TYPE, just had a retraction between bridge segments)
-                    # But DON'T re-enter if the next section is a TYPE change (bridge is ending)
-                    should_reenter = False
+                code = line.split(';', 1)[0].strip()
+                if (re.match(r'^G0?[01](?:\s|$)', code) and
+                    source_e_deltas[i] < -1e-8 and
+                    extract_x(code) is None and
+                    extract_y(code) is None):
+                    # Retract ends one island. Emit exactly once, start next
+                    # buffer at the actual output E and XY.
+                    flush_bridge_buffer()
                     if "Bridge infill" in current_type and "Internal bridge infill" not in current_type:
-                        # Look ahead to see if TYPE is changing soon
-                        next_is_type_change = False
-                        for j in range(i + 1, min(i + 10, len(lines))):
-                            if ";TYPE:" in lines[j]:
-                                # Check if it's a different TYPE
-                                if "Bridge infill" not in lines[j] or "Internal bridge infill" in lines[j]:
-                                    next_is_type_change = True
-                                break
-                        
-                        if not next_is_type_change:
-                            should_reenter = True
-                    
-                    if should_reenter:
                         in_bridge_section = True
-                        bridge_buffer = []
-                        # CRITICAL: Use current E position (after retraction), not final_e!
-                        # The next bridge section will start from wherever we are NOW (after retract/travel/unretract)
                         bridge_start_e = position['e']
                         bridge_start_x = position['x']
                         bridge_start_y = position['y']
-                        logging.info(f"[BRIDGE] Re-entering bridge section after retraction at X={bridge_start_x:.3f} Y={bridge_start_y:.3f} E={bridge_start_e:.5f}")
-                
-                # Only continue for retraction case - for LAYER_CHANGE, fall through
+                        bridge_start_relative_e = output_relative_e
                 i += 1
                 continue
-        
+
         # Progress indicator every 10,000 lines (less verbose)
         if i > 0 and i % 10000 == 0:
             progress = (i / total_lines) * 100
@@ -4448,6 +4263,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         else:
             write_and_track(output_buffer, line, recent_output_lines)
             i += 1
+
+    # File may end inside the final bridge TYPE section.
+    if enable_bridge_densifier and in_bridge_section:
+        flush_bridge_buffer()
 
     # Write the modified G-code
     print(f"\n[OK] Processed {current_layer} layers")
