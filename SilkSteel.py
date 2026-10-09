@@ -2898,8 +2898,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # Preserve original source commands across bridge TYPE/layer/retract
         # boundaries, including original pressure and E-mode commands.
         if ";TYPE:" in line:
-            if (enable_bridge_densifier and in_bridge_section and
-                ("Bridge infill" not in line or "Internal bridge infill" in line)):
+            # Every TYPE marker starts a new feature run. Do not pair
+            # bridge strands across two separately labelled bridge islands,
+            # even if both TYPE markers say "Bridge infill".
+            if enable_bridge_densifier and in_bridge_section:
                 flush_bridge_buffer()
 
             current_type = line.strip()
