@@ -134,7 +134,7 @@ def build_bridge_serpentine(lines, initial_z, initial_e, start_x, start_y,
             far = math.hypot(left['a'][0]-right['b'][0],
                              left['a'][1]-right['b'][1])
 
-            if (cosine > -0.98 or perpendicular < 0.15 or
+            if (cosine > -0.98 or perpendicular < max(0.30, extrusion_width*0.70) or
                 perpendicular > 2.4 or
                 near > max(2.8, 4.5*extrusion_width) or
                 far > max(3.5, 0.35*min(left['length'], right['length'])) or
