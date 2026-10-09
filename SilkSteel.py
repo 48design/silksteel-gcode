@@ -5076,10 +5076,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             
                             i += 1
                             continue
-                        else:
-                            # No positive source extrusion; the line below
-                            # will be rebased if absolute E was modified.
-
                 # Boost feedrate for standalone F commands (e.g., "G1 F3600")
                 if current_line.startswith('G1') and 'F' in current_line and 'X' not in current_line and 'Y' not in current_line and 'E' not in current_line:
                     original_feedrate = extract_f(current_line)
