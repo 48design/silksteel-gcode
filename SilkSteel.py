@@ -4459,18 +4459,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 write_and_track(output_buffer, f"G0 Z{adjusted_z:.3f} ; Bricklayers shifted block #{perimeter_block_count}\n", recent_output_lines)
                                 
-                                # Output all lines with adjusted extrusion
-                                for loop_line in loop_lines:
-                                    if loop_line.startswith("G1") and ("X" in loop_line or "Y" in loop_line) and "E" in loop_line:
-                                        e_value = extract_e(loop_line)
-                                        if e_value is not None:
-                                            prev_e = position.get('e', 0.0)
-                                            e_delta = e_value - prev_e
-                                            if e_delta > 0:
-                                                new_e_value = prev_e + (e_delta * extrusion_factor * bricklayers_extrusion_multiplier)
-                                                loop_line = replace_e(loop_line, new_e_value)
+                                for source_idx, loop_line in zip(loop_indices, loop_lines):
+                                    if loop_line.startswith(('G0 ', 'G1 ')) and extract_e(loop_line) is not None:
+                                        delta = source_e_deltas[source_idx]
+                                        if delta > 0:
+                                            delta *= extrusion_factor * bricklayers_extrusion_multiplier
+                                        e = delta if source_relative_modes[source_idx] else position['e'] + delta
+                                        loop_line = replace_e(loop_line, e)
                                     write_and_track(output_buffer, loop_line, recent_output_lines)
-                                
+
                                 # Reset Z
                                 write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
                                 
@@ -4496,81 +4493,41 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     
                                     #logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base in 2 passes at Z={pass1_z:.3f} and Z={pass2_z:.3f}")
                                     
-                                    # Separate extrusion moves from non-extrusion commands
-                                    # Extrusion moves: G1 with X, Y, and E (the actual printing)
-                                    # Non-extrusion: WIDTH comments, G92, retractions, travel, etc.
-                                    # Fan commands (M106/M107): Keep only first and last
-                                    extrusion_moves = []
-                                    non_extrusion_commands = []
-                                    fan_commands = []  # Collect all fan commands separately
-                                    
-                                    # Use global position tracker for loop start position
-                                    start_x, start_y = position['x'], position['y']
-                                    
-                                    for loop_line in loop_lines:
-                                        # Check if this is an extrusion move
-                                        is_extrusion = loop_line.startswith("G1") and "X" in loop_line and "Y" in loop_line and "E" in loop_line and "E-" not in loop_line
-                                        # Check if this is a fan command
-                                        is_fan_command = loop_line.startswith("M106") or loop_line.startswith("M107")
-                                        
-                                        if is_extrusion:
-                                            extrusion_moves.append(loop_line)
-                                        elif is_fan_command:
-                                            # Collect fan commands separately
-                                            fan_commands.append(loop_line)
-                                        else:
-                                            # Everything else (WIDTH comments, G92, retraction, travel)
-                                            non_extrusion_commands.append(loop_line)
-                                    
-                                    # Keep only first and last fan command
-                                    if fan_commands:
-                                        if len(fan_commands) == 1:
-                                            non_extrusion_commands.insert(0, fan_commands[0])
-                                        else:
-                                            non_extrusion_commands.insert(0, fan_commands[0])  # First at beginning
-                                            non_extrusion_commands.append(fan_commands[-1])    # Last at end
-                                    
-                                    # Validation: make sure we found extrusion moves
+                                    # Replay positive source E deltas at 0.75x per pass.
+                                    extrusion_moves = [
+                                        (source_idx, loop_line)
+                                        for source_idx, loop_line in zip(loop_indices, loop_lines)
+                                        if loop_line.startswith("G1")
+                                        and (extract_x(loop_line) is not None or extract_y(loop_line) is not None)
+                                        and source_e_deltas[source_idx] > 0
+                                    ]
                                     if not extrusion_moves:
-                                        logging.warning(f"  [BRICKLAYERS WARNING] Layer {current_layer}, Block #{perimeter_block_count}: No extrusion moves found in loop!")
-                                    
-                                    # Pass 1: Print at base layer Z
-                                    if pre_block_e_value is not None:
-                                        write_and_track(output_buffer, f"G1 Z{pass1_z:.3f} E{pre_block_e_value:.5f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n", recent_output_lines)
+                                        logging.warning("Bricklayers base loop has no extrusion; preserving original")
+                                        for original in loop_lines:
+                                            write_and_track(output_buffer, original, recent_output_lines)
                                     else:
-                                        write_and_track(output_buffer, f"G1 Z{pass1_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 1/2\n", recent_output_lines)
-                                    
-                                    # Reset E after Z move so extrusion values start fresh
-                                    write_and_track(output_buffer, "G92 E0\n", recent_output_lines)
-                                    
-                                    # Output all extrusion moves with adjusted E values (0.75x height)
-                                    for line in extrusion_moves:
-                                        e_value = extract_e(line)
-                                        if e_value is not None:
-                                            new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
-                                            line = replace_e(line, new_e_value)
-                                        write_and_track(output_buffer, line, recent_output_lines)
-                                    
-                                    # Pass 2: Travel to start, raise Z, print same moves
-                                    write_and_track(output_buffer, "G92 E0 ; Reset extruder for pass 2\n", recent_output_lines)
-                                    write_and_track(output_buffer, f"G1 X{start_x:.3f} Y{start_y:.3f} F8400 ; Travel to start for pass 2\n", recent_output_lines)
-                                    write_and_track(output_buffer, f"G1 Z{pass2_z:.3f} ; Bricklayers base block #{perimeter_block_count}, pass 2/2\n", recent_output_lines)
-                                    
-                                    # Output same extrusion moves again at higher Z
-                                    for line in extrusion_moves:
-                                        e_value = extract_e(line)
-                                        if e_value is not None:
-                                            new_e_value = e_value * 0.75 * bricklayers_extrusion_multiplier
-                                            line = replace_e(line, new_e_value)
-                                        write_and_track(output_buffer, line, recent_output_lines)
-                                    
-                                    # Output non-extrusion commands once (M107, WIDTH, G92, retraction, travel, etc.)
-                                    for cmd in non_extrusion_commands:
-                                        write_and_track(output_buffer, cmd, recent_output_lines)
-                                    
-                                    # Reset Z back to layer height
-                                    write_and_track(output_buffer, f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
-                                    
+                                        start_x, start_y = position['x'], position['y']
+                                        for pass_num, pass_z in enumerate((pass1_z, pass2_z)):
+                                            if pass_num:
+                                                write_and_track(output_buffer,
+                                                    f"G0 X{start_x:.3f} Y{start_y:.3f} F8400 ; Return for Bricklayers pass 2\n",
+                                                    recent_output_lines)
+                                            write_and_track(output_buffer,
+                                                f"G0 Z{pass_z:.3f} ; Bricklayers base pass {pass_num + 1}/2\n",
+                                                recent_output_lines)
+                                            for source_idx, original in extrusion_moves:
+                                                delta = source_e_deltas[source_idx] * 0.75 * bricklayers_extrusion_multiplier
+                                                target_e = delta if source_relative_modes[source_idx] else position['e'] + delta
+                                                write_and_track(output_buffer, replace_e(original, target_e), recent_output_lines)
+
+                                        # Do not repeat travel, fan or pressure controls.
+                                        used_indices = {source_idx for source_idx, _ in extrusion_moves}
+                                        for source_idx, original in zip(loop_indices, loop_lines):
+                                            if source_idx not in used_indices:
+                                                write_and_track(output_buffer, original, recent_output_lines)
+                                        write_and_track(output_buffer,
+                                            f"G1 Z{current_z:.3f} ; Reset Z\n", recent_output_lines)
+
                                     # Mark grid cells as base bricklayer
                                     for x, y in sample_positions:
                                         gx = int(x / grid_resolution)
@@ -4592,12 +4549,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     write_and_track(output_buffer, f"G0 Z{adjusted_z:.3f} ; Bricklayers base block #{perimeter_block_count}\n", recent_output_lines)
                                     #logging.info(f"  [BRICKLAYERS] Layer {current_layer}, Block #{perimeter_block_count}: Base at Z={adjusted_z:.3f} (extrusion: {extrusion_factor}x)")
                                     
-                                    for loop_line in loop_lines:
-                                        if "E" in loop_line:
-                                            e_value = extract_e(loop_line)
-                                            if e_value is not None:
-                                                new_e_value = e_value * extrusion_factor * bricklayers_extrusion_multiplier
-                                                loop_line = replace_e(loop_line, new_e_value)
+                                    for source_idx, loop_line in zip(loop_indices, loop_lines):
+                                        if loop_line.startswith(('G0 ', 'G1 ')) and extract_e(loop_line) is not None:
+                                            delta = source_e_deltas[source_idx]
+                                            if delta > 0:
+                                                delta *= extrusion_factor * bricklayers_extrusion_multiplier
+                                            e = delta if source_relative_modes[source_idx] else position['e'] + delta
+                                            loop_line = replace_e(loop_line, e)
                                         write_and_track(output_buffer, loop_line, recent_output_lines)
                                     
                                     # Reset Z
@@ -4618,6 +4576,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         write_and_track(output_buffer, current_line, recent_output_lines)
                         j += 1
                 
+                if perimeter_block_indices and not source_relative_modes[perimeter_block_indices[-1]]:
+                    write_and_track(output_buffer,
+                        f"G92 E{source_e_targets[perimeter_block_indices[-1]]:.5f} ; Bricklayers E sync\n",
+                        recent_output_lines)
                 continue
         
         # ========== NON-PLANAR INFILL: Process infill with Z modulation ==========
