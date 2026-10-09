@@ -4272,7 +4272,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # Repeating a modal F-only instruction is safe.
                             write_and_track(output_buffer, original, recent_output_lines)
                             continue
-                        delta = source_e_deltas[source_idx] / passes_needed
+                        # Distribute 5-decimal E rounding error to the
+                        # last pass. Three 0.01333mm segments otherwise
+                        # add up to 0.03999 instead of the source's
+                        # 0.04000mm, systematically losing filament.
+                        if pass_num < passes_needed - 1:
+                            delta = round(source_e_deltas[source_idx] / passes_needed, 5)
+                        else:
+                            delta = (source_e_deltas[source_idx]
+                                     - round(source_e_deltas[source_idx] / passes_needed, 5)
+                                     * (passes_needed - 1))
                         e_value = delta if source_relative_modes[source_idx] else position['e'] + delta
                         write_and_track(output_buffer,
                             replace_e(original, e_value), recent_output_lines)
