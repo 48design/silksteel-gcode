@@ -145,10 +145,11 @@ def build_bridge_serpentine(lines, initial_z, initial_e, start_x, start_y,
                 valid = False
                 break
             sign = local_sign
+            # Pick as few intermediate strands as gap coverage permits.
+            # Reconcile endpoint parity over the WHOLE raster below, rather
+            # than forcing two new strands into every individual gap.
             intermediate_count = max(
-                2, math.ceil(perpendicular/max(0.2, extrusion_width*0.52))-1)
-            if intermediate_count % 2:
-                intermediate_count += 1
+                1, math.ceil(perpendicular/max(0.2, extrusion_width*0.52))-1)
             intermediate_count = min(intermediate_count, 8)
             gaps.append((between, intermediate_count))
 
@@ -157,90 +158,118 @@ def build_bridge_serpentine(lines, initial_z, initial_e, start_x, start_y,
             run = []
             return
 
+        # The entire raster must end at the source endpoint, otherwise the
+        # following source G-code can start at the wrong XY. Alternating
+        # directions means TOTAL added-strand count must be even. Add just
+        # ONE strand to the widest gap when parity requires it.
+        if sum(extra for _, extra in gaps) % 2:
+            widest = max(range(len(gaps)), key=lambda index: gaps[index][1])
+            between, extra = gaps[widest]
+            if extra >= 8:
+                emit_unmodified(raster + suffix)
+                run = []
+                return
+            gaps[widest] = (between, extra + 1)
+
         # Convert only the validated raster, keeping every original long
         # extrusion delta. For M82 a G92 restores the source E coordinate;
         # M83 correctly accumulates the extra interior material.
         if not mode:
             result.append('M83 ; Bridge serpentine temporary relative E\n')
 
-        for i, stroke in enumerate(strokes):
-            if i:
-                previous = strokes[i-1]
-                between, k = gaps[i-1]
-                for node in between:
-                    if node['kind'] == 'metadata':
-                        result.append(node['line'])
+        first_stroke = strokes[0]
+        position = first_stroke['b']
+        result.append(
+            f'G1 X{position[0]:.3f} Y{position[1]:.3f} '
+            f'E{first_stroke["de"]:.5f} F{first_stroke["f"] or 1800:g} '
+            '; Bridge serpentine original strand\n')
+        if mode:
+            actual_e += first_stroke['de']
 
-                original_turn_e = sum(
-                    node['de'] for node in between
-                    if node['kind'] == 'connector')
-                p_a, p_b = previous['a'], previous['b']
-                right_a, right_b = stroke['a'], stroke['b']
-                waypoints = []
-                last_point = p_b
-                for j in range(1, k+2):
-                    t = j/(k+1)
-                    near = (p_b[0]*(1-t)+right_a[0]*t,
-                            p_b[1]*(1-t)+right_a[1]*t)
-                    far = (p_a[0]*(1-t)+right_b[0]*t,
-                           p_a[1]*(1-t)+right_b[1]*t)
-                    entry = near if j % 2 else far
-                    dest = far if j % 2 else near
-                    waypoints.append((last_point, entry))
-                    last_point = dest
+        for i in range(1, len(strokes)):
+            previous, current = strokes[i-1], strokes[i]
+            between, k = gaps[i-1]
+            for node in between:
+                if node['kind'] == 'metadata':
+                    result.append(node['line'])
+            original_turn_e = sum(
+                node['de'] for node in between if node['kind'] == 'connector')
 
-                lengths = [math.hypot(b[0]-a[0], b[1]-a[1])
-                           for a,b in waypoints]
-                total_length = sum(lengths)
-                remaining = original_turn_e
+            # Plan a complete alternating raster through both the original
+            # long strokes and however many interior strands are required.
+            # Some original strokes reverse direction; their E delta is
+            # unchanged, unlike the original absolute E coordinate.
+            lanes = []
+            for j in range(1, k+1):
+                t = j/(k+1)
+                a = (previous['a'][0]*(1-t)+current['b'][0]*t,
+                     previous['a'][1]*(1-t)+current['b'][1]*t)
+                b = (previous['b'][0]*(1-t)+current['a'][0]*t,
+                     previous['b'][1]*(1-t)+current['a'][1]*t)
+                length = math.hypot(b[0]-a[0], b[1]-a[1])
+                per_mm = (previous['de']/previous['length'] +
+                          current['de']/current['length'])/2
+                lanes.append((a, b, round(length*per_mm*flow_fraction, 5),
+                              True))
+            lanes.append((current['a'], current['b'], current['de'], False))
 
-                for j in range(1, k+2):
-                    a, b = waypoints[j-1]
-                    turnlength = lengths[j-1]
-                    bridge_f = max(60, int((stroke['f'] or 1800)*slowdown))
-                    if turnlength > 0.0005:
-                        part_e = (round(original_turn_e*turnlength/total_length, 5)
-                                  if j < k+1 and total_length else remaining)
-                        remaining -= part_e
-                        if part_e > 0:
-                            result.append(
-                                f'G1 X{b[0]:.3f} Y{b[1]:.3f} E{part_e:.5f} '
-                                f'F{bridge_f} ; Bridge serpentine U-turn\n')
-                            if mode:
-                                actual_e += part_e
-                        else:
-                            result.append(
-                                f'G0 X{b[0]:.3f} Y{b[1]:.3f} F8400 '
-                                '; Bridge serpentine short transition\n')
+            planned = []
+            for a, b, volume, is_new in lanes:
+                if math.hypot(position[0]-a[0], position[1]-a[1]) <= \
+                   math.hypot(position[0]-b[0], position[1]-b[1]):
+                    entry, exit_point = a, b
+                else:
+                    entry, exit_point = b, a
+                planned.append((position, entry, exit_point, volume, is_new))
+                position = exit_point
 
-                    if j <= k:
-                        t = j/(k+1)
-                        mid_a = (p_a[0]*(1-t)+right_b[0]*t,
-                                 p_a[1]*(1-t)+right_b[1]*t)
-                        mid_b = (p_b[0]*(1-t)+right_a[0]*t,
-                                 p_b[1]*(1-t)+right_a[1]*t)
-                        dest = mid_a if j%2 else mid_b
-                        length = math.hypot(dest[0]-b[0], dest[1]-b[1])
-                        per_mm = (
-                            previous['de']/previous['length'] +
-                            stroke['de']/stroke['length']
-                        )/2
-                        extra = round(length*per_mm*flow_fraction, 5)
+            turnlengths = [
+                math.hypot(entry[0]-start_point[0],
+                           entry[1]-start_point[1])
+                for start_point, entry, _, _, _ in planned
+            ]
+            total_turn_length = sum(turnlengths)
+            remaining_turn_e = original_turn_e
+
+            for j, (start_point, entry, exit_point, volume, is_new) in \
+                    enumerate(planned):
+                bridge_f = max(60, int((current['f'] or 1800)*slowdown))
+                turnlength = turnlengths[j]
+                if turnlength > 0.0005:
+                    turn_e = (round(original_turn_e * turnlength /
+                                    total_turn_length, 5)
+                              if j < len(planned)-1 and total_turn_length
+                              else remaining_turn_e)
+                    remaining_turn_e -= turn_e
+                    if turn_e > 0:
                         result.append(
-                            f'G1 X{dest[0]:.3f} Y{dest[1]:.3f} '
-                            f'E{extra:.5f} F{bridge_f} '
-                            '; Bridge serpentine intermediate\n')
+                            f'G1 X{entry[0]:.3f} Y{entry[1]:.3f} '
+                            f'E{turn_e:.5f} F{bridge_f} '
+                            '; Bridge serpentine U-turn\n')
                         if mode:
-                            actual_e += extra
-                        count += 1
+                            actual_e += turn_e
+                    else:
+                        result.append(
+                            f'G0 X{entry[0]:.3f} Y{entry[1]:.3f} F8400 '
+                            '; Bridge serpentine short transition\n')
 
-            end = stroke['b']
-            result.append(
-                f'G1 X{end[0]:.3f} Y{end[1]:.3f} '
-                f'E{stroke["de"]:.5f} F{stroke["f"] or 1800:g} '
-                '; Bridge serpentine original strand\n')
-            if mode:
-                actual_e += stroke['de']
+                print_f = bridge_f if is_new else (current['f'] or 1800)
+                label = 'intermediate' if is_new else 'original strand'
+                result.append(
+                    f'G1 X{exit_point[0]:.3f} Y{exit_point[1]:.3f} '
+                    f'E{volume:.5f} F{print_f:g} '
+                    f'; Bridge serpentine {label}\n')
+                if mode:
+                    actual_e += volume
+                if is_new:
+                    count += 1
+
+        # Never allow a planned raster to leave the printer at an
+        # unintended source endpoint. Stop instead of generating a long
+        # return travel or silently corrupting the next move.
+        if math.hypot(position[0]-strokes[-1]['b'][0],
+                      position[1]-strokes[-1]['b'][1]) > 0.002:
+            raise ValueError('Bridge serpentine endpoint parity mismatch')
 
         if not mode:
             result.append('M82 ; Bridge serpentine restore M82\n')
