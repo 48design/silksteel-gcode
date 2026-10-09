@@ -4119,7 +4119,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             while i < len(lines):
                 current_line = lines[i]
                 # Stop at layer boundary to prevent crossing layers
-                if ";LAYER_CHANGE" in current_line:
+                if ";LAYER_CHANGE" in current_line or re.match(r'^;LAYER:\\d+', current_line):
                     break
                 
                 # Stop at different type marker (this is the real end of external perimeter block)
@@ -4212,7 +4212,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             for source_idx, original in zip(external_block_indices, external_block_lines):
                 code = original.split(';', 1)[0].strip()
                 if not code:
-                    if path_lines:
+                    if ';WIPE' in original.upper():
+                        # Wipe state must start/end at its original point,
+                        # not inside each repeated outer-wall pass.
+                        flush_outer_path()
+                        write_and_track(output_buffer, original, recent_output_lines)
+                    elif path_lines:
                         path_lines.append(original)
                         path_indices.append(source_idx)
                     else:
