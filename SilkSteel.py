@@ -3374,6 +3374,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     annotated_lines = []
     current_type = None
     orphans_found = 0
+    # The input may use M83 (relative E); a rising absolute E coordinate
+    # is not evidence of extrusion. Detect actual positive source deltas.
+    orphan_e_deltas, _, _ = scan_source_extrusion(lines)
+    orphan_scanned_through = -1
     i = 0
     
     while i < len(lines):
@@ -3389,14 +3393,23 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         
         # Check for potential orphan: extrusion NOT in an external perimeter block
         # ALSO exclude solid infill (can have similar characteristics but shouldn't be smoothified)
-        if (current_type != ";TYPE:External perimeter" and 
-            current_type != ";TYPE:Outer wall" and
-            current_type != ";TYPE:Overhang perimeter" and
-            current_type != ";TYPE:Solid infill" and  # EXCLUDE solid infill!
-            current_type != ";TYPE:Bridge infill" and  # EXCLUDE bridge infill!
-            current_type != ";TYPE:Internal bridge infill" and  # EXCLUDE internal bridge infill!
-            line.startswith("G1") and 
-            "X" in line and "Y" in line and "E" in line):
+        # Never guess that a slicer-labelled internal wall, infill, bridge,
+        # gap fill or support is an outside contour. Only consider an
+        # unlabeled/unknown feature whose geometry looks like a perimeter.
+        recognized_nonouter = (current_type is not None and any(
+            name in current_type for name in (
+                ";TYPE:Internal perimeter", ";TYPE:Inner wall",
+                ";TYPE:Perimeter", ";TYPE:Solid infill",
+                ";TYPE:Top solid infill", ";TYPE:Internal infill",
+                ";TYPE:Bridge infill", ";TYPE:Internal bridge infill",
+                ";TYPE:Gap fill", ";TYPE:Support", ";TYPE:Skirt", ";TYPE:Brim",
+                ";TYPE:Ironing", ";TYPE:External perimeter", ";TYPE:Outer wall",
+                ";TYPE:Overhang perimeter",
+            )))
+        if (not recognized_nonouter and i > orphan_scanned_through
+            and re.match(r'^G1(?:\\s|$)', line)
+            and extract_x(line) is not None and extract_y(line) is not None
+            and orphan_e_deltas[i] > 0):
             
             # Look back to see if there was a recent travel move (high F value, no E)
             # AND check what TYPE was active BEFORE the travel (to avoid catching infill continuations)
@@ -3423,27 +3436,36 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             # Collect the extrusion path to analyze
             if recent_travel:
                 candidate_path = []
-                e_values = []
                 j = i
-                while j < len(lines) and len(candidate_path) < 100:
+                path_x = None
+                path_y = None
+                # Large round objects can have far more than 100 G1
+                # segments before closing. A 100-segment prefix looks open
+                # even when the complete perimeter is a closed loop.
+                while j < len(lines) and len(candidate_path) < 20000:
                     check_line = lines[j]
-                    
-                    if ";TYPE:" in check_line:
+                    if ";TYPE:" in check_line or ";LAYER_CHANGE" in check_line or check_line.startswith(";LAYER:"):
                         break
-                    if ";LAYER_CHANGE" in check_line:
+                    code = check_line.split(';', 1)[0].strip()
+                    if not code:
+                        j += 1
+                        continue
+                    if not re.match(r'^G1(?:\\s|$)', code):
                         break
-                    
-                    if "G1" in check_line and "X" in check_line and "Y" in check_line and "E" in check_line:
-                        params = parse_gcode_line(check_line)
-                        if params['x'] is not None and params['y'] is not None and params['e'] is not None:
-                            candidate_path.append((params['x'], params['y']))
-                            e_values.append(params['e'])
-                    else:
-                        # Non-extrusion move, stop collecting
+                    params = parse_gcode_line(code)
+                    if (params['e'] is None or orphan_e_deltas[j] <= 0 or
+                            (params['x'] is None and params['y'] is None)):
                         break
-                    
+                    if params['x'] is not None:
+                        path_x = params['x']
+                    if params['y'] is not None:
+                        path_y = params['y']
+                    if path_x is None or path_y is None:
+                        break
+                    candidate_path.append((path_x, path_y))
                     j += 1
-                
+                orphan_scanned_through = max(orphan_scanned_through, j - 1)
+
                 # Analyze if this looks like an external perimeter:
                 # 1. Has at least 10 points (substantial path)
                 # 2. E values continuously increase (no retractions)
@@ -3451,9 +3473,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 # 4. Has sufficient direction changes (not a straight line)
                 #    Note: Some perimeters are open paths, so we use a generous threshold
                 is_likely_perimeter = False
-                if len(candidate_path) >= 10 and len(e_values) >= 10:
-                    # Check E continuously increases
-                    e_increasing = all(e_values[k+1] >= e_values[k] for k in range(len(e_values)-1))
+                if len(candidate_path) >= 10:
+                    # Each line has a positive E delta, including in M83.
+                    e_increasing = True
                     
                     # Check if closed or nearly-closed loop
                     first_xy = candidate_path[0]
