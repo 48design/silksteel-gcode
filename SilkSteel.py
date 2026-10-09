@@ -4694,10 +4694,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         if cell_key in solid_at_grid:
                                             solid_at_grid[cell_key]['bricklayer_type'] = 'base'
                                 else:
-                                    # Non-base layers: Single pass at Z + 0.5h (sits on previous layer's shifted block)
-                                    # On top layers, use 0.75x height for flat top
-                                    z_shift_adjusted = z_shift * 0.75 if is_top_layer else z_shift
-                                    adjusted_z = current_z + z_shift_adjusted
+                                    # Normal (unshifted) half of the brick bond:
+                                    # keep this inner wall at the slicer's layer Z.
+                                    # The adjacent shifted wall is already
+                                    # extruded at Z + 0.5h (or +0.25h next
+                                    # to a solid roof). Using Z + 0.5h here
+                                    # too made BOTH roles coincide and erased
+                                    # the visible stagger despite correct
+                                    # Bricklayers marker counts.
+                                    adjusted_z = current_z
                                     extrusion_factor = 1.0
                                     
                                     # Track actual max Z for this layer (for safe Z-hop)
