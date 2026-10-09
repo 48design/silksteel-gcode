@@ -111,8 +111,8 @@ Densifies validated bridge raster gaps using **continuous serpentine toolpaths**
 
 **Example:**
 ```bash
-python SilkSteel.py input.gcode -enableBridgeDensifier
-python SilkSteel.py input.gcode -enableBridgeDensifier -enableInternalBridgeDensifier
+python SilkSteel.py input.gcode -o bridge_test.gcode -enableBridgeDensifier
+python SilkSteel.py input.gcode -o bridge_internal_test.gcode -enableBridgeDensifier -enableInternalBridgeDensifier
 ```
 
 **Caution:** Still experimental and **not enabled by `-full`**. Additional bridge extrusion changes the amount of deposited material. Inspect the exact modified regions in a G-code viewer and validate with a short test print, especially when processing internal bridges. The internal opt-in can increase extrusion significantly in otherwise supported regions.
