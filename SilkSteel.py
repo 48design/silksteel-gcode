@@ -4249,18 +4249,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 entry_x = position['x']
                 entry_y = position['y']
                 
-                # Look back to find the last E value before this TYPE comment (not a retraction)
-                pre_block_e_value = None
-                for back_idx in range(i - 2, max(0, i - 10), -1):
-                    back_line = lines[back_idx]
-                    # Track last E value before the block (not a retraction)
-                    if pre_block_e_value is None and back_line.startswith("G1") and "E" in back_line and "E-" not in back_line:
-                        e_match = re.search(r'E([-\d.]+)', back_line)
-                        if e_match:
-                            pre_block_e_value = float(e_match.group(1))
-                
                 # Collect the entire perimeter block
                 perimeter_block_lines = []
+                perimeter_block_indices = []
                 
                 while i < len(lines):
                     current_line = lines[i]
@@ -4279,8 +4270,21 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         break
                     
                     perimeter_block_lines.append(current_line)
+                    perimeter_block_indices.append(i)
                     i += 1
                 
+                # Mode resets and E-only retracts must not be replayed in a multi-pass block.
+                if any(
+                    b.strip().startswith(('G92', 'M82', 'M83')) or
+                    (b.startswith(('G0 ', 'G1 ')) and extract_e(b) is not None
+                     and extract_x(b) is None and extract_y(b) is None)
+                    for b in perimeter_block_lines
+                ):
+                    logging.warning("Preserving Bricklayers block with retractions or E-mode changes")
+                    for original in perimeter_block_lines:
+                        write_and_track(output_buffer, original, recent_output_lines)
+                    continue
+
                 # Now process the collected block
                 # Split into individual perimeter loops (separated by travel moves)
                 j = 0
@@ -4312,8 +4316,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             block_travel_y = entry_y
                         
                         # Collect this perimeter loop first
-                        loop_lines = []
-                        loop_lines.append(current_line)
+                        loop_lines = [current_line]
+                        loop_indices = [perimeter_block_indices[j]]
                         j += 1
                         
                         # Continue until travel move (no E) or end
@@ -4322,9 +4326,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             if line.startswith("G1") and "X" in line and "Y" in line and "F" in line and "E" not in line:
                                 # Travel move - end of this loop
                                 loop_lines.append(line)
+                                loop_indices.append(perimeter_block_indices[j])
                                 j += 1
                                 break
                             loop_lines.append(line)
+                            loop_indices.append(perimeter_block_indices[j])
                             j += 1
                         
                         # Detect if this layer is a base or top of a solid region
