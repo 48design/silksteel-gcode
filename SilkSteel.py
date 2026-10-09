@@ -2866,7 +2866,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 write_and_track(output_buffer, generated_line, recent_output_lines)
             if (math.hypot(position['x'] - final_xy[0], position['y'] - final_xy[1]) > 0.002
                 or abs(position['e'] - final_e) > 0.0001):
-                logging.error("Bridge Densifier output E/XY mismatch; inspect section before printing")
+                raise ValueError(
+                    "Bridge Densifier state mismatch: "
+                    f"expected E={final_e:.5f} XY={final_xy}; "
+                    f"output E={position['e']:.5f} XY=({position['x']:.3f},{position['y']:.3f}); "
+                    f"input bridge start E={bridge_start_e:.5f} XY=({bridge_start_x:.3f},{bridge_start_y:.3f})"
+                )
             current_e = position['e']
         bridge_buffer = []
         in_bridge_section = False
