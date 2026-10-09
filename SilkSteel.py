@@ -4185,7 +4185,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
 
                     for source_idx, original in zip(path_indices, path_lines):
                         code = original.split(';', 1)[0].strip()
-                        if not re.match(r'^G0?[01](?:\\s|$)', code):
+                        if not re.match(r'^G0?[01](?:\s|$)', code):
                             # Comments are metadata, not repeated commands.
                             if pass_num == 0:
                                 write_and_track(output_buffer, original, recent_output_lines)
@@ -4219,7 +4219,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         write_and_track(output_buffer, original, recent_output_lines)
                     continue
 
-                is_move = re.match(r'^G0?[01](?:\\s|$)', code) is not None
+                is_move = re.match(r'^G0?[01](?:\s|$)', code) is not None
                 params = parse_gcode_line(code) if is_move else None
                 has_xy = is_move and (params['x'] is not None or params['y'] is not None)
                 delta = source_e_deltas[source_idx]
