@@ -2441,7 +2441,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     
     # Bricklayers variables
     perimeter_block_count = 0
-    bricklayers_preserved_count = 0  # Unsupported pressure/mode changes; passed through unchanged
+    bricklayers_preserved_count = 0  # Legacy field; no longer skips whole TYPE blocks
+    bricklayers_unstackable_count = 0
     is_shifted = False
     
     # Non-planar infill variables
@@ -4395,20 +4396,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     perimeter_block_indices.append(i)
                     i += 1
                 
-                # Mode resets and E-only retracts must not be replayed in a multi-pass block.
-                if any(
-                    b.strip().startswith(('G92', 'M82', 'M83')) or
-                    (b.startswith(('G0 ', 'G1 ')) and extract_e(b) is not None
-                     and extract_x(b) is None and extract_y(b) is None)
-                    for b in perimeter_block_lines
-                ):
-                    bricklayers_preserved_count += 1
-                    if debug >= 2:
-                        logging.info("Bricklayers: preserved original block at layer %d, input line %d (retract / E-mode change)",
-                                     current_layer, perimeter_block_indices[0] + 1 if perimeter_block_indices else i)
-                    for original in perimeter_block_lines:
-                        write_and_track(output_buffer, original, recent_output_lines)
-                    continue
+                # Pressure changes (G92 / M82 / M83 / retracts / primes) may
+                # occur between contours in the SAME ;TYPE:Internal perimeter
+                # section. They are not a reason to discard the whole block.
+                # The contour collector below stops before every pressure or
+                # travel barrier; each such command is emitted exactly once.
 
                 # Now process the collected block
                 # Split into individual perimeter loops (separated by travel moves)
@@ -4417,7 +4409,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     current_line = perimeter_block_lines[j]
                     
                     # Detect start of perimeter block (extrusion move)
-                    if current_line.startswith("G1") and "X" in current_line and "Y" in current_line and "E" in current_line:
+                    if (re.match(r'^G0?[01](?:\s|$)', current_line) and
+                            (extract_x(current_line) is not None or extract_y(current_line) is not None) and
+                            source_e_deltas[perimeter_block_indices[j]] > 0 and
+                            extract_z(current_line) is None):
                         perimeter_block_count += 1
                         
                         # Look back within perimeter_block_lines to find travel position for THIS block
@@ -4445,21 +4440,31 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         loop_indices = [perimeter_block_indices[j]]
                         j += 1
                         
-                        # Continue until travel move (no E) or end
+                        # Collect only a positive-extrusion contour. Retractions,
+                        # travel, G92, mode changes, Z moves, fan/pressure
+                        # commands are barriers executed ONCE in original order.
+                        # Status messages can be carried through unchanged.
                         while j < len(perimeter_block_lines):
-                            line = perimeter_block_lines[j]
-                            if (line.startswith(('G0 ', 'G1 ')) and
-                                    (extract_x(line) is not None or extract_y(line) is not None) and
-                                    extract_e(line) is None):
-                                # Travel move (including G0) ends this loop
-                                loop_lines.append(line)
-                                loop_indices.append(perimeter_block_indices[j])
+                            part = perimeter_block_lines[j]
+                            part_idx = perimeter_block_indices[j]
+                            code = part.split(';', 1)[0].strip()
+                            if not code or re.match(r'^M(?:117|73)(?:\s|$)', code):
+                                loop_lines.append(part)
+                                loop_indices.append(part_idx)
                                 j += 1
+                                continue
+                            is_xy_extrusion = (
+                                re.match(r'^G0?[01](?:\s|$)', code) and
+                                (extract_x(code) is not None or extract_y(code) is not None) and
+                                extract_z(code) is None and
+                                source_e_deltas[part_idx] > 0
+                            )
+                            if not is_xy_extrusion:
                                 break
-                            loop_lines.append(line)
-                            loop_indices.append(perimeter_block_indices[j])
+                            loop_lines.append(part)
+                            loop_indices.append(part_idx)
                             j += 1
-                        
+
                         # Detect if this layer is a base or top of a solid region
                         # Sample along the actual perimeter path to check what's above
                         is_base_layer = False
@@ -4493,6 +4498,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # Output as regular internal perimeter (no bricklayers modification)
                             for loop_line in loop_lines:
                                 write_and_track(output_buffer, loop_line, recent_output_lines)
+                            bricklayers_unstackable_count += 1
                             perimeter_block_count += 1
                             # Don't use continue here - it would loop forever!
                             # Just move to next j and let the loop continue naturally
@@ -4696,11 +4702,29 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         if cell_key in solid_at_grid:
                                             solid_at_grid[cell_key]['bricklayer_type'] = 'base'
                             
+                            # Rebase to the slicer's E coordinates BEFORE
+                            # any original retract/prime is executed. Base
+                            # contours can intentionally extrude 1.5x, and
+                            # shifted contours may use reduced E on top
+                            # faces. Neither must corrupt the next E-only
+                            # command in absolute mode.
+                            last_idx = loop_indices[-1]
+                            if not source_relative_modes[last_idx]:
+                                write_and_track(output_buffer,
+                                    f"G92 E{source_e_targets[last_idx]:.5f} ; Bricklayers contour E sync\n",
+                                    recent_output_lines)
                             perimeter_block_count += 1
-                    
+
                     else:
-                        # Non-extrusion line (comments, etc)
+                        # Travel, retract, prime, G92 and modal commands
+                        # must remain in source order and execute once.
                         write_and_track(output_buffer, current_line, recent_output_lines)
+                        code = current_line.split(';', 1)[0].strip()
+                        if re.match(r'^G0?[01](?:\s|$)', code):
+                            z = parse_gcode_line(code)['z']
+                            if z is not None:
+                                current_z = z
+                                working_z = z
                         j += 1
                 
                 if perimeter_block_indices and not source_relative_modes[perimeter_block_indices[-1]]:
@@ -5466,9 +5490,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         # If debug or counter not defined (shouldn't happen), skip
         pass
     
-    if bricklayers_preserved_count:
-        logging.info("Bricklayers: safely preserved %d sections containing retracts or E-mode changes",
-                     bricklayers_preserved_count)
+    if enable_bricklayers:
+        logging.info("Bricklayers: %d contours skipped because no matching internal perimeter above",
+                     bricklayers_unstackable_count)
 
     # Print summary to console
     print("\n" + "=" * 85)
