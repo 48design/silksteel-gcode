@@ -1292,26 +1292,26 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
     # A relative-XY bridge cannot be safely interpolated using absolute
     # endpoints. Leave it entirely untouched until a modal XY parser is
     # implemented.
-    if any(re.match(r'^G91(?:\\s|$)', line.split(';', 1)[0].strip())
+    if any(re.match(r'^G91(?:\s|$)', line.split(';', 1)[0].strip())
            for line in buffered_lines):
         return list(buffered_lines), current_e, (start_x, start_y)
 
     for line in buffered_lines:
         code = line.split(';', 1)[0].strip()
 
-        if re.match(r'^M83(?:\\s|$)', code):
+        if re.match(r'^M83(?:\s|$)', code):
             relative_e = True
             previous_long = None
-        elif re.match(r'^M82(?:\\s|$)', code):
+        elif re.match(r'^M82(?:\s|$)', code):
             relative_e = False
             previous_long = None
-        elif re.match(r'^G92(?:\\s|$)', code):
+        elif re.match(r'^G92(?:\s|$)', code):
             reset = parse_gcode_line(code)['e']
             if reset is not None:
                 pe = reset
             previous_long = None
 
-        is_motion = re.match(r'^G0?[01](?:\\s|$)', code) is not None
+        is_motion = re.match(r'^G0?[01](?:\s|$)', code) is not None
         if not is_motion:
             output.append(line)
             continue
