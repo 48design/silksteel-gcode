@@ -59,6 +59,55 @@ class GCodeSafetyTests(unittest.TestCase):
             with open(dst, encoding="utf-8") as stream:
                 return stream.read()
 
+    def test_smoothificator_retract_does_not_skip_whole_outer_wall(self):
+        # One TYPE section can contain multiple walls with retracts between
+        # them. Both walls must receive 3 thinner passes, but pressure
+        # changes and the inter-wall travel must occur exactly once.
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                lines = [
+                    "; layer_height = 0.28", "; first_layer_height = 0.2",
+                    "; extrusion_width = 0.45", "G90",
+                    "M83" if relative else "M82",
+                ]
+                for layer, z in enumerate((0.2, 0.48)):
+                    lines += [
+                        ";LAYER_CHANGE", f";Z:{z}", f";HEIGHT:{0.2 if layer == 0 else 0.28}",
+                        f";LAYER:{layer}", f"G1 Z{z} F1200",
+                        "G92 E0" if relative else "G92 E100",
+                        ";TYPE:External perimeter", "G0 X0 Y0 F8400",
+                    ]
+                    if relative:
+                        lines += [
+                            "G1 X10 Y0 E0.5 F1200", "G1 X10 Y10 E0.5",
+                            "G1 E-0.8 F1800", "G0 X20 Y0 F8400",
+                            "G1 E0.8 F1800", "G1 X30 Y0 E0.5 F1200",
+                            "G1 X30 Y10 E0.5",
+                        ]
+                    else:
+                        lines += [
+                            "G1 X10 Y0 E100.5 F1200", "G1 X10 Y10 E101.0",
+                            "G1 E100.2 F1800", "G0 X20 Y0 F8400",
+                            "G1 E101.0 F1800", "G1 X30 Y0 E101.5 F1200",
+                            "G1 X30 Y10 E102.0",
+                        ]
+                    lines.append(";TYPE:Solid infill")
+
+                output = self.process("\n".join(lines) + "\n",
+                                      enable_smoothificator=True)
+                layer2 = output.split(";LAYER:1")[-1]
+                self.assertEqual(layer2.count("SMOOTHIFICATOR START: 3 passes"), 2)
+                self.assertEqual(layer2.count("G0 X20 Y0 F8400"), 1)
+                self.assertEqual(layer2.count("G1 E-0.8 F1800" if relative else "G1 E100.2 F1800"), 1)
+                self.assertEqual(layer2.count("G1 E0.8 F1800" if relative else "G1 E101.0 F1800"), 1)
+                # Source has 2mm of deposited filament across 4 XY moves.
+                # The 3 passes must preserve the same total XY extrusion.
+                deltas, _, _ = silk.scan_source_extrusion(layer2.splitlines())
+                wall_e = sum(delta for line, delta in zip(layer2.splitlines(), deltas)
+                             if line.startswith("G1 ") and silk.extract_x(line) is not None
+                             and silk.extract_e(line) is not None and delta > 0)
+                self.assertAlmostEqual(wall_e, 2.0, places=3)
+
     def test_zhop_drops_before_z_bearing_nonplanar_extrusion(self):
         # Regression: G1 X/Y/Z/E moves all axes simultaneously. A segment's
         # explicit Z must NOT cancel a pending hop without a separate Z drop.
