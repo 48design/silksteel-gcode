@@ -92,6 +92,12 @@ class GCodeSafetyTests(unittest.TestCase):
                             e = 0.4 if relative else current_e
                             lines.append(f"G1 X{x} Y{y} E{e:.5f} F1200")
                             lines.append("M117 Printing")
+                            # Fan commands are interspersed by SuperSlicer
+                            # even in one uninterrupted extrusion loop.
+                            if x == x0+10 and y == 10:
+                                lines.append("M107")
+                            if x == x0 and y == 10:
+                                lines.append("M106 S63.75")
                     lines += [
                         ";TYPE:Internal infill", "G0 X3 Y5 F8400",
                         "G1 X7 Y5 E0.4 F1500",
@@ -107,6 +113,8 @@ class GCodeSafetyTests(unittest.TestCase):
                               else "Bricklayers base pass", output)
                 self.assertEqual(output.count("G1 E-1.00000 F3900"), 8)
                 self.assertEqual(output.count("M117 Printing"), 4 * 2 * 4)
+                self.assertEqual(output.count("M107"), 8)
+                self.assertEqual(output.count("M106 S63.75"), 8)
 
     def test_implicit_external_perimeter_across_layer_boundary(self):
         # Reproduces the actual slicer pattern at layer 40: the previous
