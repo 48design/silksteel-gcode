@@ -8,6 +8,7 @@ import unittest
 
 import SilkSteel as silk
 from tools import audit_outer_walls as wall_audit
+from tools import audit_feature_layers as feature_audit
 
 
 def fixture(relative=False):
@@ -276,6 +277,24 @@ class GCodeSafetyTests(unittest.TestCase):
         smoothed = [r for r in runs if r["layer"] == 2 and
                     "External perimeter" in r["type"] and r["smoothed"]]
         self.assertTrue(smoothed, "Audit must recognize transformed paths")
+
+    def test_feature_audit_reports_carried_type_and_bricks(self):
+        lines = [
+            ";LAYER_CHANGE", ";Z:0.28", ";HEIGHT:0.28", ";LAYER:40",
+            "; SilkSteel: CONTINUED across layer boundary",
+            ";TYPE:External perimeter", "G1 Z0.28 F8400",
+            "G1 X2 Y3 E0.1", ";TYPE:Internal perimeter",
+            "G0 Z0.42 ; Bricklayers shifted block #1",
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "post.gcode")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("\\n".join(lines) + "\\n")
+            found = feature_audit.audit(path)[40]
+        self.assertEqual(found["first_extrusion_type"], "External perimeter")
+        self.assertEqual(found["counts"]["carried_outer"], 1)
+        self.assertEqual(found["counts"]["brick_shifted"], 1)
+        self.assertEqual(found["counts"]["unrecognized_type_comments"], 0)
 
     def test_cli_has_no_interactive_enter_pause(self):
         # Slicer post-processors must never wait for keyboard interaction.
