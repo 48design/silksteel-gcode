@@ -539,6 +539,74 @@ class GCodeSafetyTests(unittest.TestCase):
                               amplitude=0.2, frequency=6)
         self.assertIn("G1 X0 Y5 E0.25 F800", output)
 
+    def test_bridge_densifier_preserves_original_commands_and_e_modes(self):
+        # Opposed parallel bridge strands, short connecting extrusion,
+        # one original retract and a trailing position reset.
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                source_lines = [
+                    ";TYPE:Bridge infill\n",
+                    "G1 X10 Y0 E1.00000 F1500\n",
+                    f"G1 X10 Y0.4 E{0.05 if relative else 1.05:.5f}\n",
+                    f"G1 X0 Y0.4 E{1.00 if relative else 2.05:.5f}\n",
+                    f"G1 E{-0.3 if relative else 1.75:.5f} F3900\n",
+                    "G92 E0\n",
+                    "G0 X0 Y1 F8400\n",
+                ]
+                result, end_e, end_xy = silk.process_bridge_section(
+                    source_lines, 0.4, 0.0, 0.0, 0.0, 0.9,
+                    silk.logging, initial_relative=relative)
+                full_output = "".join(result)
+                self.assertEqual(full_output.count("Bridge intermediate extrusion"), 1)
+                self.assertEqual(full_output.count("G1 E-0.30000 F3900")
+                                 if relative else
+                                 full_output.count("G1 E1.75000 F3900"), 1)
+                self.assertEqual(end_xy, (0.0, 1.0))
+                self.assertAlmostEqual(end_e, 0.0)
+                if relative:
+                    self.assertNotIn("M82 ; Bridge Densifier", full_output)
+                    self.assertNotIn("G92 E2.05000 ; Bridge Densifier E sync",
+                                     full_output)
+                else:
+                    self.assertIn("M83 ; Bridge Densifier temporary relative E",
+                                  full_output)
+                    self.assertIn("M82 ; Bridge Densifier restore absolute E",
+                                  full_output)
+                    self.assertIn("G92 E2.05000 ; Bridge Densifier E sync",
+                                  full_output)
+                # Every input line must still appear, exactly once and in
+                # its source order. No retraction may be fabricated/duplicated.
+                cursor = 0
+                for original in source_lines:
+                    location = full_output.find(original, cursor)
+                    self.assertGreaterEqual(location, 0, original)
+                    cursor = location + len(original)
+
+                prefix = ["M83\n" if relative else "M82\n"]
+                deltas, targets, modes = silk.scan_source_extrusion(
+                    prefix + result)
+                extra = [d for line, d in zip(result, deltas[1:])
+                         if "Bridge intermediate extrusion" in line]
+                self.assertEqual(len(extra), 1)
+                self.assertGreater(extra[0], 0.0)
+                # Original 2.05mm + added bridge minus 0.30 retract.
+                self.assertAlmostEqual(sum(deltas), 1.75 + extra[0], places=4)
+                self.assertAlmostEqual(targets[-1], 0.0)
+                self.assertEqual(modes[-1], relative)
+
+    def test_bridge_densifier_no_parallel_pair_passthrough(self):
+        original = [
+            ";TYPE:Bridge infill\n",
+            "G1 X8 Y0 E0.8 F1500\n",
+            "G1 X8 Y8 E1.6\n",
+            "G1 E1.4 F3900\n",
+        ]
+        result, end_e, xy = silk.process_bridge_section(
+            original, 0.4, 0.0, 0.0, 0.0, 0.9, silk.logging)
+        self.assertEqual(result, original)
+        self.assertAlmostEqual(end_e, 1.4)
+        self.assertEqual(xy, (8.0, 8.0))
+
     def test_relative_bridge_densifier_is_safely_skipped(self):
         source = fixture(relative=True).replace(
             ";TYPE:Solid infill", ";TYPE:Bridge infill")
