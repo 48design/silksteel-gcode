@@ -2355,11 +2355,22 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     print("   (Or tea, if that's your thing. We don't judge.)")
     print()
     
-    # Validate outer layer height
-    if outer_layer_height <= 0:
+    # Validate user-supplied parameters before generating machine motion.
+    if not math.isfinite(float(outer_layer_height)) or outer_layer_height <= 0:
         logging.error(f"Outer layer height ({outer_layer_height}mm) must be greater than 0")
         sys.exit(1)
     
+    if not math.isfinite(float(segment_length)) or segment_length <= 0:
+        raise ValueError("segment_length must be a finite positive number")
+    if not math.isfinite(float(nonplanar_feedrate_multiplier)) or nonplanar_feedrate_multiplier <= 0:
+        raise ValueError("nonplanar_feedrate_multiplier must be finite and positive")
+    if not math.isfinite(float(bricklayers_extrusion_multiplier)) or bricklayers_extrusion_multiplier <= 0:
+        raise ValueError("bricklayers_extrusion_multiplier must be finite and positive")
+    if not math.isfinite(float(amplitude)) or amplitude < 0:
+        raise ValueError("amplitude must be finite and nonnegative")
+    if not math.isfinite(float(frequency)) or frequency <= 0:
+        raise ValueError("frequency must be finite and positive")
+
     # State variables
     current_layer = 0
     current_z = 0.0
@@ -4323,8 +4334,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         # Continue until travel move (no E) or end
                         while j < len(perimeter_block_lines):
                             line = perimeter_block_lines[j]
-                            if line.startswith("G1") and "X" in line and "Y" in line and "F" in line and "E" not in line:
-                                # Travel move - end of this loop
+                            if (line.startswith(('G0 ', 'G1 ')) and
+                                    (extract_x(line) is not None or extract_y(line) is not None) and
+                                    extract_e(line) is None):
+                                # Travel move (including G0) ends this loop
                                 loop_lines.append(line)
                                 loop_indices.append(perimeter_block_indices[j])
                                 j += 1
@@ -4674,10 +4687,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 # CRITICAL: Use SAME logic as grid building for detecting extrusions
                 if i not in processed_infill_indices and current_line.startswith('G1'):
                     
-                    # Parse X, Y, E from current line
-                    match = re.search(r'X([-+]?\d*\.?\d+)\s*Y([-+]?\d*\.?\d+)\s*E([-+]?\d*\.?\d+)', current_line)
-                    if match:
-                        x2, y2, e_end = map(float, match.groups())  # End point is THIS line
+                    # Accept X-only/Y-only extrusion moves and any G-code parameter order.
+                    move_params = parse_gcode_line(current_line)
+                    if (move_params['x'] is not None or move_params['y'] is not None) and move_params['e'] is not None:
+                        x2 = move_params['x'] if move_params['x'] is not None else infill_current_x
+                        y2 = move_params['y'] if move_params['y'] is not None else infill_current_y
+                        e_end = move_params['e']
                         
                         # Extrusion is a *positive delta*, not a positive E
                         # coordinate. Relative E commands may also be negative.
