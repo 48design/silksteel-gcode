@@ -607,6 +607,46 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertAlmostEqual(end_e, 1.4)
         self.assertEqual(xy, (8.0, 8.0))
 
+    def test_bridge_densifier_complete_pipeline_without_duplicate_retracts(self):
+        # Two genuinely unsupported bridge strands over an empty area on
+        # layer 1. Tests TYPE buffering, M82/M83, the E-only retract and
+        # the following TYPE handoff (not just the isolated helper).
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                source = "\n".join([
+                    "; layer_height = 0.2", "; first_layer_height = 0.2",
+                    "; extrusion_width = 0.45", "G90",
+                    "M83" if relative else "M82", "G92 E0",
+                    ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
+                    ";LAYER:0", "G1 Z0.2 F8400",
+                    ";TYPE:Internal perimeter",
+                    "G0 X0 Y10 F8400", "G1 X10 Y10 E0.8 F1500",
+                    ";TYPE:Internal infill",
+                    ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2",
+                    ";LAYER:1", "G1 Z0.4 F8400", "G92 E0",
+                    ";TYPE:Bridge infill", ";WIDTH:0.4", "M107",
+                    "G0 X0 Y0 F8400", "G1 F1800",
+                    "G1 X10 Y0 E1.00000",
+                    f"G1 X10 Y0.4 E{0.05 if relative else 1.05:.5f}",
+                    f"G1 X0 Y0.4 E{1 if relative else 2.05:.5f}",
+                    f"G1 E{-0.3 if relative else 1.75:.5f} F3900",
+                    ";TYPE:Internal infill",
+                    "G0 X5 Y5 F8400",
+                ]) + "\n"
+                output = self.process(
+                    source, enable_smoothificator=False,
+                    enable_bridge_densifier=True, enable_safe_z_hop=False)
+                self.assertIn("Bridge intermediate extrusion", output)
+                retract = ("G1 E-0.30000 F3900" if relative
+                           else "G1 E1.75000 F3900")
+                self.assertEqual(output.count(retract), 1)
+                self.assertEqual(output.count("Bridge intermediate extrusion"), 1)
+                if relative:
+                    self.assertNotIn("Bridge Densifier restore absolute E", output)
+                else:
+                    self.assertIn("G92 E2.05000 ; Bridge Densifier E sync", output)
+                self.assertIn(";TYPE:Internal infill", output)
+
     def test_relative_bridge_densifier_is_safely_skipped(self):
         source = fixture(relative=True).replace(
             ";TYPE:Solid infill", ";TYPE:Bridge infill")
