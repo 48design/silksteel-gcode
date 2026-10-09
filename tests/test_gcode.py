@@ -62,6 +62,81 @@ class GCodeSafetyTests(unittest.TestCase):
             with open(dst, encoding="utf-8") as stream:
                 return stream.read()
 
+    def test_implicit_external_perimeter_across_layer_boundary(self):
+        # Reproduces the actual slicer pattern at layer 40: the previous
+        # layer ends with an external wall, the next has ;LAYER_CHANGE
+        # and priming/travel/M117 but no renewed ;TYPE:External perimeter.
+        # Without the injected marker its entire first exterior contour
+        # (hundreds of XY extrusion moves) bypasses Smoothificator.
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                lines = [
+                    "; layer_height = 0.28", "; first_layer_height = 0.2",
+                    "; extrusion_width = 0.45", "G90",
+                    "M83" if relative else "M82",
+                ]
+                for layer, z in enumerate((0.2, 0.48)):
+                    lines.extend([
+                        ";LAYER_CHANGE", f";Z:{z:.2f}", ";HEIGHT:0.28",
+                        f";LAYER:{layer}", f"G1 Z{z:.2f} F1200", "G92 E0",
+                        "G1 E-1 F3900", "M117 Time Left 3h18m",
+                        "G1 X20 Y12 F8400", "G1 E1 F3900" if relative else "G1 E0 F3900",
+                        ";WIDTH:0.45", "M106 S63.75", "G1 F2700",
+                    ])
+                    if layer == 0:
+                        lines.append(";TYPE:External perimeter")
+                    source_e = 0.0
+                    for point in range(1, 181):
+                        angle = 2 * math.pi * point / 180
+                        x = 12 + 8 * math.cos(angle)
+                        y = 12 + 8 * math.sin(angle)
+                        source_e += 0.04
+                        amount = 0.04 if relative else source_e
+                        lines.append(f"G1 X{x:.4f} Y{y:.4f} E{amount:.5f}")
+                        if point % 11 == 0:
+                            lines.append("M117 Time Left 3h18m")
+                    lines += [
+                        ";WIPE_START", "G1 X19.9 Y12 F8400", ";WIPE_END",
+                    ]
+                lines.extend([
+                    ";TYPE:Internal perimeter", "G1 X19 Y12 F8400",
+                    "G1 X18 Y12 E0.06",
+                ])
+                source = "\n".join(lines) + "\n"
+                output = self.process(source, enable_smoothificator=True)
+                layer_2 = output.split(";LAYER:1", 1)[1]
+                self.assertEqual(layer_2.count("CONTINUED across layer boundary"), 1)
+                self.assertEqual(layer_2.count("SMOOTHIFICATOR START: 3 passes"), 1)
+                first_internal = layer_2.split(";TYPE:Internal perimeter")[0]
+                self.assertEqual(len([
+                    l for l in first_internal.splitlines()
+                    if l.startswith("G1 ") and silk.extract_e(l) is not None
+                    and silk.extract_x(l) is not None
+                ]), 180 * 3)
+                self.assertEqual(first_internal.count("M117 Time Left 3h18m"), 17)
+                self.assertEqual(first_internal.count(";WIPE_START"), 1)
+                # A synthetic marker does not create or change E moves;
+                # across all 3 passes extrusion is still 180 * 0.04 mm.
+                prefix = ["M83" if relative else "M82"]
+                deltas, _, _ = silk.scan_source_extrusion(prefix + first_internal.splitlines())
+                e_total = sum(delta for line, delta in
+                              zip(first_internal.splitlines(), deltas[1:])
+                              if line.startswith("G1 ") and
+                              silk.extract_e(line) is not None and
+                              silk.extract_x(line) is not None and delta > 0)
+                self.assertAlmostEqual(e_total, 7.2, places=3)
+
+    def test_inherited_outer_type_does_not_override_explicit_inner_type(self):
+        lines = [
+            ";TYPE:External perimeter", "G1 X1 Y1 E0.1",
+            ";LAYER_CHANGE", ";Z:0.48", ";HEIGHT:0.28", ";LAYER:1",
+            "G92 E0", "G1 E-1 F3900",
+            ";TYPE:Internal perimeter", "G1 X3 Y3 E0.1",
+        ]
+        updated, added = silk.restore_layer_continued_wall_types(lines)
+        self.assertEqual(added, 0)
+        self.assertEqual(updated, lines)
+
     def test_long_relative_e_orphan_loop_is_smoothified(self):
         # Previously only the first 100 segments were inspected, and the
         # heuristic assumed absolute E increases monotonically. Both fail
