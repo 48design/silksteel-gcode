@@ -2773,7 +2773,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 bridge_start_y = position['y']
                 bridge_start_relative_e = output_relative_e
 
-            in_bridge_infill = ("Bridge infill" in current_type)
+            in_bridge_infill = ("Bridge infill" in current_type or
+                                 "Internal bridge infill" in current_type)
 
         if enable_bridge_densifier and in_bridge_section:
             if ";LAYER_CHANGE" in line or line.startswith(";LAYER:"):
