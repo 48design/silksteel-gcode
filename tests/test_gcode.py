@@ -696,7 +696,9 @@ class GCodeSafetyTests(unittest.TestCase):
                     self.assertIn("G92 E2.05000 ; Bridge serpentine source E sync", output)
                 self.assertIn(";TYPE:Internal infill", output)
 
-    def test_internal_bridge_densification_requires_explicit_opt_in(self):
+    def test_internal_bridge_infill_is_not_densified(self):
+        # Internal bridge infill is a distinct slicer feature, which
+        # Bridge Densifier must leave untouched even when enabled.
         source = "\n".join([
             "; layer_height = 0.2", "; first_layer_height = 0.2",
             "; extrusion_width = 0.45", "G90", "M82", "G92 E0",
@@ -713,18 +715,16 @@ class GCodeSafetyTests(unittest.TestCase):
             "G1 E1.75000 F3900",
             ";TYPE:Internal infill",
         ]) + "\n"
-        conservative = self.process(
+        baseline = self.process(
             source, enable_smoothificator=False,
-            enable_bridge_densifier=True,
-            densify_internal_bridges=False)
-        enabled = self.process(
+            enable_bridge_densifier=False)
+        actual = self.process(
             source, enable_smoothificator=False,
-            enable_bridge_densifier=True,
-            densify_internal_bridges=True)
-        self.assertNotIn("Bridge serpentine intermediate", conservative)
-        self.assertEqual(enabled.count("Bridge serpentine intermediate"), 2)
-        self.assertEqual(enabled.count("G1 E1.75000 F3900"), 1)
-        self.assertIn(";TYPE:Internal bridge infill", enabled)
+            enable_bridge_densifier=True)
+        self.assertEqual(actual, baseline)
+        self.assertNotIn("Bridge serpentine intermediate", actual)
+        self.assertIn(";TYPE:Internal bridge infill", actual)
+        self.assertEqual(actual.count("G1 E1.75000 F3900"), 1)
 
     def test_relative_bridge_densifier_is_safely_skipped(self):
         source = fixture(relative=True).replace(
