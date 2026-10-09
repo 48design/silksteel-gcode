@@ -62,6 +62,54 @@ class GCodeSafetyTests(unittest.TestCase):
             with open(dst, encoding="utf-8") as stream:
                 return stream.read()
 
+    def test_bricklayers_continue_across_retract_and_g92_in_type_section(self):
+        # Common SuperSlicer pattern: one Internal perimeter TYPE section
+        # contains two separate contours, with G92/retract/travel/prime
+        # between them. Previously a single E-only command skipped every
+        # contour in the entire TYPE section.
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                lines = [
+                    "; layer_height = 0.28", "; first_layer_height = 0.28",
+                    "; extrusion_width = 0.45", "G90",
+                    "M83" if relative else "M82",
+                ]
+                for layer, z in enumerate((0.28, 0.56, 0.84)):
+                    lines += [
+                        ";LAYER_CHANGE", f";Z:{z:.2f}", ";HEIGHT:0.28",
+                        f";LAYER:{layer}", f"G1 Z{z:.2f} F1200",
+                        "G92 E0", ";TYPE:Internal perimeter",
+                    ]
+                    for contour, cx in enumerate((20, 50)):
+                        # A G92 and an E-only retract inside the same TYPE.
+                        lines += ["G92 E0", "G1 E-1.00000 F3900",
+                                  f"G0 X{cx+8} Y20 F8400",
+                                  "G1 E1.00000 F3900" if relative else "G1 E0.00000 F3900"]
+                        cumulative = 0.0
+                        for step in range(1, 61):
+                            t = step * 2 * math.pi / 60
+                            x, y = cx + 8 * math.cos(t), 20 + 8 * math.sin(t)
+                            cumulative += 0.06
+                            extr = 0.06 if relative else cumulative
+                            lines.append(f"G1 X{x:.4f} Y{y:.4f} E{extr:.5f} F1200")
+                            if step % 15 == 0:
+                                lines.append("M117 Printing")
+                    lines.append(";TYPE:Internal infill")
+                source = "\n".join(lines) + "\n"
+                output = self.process(source, enable_smoothificator=False,
+                                      enable_bricklayers=True)
+                # The first two layers have an identical inner-wall region
+                # above; each contour must be transformed, not skipped.
+                first_two = output.split(";LAYER:2")[0]
+                self.assertGreaterEqual(first_two.count("; Bricklayers base pass"), 2)
+                self.assertIn("; Bricklayers", first_two)
+                # Original retract/prime, reset and status commands run ONCE.
+                self.assertEqual(output.count("G1 E-1.00000 F3900"), 6)
+                self.assertEqual(output.count("M117 Printing"), 3 * 2 * 4)
+                self.assertGreaterEqual(output.count("Bricklayers contour E sync")
+                                        if not relative else
+                                        output.count("Bricklayers base pass"), 2)
+
     def test_implicit_external_perimeter_across_layer_boundary(self):
         # Reproduces the actual slicer pattern at layer 40: the previous
         # layer ends with an external wall, the next has ;LAYER_CHANGE
