@@ -1,9 +1,8 @@
 name: G-code regression tests
 
+# Manual only. Prevent automatic GitHub Actions minutes usage and email spam.
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   gcode:
