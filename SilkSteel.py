@@ -1925,6 +1925,35 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
             # Normal direction optimization
             dist_to_start = math.sqrt((move['x1'] - current_pos[0])**2 + (move['y1'] - current_pos[1])**2)
             dist_to_end = math.sqrt((move['x2'] - current_pos[0])**2 + (move['y2'] - current_pos[1])**2)
+            
+            # CRITICAL FIX: If we're already very close to one endpoint (< 0.5mm), 
+            # it means we just came FROM there, so we should draw AWAY from it, not back to it!
+            # This prevents creating connectors back to points we just left.
+            if dist_to_start < 0.5 and dist_to_end > 0.5:
+                # We're already at START, so force drawing from END to START (reverse)
+                # Swap the distances so the logic below picks END first
+                dist_to_start, dist_to_end = dist_to_end, dist_to_start
+            elif dist_to_end < 0.5 and dist_to_start > 0.5:
+                # We're already at END, so force drawing from START to END (forward)
+                # Keep distances as-is (START will be picked)
+                pass
+            
+            # CRITICAL FIX: If BOTH endpoints are very close to current position (< 0.1mm),
+            # we're likely at a point that's between the endpoints or at a subdivision.
+            # In this case, prefer the endpoint that moves us FORWARD (farther from previous moves)
+            if dist_to_start < 0.1 and dist_to_end < 0.1:
+                # We're essentially AT this line already - choose the direction that makes sense
+                # Look at the previous move to determine forward direction
+                if move_idx > 0:
+                    prev_move = moves[move_idx - 1]
+                    # Choose the endpoint that's farther from the previous move's start
+                    dist_start_to_prev = math.sqrt((move['x1'] - prev_move['x1'])**2 + (move['y1'] - prev_move['y1'])**2)
+                    dist_end_to_prev = math.sqrt((move['x2'] - prev_move['x1'])**2 + (move['y2'] - prev_move['y1'])**2)
+                    # Prefer the endpoint farther from where we started
+                    if dist_end_to_prev > dist_start_to_prev:
+                        dist_to_start = 999  # Force using end
+                    else:
+                        dist_to_end = 999  # Force using start
         
         set_e_mode('relative')
         
@@ -5204,7 +5233,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     
                     # Find maximum Z along the travel path by sampling noise LUT
                     path_max_z = 0.0
-                    if 'grid_resolution' in locals() and 'noise_lut' in locals() and 'amplitude' in locals():
+                    if 'grid_resolution' in locals() and 'noise_lut' in locals() and noise_lut is not None and 'amplitude' in locals():
                         # Cache layer base Z lookup
                         layer_base_z = z_layer_map.get(zhop_current_layer, zhop_working_z)
                         
