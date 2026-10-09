@@ -3407,7 +3407,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 ";TYPE:Overhang perimeter",
             )))
         if (not recognized_nonouter and i > orphan_scanned_through
-            and re.match(r'^G1(?:\\s|$)', line)
+            and re.match(r'^G1(?:\s|$)', line)
             and extract_x(line) is not None and extract_y(line) is not None
             and orphan_e_deltas[i] > 0):
             
@@ -3450,7 +3450,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     if not code:
                         j += 1
                         continue
-                    if not re.match(r'^G1(?:\\s|$)', code):
+                    if not re.match(r'^G1(?:\s|$)', code):
                         break
                     params = parse_gcode_line(code)
                     if (params['e'] is None or orphan_e_deltas[j] <= 0 or
@@ -3486,6 +3486,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     # Check for direction changes to filter out straight infill lines
                     # Count significant angle changes (> 10 degrees)
                     direction_changes = 0
+                    total_turn_degrees = 0.0
                     if len(candidate_path) >= 3:
                         for k in range(1, len(candidate_path) - 1):
                             p1 = candidate_path[k-1]
@@ -3504,13 +3505,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 dot = (v1x * v2x + v1y * v2y) / (len1 * len2)
                                 dot = max(-1.0, min(1.0, dot))  # Clamp to avoid math errors
                                 angle_deg = math.degrees(math.acos(dot))
-                                
+                                total_turn_degrees += angle_deg
+
                                 if angle_deg > 10:  # Significant direction change
                                     direction_changes += 1
                     
                     # Perimeters should have at least 3 direction changes
                     # Straight infill lines will have 0-2
-                    has_curvature = direction_changes >= 3
+                    has_curvature = (direction_changes >= 3 or total_turn_degrees >= 120.0)
                     
                     if e_increasing and is_closed and has_curvature:
                         is_likely_perimeter = True
@@ -3520,6 +3522,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     annotated_lines.append(";TYPE:External perimeter ; AUTO-ADDED by Smoothificator (heuristic)\n")
                     current_type = ";TYPE:External perimeter"
                     orphans_found += 1
+                    if debug >= 1:
+                        logging.info("Orphan outer candidate: input line %d, %d G1 segments, TYPE=%s, XY start=(%.3f, %.3f)",
+                                     i + 1, len(candidate_path), current_type, first_xy[0], first_xy[1])
                     print(f"  [ORPHAN] Found at line {i}: {len(candidate_path)} points, closed loop")
         
         annotated_lines.append(line)
