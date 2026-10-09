@@ -1404,6 +1404,11 @@ def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_
                             f"E{extra_e:.5f} F{bridge_f} ; Bridge intermediate extrusion\n")
                         output.append(
                             f"G0 X{nx:.3f} Y{ny:.3f} F8400 ; Bridge return to source endpoint\n")
+                        if relative_e:
+                            # Under M83 the inserted E is a real addition
+                            # to the accumulated output position. Do not
+                            # mistake it for a source-only E target.
+                            pe += extra_e
                         if not relative_e:
                             output.append("M82 ; Bridge Densifier restore absolute E\n")
                             # Added relative E must NOT shift slicer's M82
