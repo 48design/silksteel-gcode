@@ -410,9 +410,11 @@ def segment_line(x1, y1, x2, y2, segment_length):
     """Divide a line into smaller segments for non-planar infill."""
     segments = []
     total_length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    num_segments = max(1, int(total_length // segment_length))
-    
-    for i in range(num_segments + 1):
+    if total_length <= 1e-9:
+        return []
+    num_segments = max(1, math.ceil(total_length / segment_length))
+
+    for i in range(1, num_segments + 1):
         t = i / num_segments
         x = x1 + t * (x2 - x1)
         y = y1 + t * (y2 - y1)
@@ -4707,7 +4709,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         e_start = infill_current_e
 
                         # Only subdivide if delta is positive (actual extrusion, not travel or retraction)
-                        if e_delta > 0:
+                        if e_delta > 0 and math.hypot(x2 - x1, y2 - y1) > 1e-7:
                             # Extract feedrate from current line if present
                             feedrate = None
                             f_match = re.search(r'F(\d+\.?\d*)', current_line)
