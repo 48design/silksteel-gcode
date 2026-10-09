@@ -98,6 +98,12 @@ class GCodeSafetyTests(unittest.TestCase):
                                 lines.append("M107")
                             if x == x0 and y == 10:
                                 lines.append("M106 S63.75")
+                        lines.append("G1 E-0.75000 F3900 ; post-contour retract"
+                                     if relative else
+                                     "G1 E0.85000 F3900 ; post-contour retract")
+                        lines.append("G1 E0.75000 F3900 ; post-contour prime"
+                                     if relative else
+                                     "G1 E1.60000 F3900 ; post-contour prime")
                     lines += [
                         ";TYPE:Internal infill", "G0 X3 Y5 F8400",
                         "G1 X7 Y5 E0.4 F1500",
@@ -115,6 +121,14 @@ class GCodeSafetyTests(unittest.TestCase):
                 self.assertEqual(output.count("M117 Printing"), 4 * 2 * 4)
                 self.assertEqual(output.count("M107"), 8)
                 self.assertEqual(output.count("M106 S63.75"), 8)
+                deltas, _, _ = silk.scan_source_extrusion(output.splitlines())
+                retracts = [d for line, d in zip(output.splitlines(), deltas)
+                            if "; post-contour retract" in line]
+                primes = [d for line, d in zip(output.splitlines(), deltas)
+                          if "; post-contour prime" in line]
+                self.assertEqual(len(retracts), 8)
+                self.assertTrue(all(abs(delta + 0.75) < 1e-5 for delta in retracts))
+                self.assertTrue(all(abs(delta - 0.75) < 1e-5 for delta in primes))
 
     def test_implicit_external_perimeter_across_layer_boundary(self):
         # Reproduces the actual slicer pattern at layer 40: the previous
