@@ -174,6 +174,9 @@ class GCodeSafetyTests(unittest.TestCase):
                 output = self.process(source, enable_smoothificator=True)
                 layer_2 = output.split(";LAYER:1", 1)[1]
                 self.assertEqual(layer_2.count("CONTINUED across layer boundary"), 1)
+                self.assertIn("; SilkSteel: CONTINUED across layer boundary\n"
+                              ";TYPE:External perimeter\n", layer_2)
+                self.assertNotIn(";TYPE:External perimeter ;", layer_2)
                 self.assertEqual(layer_2.count("SMOOTHIFICATOR START: 3 passes"), 1)
                 first_internal = layer_2.split(";TYPE:Internal perimeter")[0]
                 self.assertEqual(len([
@@ -229,6 +232,9 @@ class GCodeSafetyTests(unittest.TestCase):
         output = self.process("\n".join(source) + "\n",
                               enable_smoothificator=True)
         self.assertGreaterEqual(output.count("AUTO-ADDED by Smoothificator"), 2)
+        self.assertIn("; SilkSteel: AUTO-ADDED by Smoothificator (heuristic)\n"
+                      ";TYPE:External perimeter\n", output)
+        self.assertNotIn(";TYPE:External perimeter ;", output)
         layer2 = output.split(";LAYER:1")[-1]
         self.assertIn("SMOOTHIFICATOR START: 3 passes", layer2)
 
