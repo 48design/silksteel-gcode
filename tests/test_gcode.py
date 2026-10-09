@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import SilkSteel as silk
+from tools import audit_outer_walls as wall_audit
 
 
 def fixture(relative=False):
@@ -94,6 +95,29 @@ class GCodeSafetyTests(unittest.TestCase):
             ";TYPE:Custom unlabeled wall", ";TYPE:Internal perimeter") + "\n"
         internal_output = self.process(internal, enable_smoothificator=True)
         self.assertNotIn("AUTO-ADDED by Smoothificator", internal_output)
+
+    def test_outer_wall_audit_locates_untouched_slicer_feature(self):
+        original = fixture(relative=True)
+        # Make the second-layer contour a generic perimeter; the
+        # Smoothificator cannot safely assume it is an outer wall.
+        first = original.find(";TYPE:External perimeter")
+        second = original.find(";TYPE:External perimeter", first + 1)
+        self.assertGreater(second, first)
+        original = (original[:second] + original[second:].replace(
+            ";TYPE:External perimeter", ";TYPE:Perimeter", 1))
+        output = self.process(original, enable_smoothificator=True)
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "analyzed.gcode")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(output)
+            runs = list(wall_audit.audit(path))
+        skipped = [r for r in runs if r["layer"] == 1 and
+                   r["type"] == "Perimeter" and not r["smoothed"]]
+        self.assertTrue(skipped, "Audit should identify unsmoothed generic perimeters")
+        self.assertGreater(sum(r["length"] for r in skipped), 0)
+        smoothed = [r for r in runs if r["layer"] == 2 and
+                    "External perimeter" in r["type"] and r["smoothed"]]
+        self.assertTrue(smoothed, "Audit must recognize transformed paths")
 
     def test_cli_has_no_interactive_enter_pause(self):
         # Slicer post-processors must never wait for keyboard interaction.
