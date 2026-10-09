@@ -102,8 +102,10 @@ class GCodeSafetyTests(unittest.TestCase):
                 self.assertEqual(layer2.count("G1 E0.8 F1800" if relative else "G1 E101.0 F1800"), 1)
                 # Source has 2mm of deposited filament across 4 XY moves.
                 # The 3 passes must preserve the same total XY extrusion.
-                deltas, _, _ = silk.scan_source_extrusion(layer2.splitlines())
-                wall_e = sum(delta for line, delta in zip(layer2.splitlines(), deltas)
+                # Include the file's modal E mode in this layer excerpt.
+                deltas, _, _ = silk.scan_source_extrusion(
+                    ["M83" if relative else "M82"] + layer2.splitlines())
+                wall_e = sum(delta for line, delta in zip(layer2.splitlines(), deltas[1:])
                              if line.startswith("G1 ") and silk.extract_x(line) is not None
                              and silk.extract_e(line) is not None and delta > 0)
                 self.assertAlmostEqual(wall_e, 2.0, places=3)
