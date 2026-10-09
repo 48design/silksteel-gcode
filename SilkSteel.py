@@ -4641,12 +4641,38 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             valley_start_e = None
             prev_z = None
 
+            def emitted_e(absolute_target, relative_delta, source_index):
+                return relative_delta if source_relative_modes[source_index] else absolute_target
+
+            def flush_pending_valley(source_index):
+                nonlocal in_valley, valley_segments, valley_start_e, current_e
+                if not in_valley:
+                    return
+                # An open valley must never silently discard buffered extrusion.
+                for pending in valley_segments:
+                    valley_start_e += pending['e_delta']
+                    target_e = emitted_e(valley_start_e, pending['e_delta'], source_index)
+                    pending_f = pending['feedrate']
+                    f_cmd = f" F{int(pending_f)}" if pending_f is not None else ""
+                    write_and_track(output_buffer,
+                        f"G1 X{pending['x']:.3f} Y{pending['y']:.3f} Z{pending['z']:.3f} E{target_e:.5f}{f_cmd}\n",
+                        recent_output_lines)
+                current_e = valley_start_e
+                in_valley = False
+                valley_segments = []
+
             # Process infill lines
             while i < len(lines):
                 current_line = lines[i]
                 
-                # NO position update during collection (output-driven tracking)
-                
+                # Flush a pending valley before travel/retraction/mode changes.
+                if in_valley and not (
+                    current_line.startswith(('G0 ', 'G1 ')) and
+                    (extract_x(current_line) is not None or extract_y(current_line) is not None) and
+                    source_e_deltas[i] > 0
+                ):
+                    flush_pending_valley(i)
+
                 # CRITICAL: Check for layer change FIRST - restore Z before new layer starts!
                 if current_line.startswith(";LAYER_CHANGE") or current_line.startswith(";LAYER:"):
                     in_infill = False
@@ -4657,8 +4683,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         actual_output_z = current_z
                         old_z = current_z - current_layer_height
                         #logging.info(f"  [NON-PLANAR INFILL] Restoring Z from {last_infill_z:.3f} to {layer_z:.3f} at layer boundary")
-                    # CRITICAL: Decrement i so main loop will process this LAYER_CHANGE line
-                    i -= 1
+                    # The next iteration of the main loop will process this marker.
+                    # i already points at it; decrementing would replay the prior line.
                     break
                 
                 if ";TYPE:" in current_line:
@@ -4685,36 +4711,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     if match:
                         x2, y2, e_end = map(float, match.groups())  # End point is THIS line
                         
-                        # BULLETPROOF extrusion detection: Check if E value is non-negative
-                        # This matches the grid building logic and correctly identifies:
-                        # - Extrusions: E >= 0
-                        # - Retractions: E < 0 (skip these)
-                        # Travel moves without E won't match the regex above
-                        if e_end < 0:
-                            # This is a retraction - skip it, update E tracking, output as-is
-                            infill_current_e = e_end
-                            # Don't update X/Y for retractions
-                            # Fall through to output as-is (don't continue, let it reach the bottom)
-                        else:
-                            # This is an extrusion or unretraction
-                            # Calculate delta for this move
-                            x1 = infill_current_x
-                            y1 = infill_current_y
-                            e_start = infill_current_e
-                            e_delta = e_end - e_start
-                            
-                            # CRITICAL: Detect G92 E0 resets (negative delta but positive e_end)
-                            # When E resets (e.g., 7.12 -> 1.75), e_delta is negative but e_end is positive
-                            # Grid building would INCLUDE this (checks e_end >= 0)
-                            # Processing must do the same!
-                            if e_delta < 0 and e_end >= 0:
-                                # G92 E0 reset detected - reset tracking and treat as new extrusion start
-                                if debug >= 3:
-                                    logging.info(f"[INFILL] Line {i}: G92 E0 reset detected (e_delta={e_delta:.5f}, e_end={e_end:.5f}), resetting tracking")
-                                infill_current_e = 0  # Reset to 0 to match G92 E0
-                                e_start = 0  # Recalculate from 0
-                                e_delta = e_end - e_start  # Now positive!
-                            
+                        # Extrusion is a *positive delta*, not a positive E
+                        # coordinate. Relative E commands may also be negative.
+                        e_delta = source_e_deltas[i]
+                        x1, y1 = infill_current_x, infill_current_y
+                        e_start = infill_current_e
+
                             # Only subdivide if delta is positive (actual extrusion, not travel or retraction)
                             if e_delta > 0:
                                 # Extract feedrate from current line if present
@@ -4897,7 +4899,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                             'y': sy,
                                             'z': z_mod,
                                             'e_delta': adjusted_e_for_segment,
-                                            'feedrate': segment_feedrate  # Use adaptive feedrate
+                                            'feedrate': segment_feedrate,  # Use adaptive feedrate
+                                            'relative': source_relative_modes[i]
                                         })
                                     
                                     # Detect valley exit
@@ -4925,11 +4928,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                         for seg in valley_segments:
                                             if seg['feedrate'] is not None:
                                                 write_and_track(output_buffer,
-                                                    f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{seg['z']:.3f} E{valley_start_e + seg['e_delta']:.5f} F{int(seg['feedrate'])}\n", recent_output_lines
+                                                    f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{seg['z']:.3f} E{(seg['e_delta'] if seg['relative'] else valley_start_e + seg['e_delta']):.5f} F{int(seg['feedrate'])}\n", recent_output_lines
                                                 )
                                             else:
                                                 write_and_track(output_buffer,
-                                                    f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{seg['z']:.3f} E{valley_start_e + seg['e_delta']:.5f}\n", recent_output_lines
+                                                    f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{seg['z']:.3f} E{(seg['e_delta'] if seg['relative'] else valley_start_e + seg['e_delta']):.5f}\n", recent_output_lines
                                                 )
                                             valley_start_e += seg['e_delta']
                                         
@@ -4990,7 +4993,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                                         # Extrude normally
                                                         valley_start_e += seg['e_delta'] * 0.5
                                                         write_and_track(output_buffer,
-                                                            f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
+                                                            f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{(seg['e_delta'] * 0.5 if seg['relative'] else valley_start_e):.5f}\n", recent_output_lines
                                                         )
                                                     prev_point = (seg['x'], seg['y'])
                                             else:
@@ -5034,7 +5037,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                                         # Extrude normally
                                                         valley_start_e += seg['e_delta'] * 0.5
                                                         write_and_track(output_buffer,
-                                                            f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{valley_start_e:.5f}\n", recent_output_lines
+                                                            f"G1 X{seg['x']:.3f} Y{seg['y']:.3f} Z{min(current_fill_z, layer_z):.3f} E{(seg['e_delta'] * 0.5 if seg['relative'] else valley_start_e):.5f}\n", recent_output_lines
                                                         )
                                                     prev_point = (seg['x'], seg['y'])
                                         
@@ -5053,15 +5056,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     prev_z = z_mod
                                     
                                     # Output segment only if NOT in valley (valley segments are output during fill)
-                                    if not in_valley:
+                                    if not in_valley and not valley_exit:
                                         # Output with Z modulation, adjusted E, and adaptive feedrate
                                         if segment_feedrate is not None:
                                             write_and_track(output_buffer, 
-                                                f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f} F{int(segment_feedrate)}\n", recent_output_lines
+                                                f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{emitted_e(current_e, adjusted_e_for_segment, i):.5f} F{int(segment_feedrate)}\n", recent_output_lines
                                             )
                                         else:
                                             write_and_track(output_buffer, 
-                                                f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{current_e:.5f}\n", recent_output_lines
+                                                f"G1 X{sx:.3f} Y{sy:.3f} Z{z_mod:.3f} E{emitted_e(current_e, adjusted_e_for_segment, i):.5f}\n", recent_output_lines
                                             )
                                 
                                 # CRITICAL: Update tracking positions to END of this move!
@@ -5069,18 +5072,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # current_e might differ from e_end due to adaptive extrusion/valley filling
                                 infill_current_x = x2
                                 infill_current_y = y2
-                                infill_current_e = current_e  # Use actual E after segments, not original e_end
+                                infill_current_e = current_e  # Actual E after segmented output
                                 
                                 i += 1
                                 continue
                             else:
-                                # e_delta <= 0: could be travel (e_delta==0) or unretraction
-                                # Update E tracking but don't subdivide
-                                logging.info(f"[INFILL-SKIP] Line {i}: e_delta={e_delta:.5f} (e_start={e_start:.5f}, e_end={e_end:.5f})")
-                                infill_current_x = x2
-                                infill_current_y = y2
-                                infill_current_e = e_end
-                
+                                # No positive source extrusion; the line below
+                                # will be rebased if absolute E was modified.
+
                 # Boost feedrate for standalone F commands (e.g., "G1 F3600")
                 if current_line.startswith('G1') and 'F' in current_line and 'X' not in current_line and 'Y' not in current_line and 'E' not in current_line:
                     original_feedrate = extract_f(current_line)
@@ -5091,6 +5090,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         i += 1
                         continue
                 
+                # If we get here, preserve movement but rebase absolute E
+                # after any added material from previous non-planar segments.
+                if current_line.startswith(('G0 ', 'G1 ')) and extract_e(current_line) is not None:
+                    if not source_relative_modes[i]:
+                        current_line = replace_e(current_line, position['e'] + source_e_deltas[i])
+
                 # If we get here, the line wasn't processed - append as-is  
                 # Update position tracking for ANY unprocessed G1 line
                 if current_line.startswith('G1') and i not in processed_infill_indices:
@@ -5110,8 +5115,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         infill_current_e = float(e_match.group(1))
                 
                 write_and_track(output_buffer, current_line, recent_output_lines)
+                infill_current_e = position['e']
                 i += 1
-            
+
+            # Return to the slicer's original E coordinate before other
+            # sections are passed through unchanged.
+            if i > 0 and not source_relative_modes[i - 1]:
+                write_and_track(output_buffer,
+                    f"G92 E{source_e_targets[i - 1]:.5f} ; Non-planar E sync\n",
+                    recent_output_lines)
             continue
         
         else:
