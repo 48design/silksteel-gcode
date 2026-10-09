@@ -1303,7 +1303,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  enable_safe_z_hop=DEFAULT_ENABLE_SAFE_Z_HOP, safe_z_hop_margin=DEFAULT_SAFE_Z_HOP_MARGIN,
                  z_hop_retraction=DEFAULT_Z_HOP_RETRACTION,
                  enable_bridge_densifier=DEFAULT_ENABLE_BRIDGE_DENSIFIER,
-                 densify_internal_bridges=False,
                  remove_gap_fill=DEFAULT_REMOVE_GAP_FILL,
                  debug=False):
     
@@ -1370,8 +1369,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
 
     if enable_bridge_densifier:
         logging.warning("Experimental Bridge Densifier enabled: inspect bridge paths in the viewer before printing")
-        if densify_internal_bridges:
-            logging.warning("Internal bridge densification also enabled; supported regions may receive extra material")
 
     # Get layer heights from G-code
     base_layer_height = get_layer_height(lines)
@@ -2762,10 +2759,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 flush_bridge_buffer()
 
             current_type = line.strip()
-            if enable_bridge_densifier and (
-                ";TYPE:Bridge infill" in line or
-                (densify_internal_bridges and ";TYPE:Internal bridge infill" in line)
-            ) and not in_bridge_section:
+            # Densify true bridges only; internal bridge infill is untouched.
+            if (enable_bridge_densifier and
+                line.strip().startswith(";TYPE:Bridge infill") and
+                not in_bridge_section):
                 in_bridge_section = True
                 bridge_buffer = []
                 bridge_start_e = position['e']
@@ -2790,9 +2787,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     # Retract ends one island. Emit exactly once, start next
                     # buffer at the actual output E and XY.
                     flush_bridge_buffer()
-                    if (current_type.startswith(";TYPE:Bridge infill") or
-                        (densify_internal_bridges and
-                         current_type.startswith(";TYPE:Internal bridge infill"))):
+                    if current_type.startswith(";TYPE:Bridge infill"):
                         in_bridge_section = True
                         bridge_start_e = position['e']
                         bridge_start_x = position['x']
@@ -4460,9 +4455,6 @@ if __name__ == "__main__":
     parser.add_argument('-safeZHopMargin', '--safe-z-hop-margin', type=float, default=DEFAULT_SAFE_Z_HOP_MARGIN,
                        help=f'Safety margin in mm to add above max Z during travel (default: {DEFAULT_SAFE_Z_HOP_MARGIN})')
     
-    parser.add_argument('-enableInternalBridgeDensifier', '--enable-internal-bridge-densifier', action='store_true',
-                       dest='densify_internal_bridges', default=False,
-                       help='Also densify Internal bridge infill (extra material; experimental opt-in)')
     parser.add_argument('-enableBridgeDensifier', '--enable-bridge-densifier', action='store_const', const=True, dest='enable_bridge_densifier', default=None,
                        help='Enable Bridge Densifier to add intermediate lines between bridge extrusions for better bridging (experimental, requires explicit opt-in; not enabled by -full)')
     parser.add_argument('-disableBridgeDensifier', '--disable-bridge-densifier', action='store_const', const=False, dest='enable_bridge_densifier',
@@ -4554,7 +4546,6 @@ if __name__ == "__main__":
             enable_safe_z_hop=args.enable_safe_z_hop,
             safe_z_hop_margin=args.safe_z_hop_margin,
             enable_bridge_densifier=args.enable_bridge_densifier,
-            densify_internal_bridges=args.densify_internal_bridges,
             remove_gap_fill=args.enable_remove_gap_fill,
             debug=debug
         )
