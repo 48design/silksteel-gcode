@@ -196,6 +196,7 @@ def restore_layer_continued_wall_types(lines):
     active_type = None
     pending_outer = None
     inherited = 0
+    insertion_index = None
     outer_types = (";TYPE:External perimeter", ";TYPE:Outer wall",
                    ";TYPE:Overhang perimeter")
 
@@ -205,8 +206,13 @@ def restore_layer_continued_wall_types(lines):
             active_type = next((kind for kind in outer_types
                                 if stripped.startswith(kind)), None)
             pending_outer = None
+            insertion_index = None
         elif stripped.startswith(";LAYER_CHANGE") or stripped.startswith(";LAYER:"):
             pending_outer = active_type
+            # Place the recovered role right after ;LAYER, BEFORE any
+            # G92 / retract / travel commands. Viewer layer attribution
+            # can happen before the first XY extrusion is encountered.
+            insertion_index = len(updated) + 1
         elif pending_outer and original_deltas[index] > 0:
             code = line.split(";", 1)[0].strip()
             if re.match(r'^G0?[01](?:\s|$)', code):
@@ -215,10 +221,13 @@ def restore_layer_continued_wall_types(lines):
                     # Keep TYPE comments exact: G-code viewers often
                     # recognize only the canonical slicer feature names.
                     # Provenance belongs on its own comment line.
-                    updated.append("; SilkSteel: CONTINUED across layer boundary\n")
-                    updated.append(pending_outer + "\n")
+                    updated[insertion_index:insertion_index] = [
+                        "; SilkSteel: CONTINUED across layer boundary\n",
+                        pending_outer + "\n",
+                    ]
                     inherited += 1
                     pending_outer = None
+                    insertion_index = None
 
         updated.append(line)
 
@@ -4510,7 +4519,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             for loop_line in loop_lines:
                                 write_and_track(output_buffer, loop_line, recent_output_lines)
                             bricklayers_unstackable_count += 1
-                            perimeter_block_count += 1
+                            # Count this contour only once, at its start.
                             # Don't use continue here - it would loop forever!
                             # Just move to next j and let the loop continue naturally
                         else:
@@ -4538,7 +4547,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                                 has_regular_perimeter_below = True
                                         elif prev_type != TYPE_NONE:
                                             has_non_perimeter_below = True
-                                        if has_bricklayer_below or has_regular_perimeter_below or has_non_perimeter_below:
+                                        # A first sampled grid cell can be a
+                                        # regular/untyped perimeter even
+                                        # when later cells are bricklayer
+                                        # cells. Prefer an actual previous
+                                        # brick instead of stopping early.
+                                        if has_bricklayer_below:
                                             break
                             
                             # Check what's above (solid = solid infill, NOT internal perimeters)
@@ -4724,7 +4738,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 write_and_track(output_buffer,
                                     f"G92 E{source_e_targets[last_idx]:.5f} ; Bricklayers contour E sync\n",
                                     recent_output_lines)
-                            perimeter_block_count += 1
+                            # No second increment: alternating shifted and
+                            # base contours depends on correct 1,2,3 parity.
 
                     else:
                         # Travel, retract, prime, G92 and modal commands
