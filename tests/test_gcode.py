@@ -293,6 +293,7 @@ class GCodeSafetyTests(unittest.TestCase):
             ";TYPE:External perimeter", "G1 Z0.28 F8400",
             "G1 X2 Y3 E0.1", ";TYPE:Internal perimeter",
             "G0 Z0.42 ; Bricklayers shifted block #1",
+            "G0 Z0.28 ; Bricklayers base block #2",
         ]
         with tempfile.TemporaryDirectory() as root:
             path = os.path.join(root, "post.gcode")
@@ -302,6 +303,8 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertEqual(found["first_extrusion_type"], "External perimeter")
         self.assertEqual(found["counts"]["carried_outer"], 1)
         self.assertEqual(found["counts"]["brick_shifted"], 1)
+        self.assertEqual(found["brick_z"]["shifted"], [0.42])
+        self.assertEqual(found["brick_z"]["base"], [0.28])
         self.assertEqual(found["counts"]["unrecognized_type_comments"], 0)
 
     def test_cli_has_no_interactive_enter_pause(self):
