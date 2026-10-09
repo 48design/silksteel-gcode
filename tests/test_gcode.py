@@ -3,6 +3,7 @@ import io
 import math
 import ast
 import os
+import re
 import tempfile
 import unittest
 
@@ -119,8 +120,15 @@ class GCodeSafetyTests(unittest.TestCase):
                 layer_one = output.split(";LAYER:1", 1)[1].split(";LAYER_CHANGE", 1)[0]
                 # With two stackable internal contours we must see both
                 # parity states on a non-base layer, not always odd.
-                self.assertIn("Bricklayers shifted block #1", layer_one)
-                self.assertIn("Bricklayers base block #2", layer_one)
+                self.assertIn("G0 Z0.500 ; Bricklayers shifted block #1", layer_one)
+                self.assertIn("G0 Z0.400 ; Bricklayers base block #2", layer_one)
+                # The named roles must NOT share a nozzle Z coordinate:
+                # a 0.2mm layer gives an exact +0.1mm relative stagger.
+                shifted = re.search(r"G0 Z([0-9.]+) ; Bricklayers shifted block #1", layer_one)
+                base = re.search(r"G0 Z([0-9.]+) ; Bricklayers base block #2", layer_one)
+                self.assertIsNotNone(shifted)
+                self.assertIsNotNone(base)
+                self.assertAlmostEqual(float(shifted.group(1)) - float(base.group(1)), 0.1)
                 self.assertIn("Bricklayers contour E sync" if not relative
                               else "Bricklayers base pass", output)
                 self.assertEqual(output.count("G1 E-1.00000 F3900"), 8)
