@@ -69,6 +69,8 @@ Modulates Z height during infill printing to create 3D wave patterns:
 - Automatically detects solid layers above/below and respects safe Z boundaries
 - Pre-calculates 3D occupancy grid to prevent nozzle collisions
 - Two pattern modes: sine waves or Perlin noise
+- Compensates extrusion using the true XYZ length of each Z-modulated segment (upward and downward, after Z clamping)
+- Preserves the slicer's extrusion amount for horizontal segments; optional adaptive safezone extrusion remains additional
 - Significantly improves infill-to-perimeter bonding
 
 **Best for:** Large flat surfaces, parts with sparse infill, structural components
