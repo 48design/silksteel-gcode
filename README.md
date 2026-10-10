@@ -100,18 +100,21 @@ Notes and heuristics:
 **Best for:** All prints, especially with Z-shifting features enabled
 
 ### 🌉 Bridge Densifier (Experimental, `-enableBridgeDensifier`)
-Strengthens bridge sections by adding parallel extrusion lines:
-- Automatically detects bridge infill sections in G-code
-- Creates parallel edge lines along each bridge extrusion
-- Uses serpentine path optimization for minimal travel
-- Generates intermediate lines between long bridge pairs
-- Handles single isolated bridge lines by creating 3 parallel copies
-- Dramatically improves bridge strength and surface quality
-- Maintains proper E values and uses travel moves for long connectors
+Densifies validated bridge raster gaps using **continuous serpentine toolpaths** rather than printing extra strands after the fact and returning with long travel moves.
 
-**Caution:** This experimental feature has unresolved E-mode/flow issues. It is no longer enabled by `-full` and is automatically skipped for `M83` relative-extrusion files. Do not use it for production printing without separately validating the output.
+- Matches consecutive, reverse-parallel bridge spans with short U-turns between them.
+- Adds as many interior strands as warranted by the measured gap, up to a conservative limit.
+- Plans the **whole connected raster** as a zigzag to minimize redundant full-length returns.
+- Preserves source extrusion/retractions and restores the slicer's absolute E position where needed; handles M82 and M83.
+- Leaves unknown geometry, standalone strokes and unsupported motion patterns unchanged.
+- Processes **only** `;TYPE:Bridge infill`; `;TYPE:Internal bridge infill` is excluded from densification.
 
-**Best for:** Testing with long bridges or overhangs
+**Example:**
+```bash
+python SilkSteel.py input.gcode -o bridge_test.gcode -enableBridgeDensifier
+```
+
+**Caution:** Still experimental and **not enabled by `-full`**. Additional bridge extrusion changes the amount of deposited material. Inspect modified Bridge infill regions in a G-code viewer and validate with a short test print.
 
 ### 🔧 Gap Fill Removal (Optional, `-enableRemoveGapFill`)
 Removes gap fill sections from G-code:

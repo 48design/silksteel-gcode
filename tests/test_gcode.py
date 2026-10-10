@@ -539,6 +539,193 @@ class GCodeSafetyTests(unittest.TestCase):
                               amplitude=0.2, frequency=6)
         self.assertIn("G1 X0 Y5 E0.25 F800", output)
 
+    def test_bridge_densifier_uses_serpentine_without_full_length_return(self):
+        # A genuine U-turn across two reverse-parallel bridge rasters.
+        # Both E modes must preserve original strand and U-turn extrusion,
+        # with two added interior raster strands and no long return move.
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                source_lines = [
+                    ";TYPE:Bridge infill\n",
+                    "G1 X10 Y0 E1.00000 F1500\n",
+                    f"G1 X10 Y0.4 E{0.05 if relative else 1.05:.5f}\n",
+                    f"G1 X0 Y0.4 E{1.00 if relative else 2.05:.5f}\n",
+                    f"G1 E{-0.3 if relative else 1.75:.5f} F3900\n",
+                    "G92 E0\n",
+                    "G0 X0 Y1 F8400\n",
+                ]
+                result, end_e, end_xy = silk.process_bridge_section(
+                    source_lines, 0.4, 0.0, 0.0, 0.0, 0.9,
+                    silk.logging, initial_relative=relative)
+                output = "".join(result)
+                self.assertEqual(output.count("Bridge serpentine intermediate"), 2)
+                self.assertEqual(output.count("Bridge serpentine original strand"), 2)
+                self.assertEqual(output.count("Bridge serpentine U-turn"), 3)
+                self.assertNotIn("Bridge return to source endpoint", output)
+                self.assertNotIn("Bridge intermediate entry", output)
+                self.assertEqual(output.count(
+                    "G1 E-0.30000 F3900" if relative else "G1 E1.75000 F3900"
+                ), 1)
+                self.assertEqual(end_xy, (0.0, 1.0))
+                self.assertAlmostEqual(end_e, 0)
+                if relative:
+                    self.assertNotIn("Bridge serpentine restore M82", output)
+                else:
+                    self.assertIn("M83 ; Bridge serpentine temporary relative E", output)
+                    self.assertIn("M82 ; Bridge serpentine restore M82", output)
+                    self.assertIn("G92 E2.05000 ; Bridge serpentine source E sync", output)
+
+                prefix = ["M83\n" if relative else "M82\n"]
+                deltas, targets, modes = silk.scan_source_extrusion(prefix + result)
+                added = [d for ln,d in zip(result,deltas[1:])
+                         if "Bridge serpentine intermediate" in ln]
+                self.assertEqual(len(added), 2)
+                self.assertTrue(all(d > 0 for d in added))
+                self.assertAlmostEqual(sum(deltas), 1.75 + sum(added), places=4)
+                self.assertAlmostEqual(targets[-1], 0)
+                self.assertEqual(modes[-1], relative)
+
+                # Source XY extrusions remain on their source strokes; the
+                # planner is only allowed to replace the connector geometry.
+                self.assertIn("X10.000 Y0.000 E1.00000", output)
+                self.assertIn("X0.000 Y0.400 E1.00000", output)
+                self.assertIn(";TYPE:Bridge infill", output)
+
+    def test_bridge_serpentine_optimizes_three_strokes_together(self):
+        # Two adjacent U gaps need just one middle strand EACH.
+        # Previously forcing even count PER gap wasted two extra passes.
+        source = [
+            ";TYPE:Bridge infill\n",
+            "G1 X10 Y0 E1.00000 F1400\n",
+            "M117 Printing bridge\n",
+            "G1 X10 Y0.43 E1.04000\n",
+            "G1 X0 Y0.43 E2.04000\n",
+            "G1 X0 Y0.87 E2.08000\n",
+            "G1 X10 Y0.87 E3.08000\n",
+            "G1 E2.78000 F3900\n",
+        ]
+        output, final_e, xy = silk.process_bridge_section(
+            source, 0.4, 0.0, 0.0, 0.0, 0.9, silk.logging)
+        text = "".join(output)
+        self.assertEqual(text.count("Bridge serpentine intermediate"), 2)
+        self.assertEqual(text.count("Bridge serpentine original strand"), 3)
+        self.assertEqual(text.count("M117 Printing bridge"), 1)
+        self.assertEqual(text.count("G1 E2.78000 F3900"), 1)
+        self.assertNotIn("Bridge return to source endpoint", text)
+        self.assertEqual(xy, (10.0, 0.87))
+        self.assertAlmostEqual(final_e, 2.78)
+
+    def test_bridge_densifier_fills_wider_gaps_in_same_snake(self):
+        # Previously spacing >= 0.6mm was ignored. Now add multiple
+        # intermediate strands BETWEEN validated U-connected walls.
+        source = [
+            ";TYPE:Bridge infill\n",
+            "G1 X10 Y0 E1.00000 F1500\n",
+            "G1 X10 Y1.3 E1.05000\n",
+            "G1 X0 Y1.3 E2.05000\n",
+        ]
+        result, end_e, end_xy = silk.process_bridge_section(
+            source, 0.4, 0.0, 0.0, 0.0, 0.9, silk.logging)
+        self.assertGreaterEqual("".join(result).count(
+            "Bridge serpentine intermediate"), 4)
+        self.assertEqual(end_xy, (0.0, 1.3))
+        self.assertAlmostEqual(end_e, 2.05)
+        self.assertNotIn("return to source endpoint", "".join(result).lower())
+
+    def test_bridge_densifier_never_pairs_across_wipe(self):
+        source = [
+            "G1 X10 Y0 E1.00000 F1500\n",
+            ";WIPE_START\n",
+            "G1 X10 Y0.4 E1.05000\n",
+            "G1 X0 Y0.4 E2.05000\n",
+        ]
+        result, _, _ = silk.process_bridge_section(
+            source, 0.4, 0.0, 0.0, 0.0, 0.9, silk.logging)
+        self.assertEqual(result, source)
+
+    def test_bridge_densifier_no_parallel_pair_passthrough(self):
+        original = [
+            ";TYPE:Bridge infill\n",
+            "G1 X8 Y0 E0.8 F1500\n",
+            "G1 X8 Y8 E1.6\n",
+            "G1 E1.4 F3900\n",
+        ]
+        result, end_e, xy = silk.process_bridge_section(
+            original, 0.4, 0.0, 0.0, 0.0, 0.9, silk.logging)
+        self.assertEqual(result, original)
+        self.assertAlmostEqual(end_e, 1.4)
+        self.assertEqual(xy, (8.0, 8.0))
+
+    def test_bridge_densifier_complete_pipeline_without_duplicate_retracts(self):
+        # Two genuinely unsupported bridge strands over an empty area on
+        # layer 1. Tests TYPE buffering, M82/M83, the E-only retract and
+        # the following TYPE handoff (not just the isolated helper).
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                source = "\n".join([
+                    "; layer_height = 0.2", "; first_layer_height = 0.2",
+                    "; extrusion_width = 0.45", "G90",
+                    "M83" if relative else "M82", "G92 E0",
+                    ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
+                    ";LAYER:0", "G1 Z0.2 F8400",
+                    ";TYPE:Internal perimeter",
+                    "G0 X0 Y10 F8400", "G1 X10 Y10 E0.8 F1500",
+                    ";TYPE:Internal infill",
+                    ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2",
+                    ";LAYER:1", "G1 Z0.4 F8400", "G92 E0",
+                    ";TYPE:Bridge infill", ";WIDTH:0.4", "M107",
+                    "G0 X0 Y0 F8400", "G1 F1800",
+                    "G1 X10 Y0 E1.00000",
+                    f"G1 X10 Y0.4 E{0.05 if relative else 1.05:.5f}",
+                    f"G1 X0 Y0.4 E{1 if relative else 2.05:.5f}",
+                    f"G1 E{-0.3 if relative else 1.75:.5f} F3900",
+                    ";TYPE:Internal infill",
+                    "G0 X5 Y5 F8400",
+                ]) + "\n"
+                output = self.process(
+                    source, enable_smoothificator=False,
+                    enable_bridge_densifier=True, enable_safe_z_hop=False)
+                self.assertIn("Bridge serpentine intermediate", output)
+                retract = ("G1 E-0.30000 F3900" if relative
+                           else "G1 E1.75000 F3900")
+                self.assertEqual(output.count(retract), 1)
+                self.assertEqual(output.count("Bridge serpentine intermediate"), 2)
+                if relative:
+                    self.assertNotIn("Bridge serpentine restore M82", output)
+                else:
+                    self.assertIn("G92 E2.05000 ; Bridge serpentine source E sync", output)
+                self.assertIn(";TYPE:Internal infill", output)
+
+    def test_internal_bridge_infill_is_not_densified(self):
+        # Internal bridge infill is a distinct slicer feature, which
+        # Bridge Densifier must leave untouched even when enabled.
+        source = "\n".join([
+            "; layer_height = 0.2", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M82", "G92 E0",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G1 Z0.2 F8400", ";TYPE:Internal perimeter",
+            "G0 X0 Y10 F8400", "G1 X10 Y10 E0.80000 F1500",
+            ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2", ";LAYER:1",
+            "G1 Z0.4 F8400", "G92 E0",
+            ";TYPE:Internal bridge infill", ";WIDTH:0.4",
+            "G0 X0 Y0 F8400", "G1 F1800",
+            "G1 X10 Y0 E1.00000",
+            "G1 X10 Y0.4 E1.05000",
+            "G1 X0 Y0.4 E2.05000",
+            "G1 E1.75000 F3900",
+            ";TYPE:Internal infill",
+        ]) + "\n"
+        baseline = self.process(
+            source, enable_smoothificator=False,
+            enable_bridge_densifier=False)
+        actual = self.process(
+            source, enable_smoothificator=False,
+            enable_bridge_densifier=True)
+        self.assertEqual(actual, baseline)
+        self.assertNotIn("Bridge serpentine intermediate", actual)
+        self.assertIn(";TYPE:Internal bridge infill", actual)
+        self.assertEqual(actual.count("G1 E1.75000 F3900"), 1)
+
     def test_relative_bridge_densifier_is_safely_skipped(self):
         source = fixture(relative=True).replace(
             ";TYPE:Solid infill", ";TYPE:Bridge infill")
