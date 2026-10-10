@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 import SilkSteel as silk
 from tools import audit_outer_walls as wall_audit
@@ -438,6 +439,65 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertGreater(len(e_values), 4)
         self.assertTrue(all(0 < value <= 0.4 for value in e_values))
         self.assertNotIn("Smoothificator E sync", segments)
+
+    def test_nonplanar_xyz_extrusion_rising_falling_flat_and_zero_xy(self):
+        xy, source_e = 0.64, 0.032
+        per_xy_mm = source_e / xy
+        # A horizontal move remains EXACTLY the original slicer amount.
+        self.assertAlmostEqual(
+            silk.nonplanar_segment_extrusion(xy, 0.0, per_xy_mm),
+            source_e)
+        expected = math.hypot(xy, 0.28) * per_xy_mm
+        # Rising and falling Z segments require identical, larger E.
+        self.assertAlmostEqual(
+            silk.nonplanar_segment_extrusion(xy, 0.28, per_xy_mm),
+            expected)
+        self.assertAlmostEqual(
+            silk.nonplanar_segment_extrusion(xy, -0.28, per_xy_mm),
+            expected)
+        self.assertGreater(expected, source_e)
+        # Zero-length XY commands cannot create extrusion from Z alone.
+        self.assertEqual(
+            silk.nonplanar_segment_extrusion(0.0, 0.6, per_xy_mm), 0.0)
+
+    def test_nonplanar_infill_xyz_compensation_both_e_modes(self):
+        # Force a sharp Z rise at X2/Y5, a descent at X4/Y5, and a
+        # horizontal continuation at X6/Y5. Disable adaptive E so that
+        # only the geometric 3D-length correction is under test.
+        def nonplanar_z(_lut, x, y, layer_z, _amplitude, _taper):
+            return layer_z + (0.6 if abs(x - 2) < 0.001
+                              and abs(y - 5) < 0.001 else 0.0)
+
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                with mock.patch.object(silk, 'calculate_nonplanar_z',
+                                       side_effect=nonplanar_z), \
+                     mock.patch.object(silk, 'get_safezone_bounds',
+                                       return_value=(-999.0, 999.0, 0, 0.0)):
+                    output = self.process(
+                        fixture(relative=relative),
+                        enable_smoothificator=False,
+                        enable_nonplanar=True,
+                        enable_adaptive_extrusion=False,
+                        segment_length=2.0, amplitude=0.6)
+                lines = output.splitlines()
+                deltas, _, _ = silk.scan_source_extrusion(lines)
+
+                def e_at_x(target_x):
+                    for line, delta in zip(lines, deltas):
+                        if (line.startswith(f'G1 X{target_x:.3f} Y5.000 Z')
+                                and silk.extract_e(line) is not None):
+                            return delta
+                    self.fail(f'Missing modified infill segment X={target_x}')
+
+                expected_ramp = 0.04 * math.hypot(2.0, 0.6)
+                self.assertAlmostEqual(e_at_x(2), expected_ramp, places=4)
+                self.assertAlmostEqual(e_at_x(4), expected_ramp, places=4)
+                self.assertAlmostEqual(e_at_x(6), 0.08, places=4)
+                if relative:
+                    self.assertNotIn('Non-planar E sync', output)
+                else:
+                    self.assertIn('Non-planar E sync', output)
 
     def test_nonplanar_absolute_e_resyncs_before_next_type(self):
         output = self.process(fixture(), enable_smoothificator=False,

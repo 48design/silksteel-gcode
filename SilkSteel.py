@@ -1266,6 +1266,20 @@ def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_re
         logging.error(f"Error generating LUT visualization for layer {layer_num}: {e}")
         return False
 
+def nonplanar_segment_extrusion(xy_distance, dz, extrusion_per_xy_mm):
+    """Extrude per actual XYZ path length, not its shorter XY projection.
+
+    The slicer supplied E per XY mm for a planar movement. When the tool
+    follows a Z-modulated curve, the same filament per *3D* millimetre
+    requires E = hypot(XY, dZ) * (source E / source XY).
+    The sign of dZ does not matter: descending paths get the same
+    compensation as ascending ones. Avoid inventing E for zero-XY moves.
+    """
+    if xy_distance <= 0 or extrusion_per_xy_mm <= 0:
+        return 0.0
+    return math.hypot(xy_distance, dz) * extrusion_per_xy_mm
+
+
 def process_bridge_section(buffered_lines, current_z, current_e, start_x, start_y,
                            connector_max_length, logging, debug=False,
                            bridge_feedrate_slowdown=0.6, initial_relative=False):
@@ -3745,6 +3759,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             
                             current_e = e_start
                             prev_segment = None
+                            # Start from the physical nozzle Z at the beginning
+                            # of this source move, not from an assumed layer Z.
+                            prev_z = position['z']
                             
                             # STEP 2: Add Z modulation using LUT with wall-proximity tapering
                             # Reduce modulation near walls/perimeters to prevent visible artifacts
@@ -3760,8 +3777,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     # Subsequent segments - distance from previous segment point
                                     seg_distance = math.sqrt((sx - prev_segment[0])**2 + (sy - prev_segment[1])**2)
                                 
-                                # Base extrusion for this segment based on XY distance
-                                base_e_for_segment = seg_distance * e_per_mm
+                                # XY distance alone is insufficient for the
+                                # actual non-planar extrusion. After applying
+                                # the Z modulation/clamp below, calculate the
+                                # true XYZ distance and scale E accordingly.
                                 
                                 # Calculate distance to nearest perimeter/solid to taper modulation
                                 # Check surrounding grid cells for solid material at current layer
@@ -3819,6 +3838,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 if local_z_max < 999:  # Valid z_max
                                     #z_mod = min(local_z_max - (layers_until_ceiling * base_layer_height), z_mod)
                                     z_mod = min(local_z_max, z_mod)
+
+                                # Use the final, CLAMPED Z. This geometric
+                                # compensation applies to both rising and
+                                # falling segments, even outside safezones.
+                                # Adaptive E below remains an *additional*
+                                # material allowance for special Z lifts.
+                                base_e_for_segment = nonplanar_segment_extrusion(
+                                    seg_distance, z_mod - prev_z, e_per_mm
+                                )
 
                                 last_infill_z = z_mod
                                 
