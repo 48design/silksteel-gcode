@@ -587,6 +587,10 @@ function clearComparison(){
 }
 function refreshComparison(){
     if(!$("compareToggle").checked || !model || !data || !referenceData)return;
+    if(playing){
+        if(comparisonLayer!==-1){disposeOverlay(comparisonObjects);comparisonLayer=-1;}
+        return;
+    }
     if(comparisonLayer===visualLayer)return;
     disposeOverlay(comparisonObjects);
     comparisonLayer=visualLayer;
@@ -856,7 +860,7 @@ function updateVisibility() {
     $("layerNext").disabled=current===model.layers.length-1;
     slider.setAttribute("aria-valuetext","Layer "+layer.number+" · Z "+layer.z.toFixed(3)+" mm");
     if($("compareToggle").checked && referenceData)refreshComparison();
-    if($("cutEnabled").checked)scheduleSection();
+    if($("cutEnabled").checked && !playing)scheduleSection();
 }
 function fit() {
     const [lo,hi] = model.bounds;
