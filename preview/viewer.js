@@ -483,8 +483,9 @@ function updateTimelineMarkers() {
     }
     const selected=boundaries[visualLayer];
     if(selected && !labeled.some(p=>p.index===selected.index)){
-        const clash=labeled.findIndex(p=>Math.abs(p.x-selected.x)<minDistance);
-        if(clash>=0)labeled.splice(clash,1);
+        for(let i=labeled.length-1;i>=0;i--){
+            if(Math.abs(labeled[i].x-selected.x)<minDistance)labeled.splice(i,1);
+        }
         labeled.push(selected);
     }
     for(const point of labeled){
