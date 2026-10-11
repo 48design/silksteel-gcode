@@ -8,6 +8,22 @@ A powerful G-code post-processor that transforms your 3D prints by creating silk
 
 ---
 
+## 🔎 Interactive 3D extrusion preview (`-preview`)
+
+Open a local browser-based **volume** viewer automatically after post-processing:
+
+```powershell
+python SilkSteel.py input.gcode -full -o output.gcode -preview
+```
+
+The separate `silksteel_preview.py` module streams the processed G-code into compact binary data. Each deposited path is rendered as a **real 3D solid** with a flattened top/bottom and semicircular sides (corner radius = half the calculated bead height). Its actual width is determined from `ΔE`, filament diameter, path length and bead height—not from color or a cosmetic line width. Colored materials distinguish Smoothificator, Bricklayers base/shifted, non-planar infill, valley filling and bridges.
+
+The viewer has a layer slider, optional ghosted lower layers, track selection with dimensions, and an original/processed switch when `-o` is used to preserve the input. It uses a temporary localhost server, which closes after the viewer has been inactive. Three.js is loaded from a version-pinned CDN, so a browser connection to the CDN is required.
+
+**Accuracy limits:** This is an idealized deposited-volume model, not a fluid/pressure simulation. Nominal layer heights are used where actual bead compression is unknowable from G-code; G2/G3 arcs are currently counted but not rendered (the viewer warns when encountered). Avoid relying on the preview as the only safety check for printing.
+
+---
+
 ## 🎯 What is SilkSteel?
 
 SilkSteel is an advanced G-code post-processing tool developed by [48DESIGN](https://www.48design.de) that applies multiple optimization techniques to your sliced files:
