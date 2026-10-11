@@ -4623,11 +4623,13 @@ if __name__ == "__main__":
                 marker.write("Temporary G-code snapshot for SilkSteel Preview")
             snapshot = os.path.join(snapshot_dir, "processed.gcode")
             shutil.copyfile(processed, snapshot)
-            command = [sys.executable, viewer, snapshot, "--snapshot-dir", snapshot_dir]
+            command = [sys.executable, viewer, snapshot, "--snapshot-dir", snapshot_dir,
+                       "--display-name", os.path.basename(processed)]
             if args.output_file and os.path.abspath(args.input_file) != processed:
                 original_snapshot = os.path.join(snapshot_dir, "original.gcode")
                 shutil.copyfile(os.path.abspath(args.input_file), original_snapshot)
-                command += ["--original", original_snapshot]
+                command += ["--original", original_snapshot,
+                            "--original-display-name", os.path.basename(args.input_file)]
             with open(preview_log, "a", encoding="utf-8") as stream:
                 stream.write(f"\n=== SilkSteel Preview: {processed} ===\n")
                 stream.flush()
