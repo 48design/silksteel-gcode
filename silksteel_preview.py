@@ -27,6 +27,7 @@ def convert(source: Path, destination: Path) -> dict:
     filament, layer_height, first_height = 1.75, 0.2, 0.2
     layer_z = 0.0
     layer_no = -1
+    brick_base_pass = False
     layer = None
     layers = []
     count = ignored_arcs = 0
@@ -37,12 +38,12 @@ def convert(source: Path, destination: Path) -> dict:
     explicit_layers = False
 
     def begin_layer(number: int) -> None:
-        nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley
+        nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley, brick_base_pass
         layer_no = number
         layer = {"number": number, "start": count, "count": 0,
                  "z": layer_z, "height": layer_height if number else first_height}
         layers.append(layer)
-        brick_role, smooth, smooth_height, valley = None, False, None, False
+        brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
 
     with source.open("r", encoding="utf-8", errors="replace") as src, destination.open("wb") as dst:
         for line_no, raw in enumerate(src, 1):
@@ -87,7 +88,7 @@ def convert(source: Path, destination: Path) -> dict:
                         pass
                 elif up.startswith("TYPE:"):
                     role_type = up[5:].strip()
-                    brick_role, smooth, smooth_height, valley = None, False, None, False
+                    brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
                 if "SMOOTHIFICATOR START:" in up:
                     smooth = True
                     m = re.search(r"AT\s+([\d.]+)MM EACH", up)
@@ -95,11 +96,12 @@ def convert(source: Path, destination: Path) -> dict:
                 elif "SMOOTHIFICATOR END" in up:
                     smooth, smooth_height = False, None
                 if "BRICKLAYERS SHIFTED BLOCK" in up:
-                    brick_role = 3
+                    brick_role, brick_base_pass = 3, False
                 elif "BRICKLAYERS BASE PASS" in up or "BRICKLAYERS BASE BLOCK" in up:
                     brick_role = 2
+                    brick_base_pass = "BASE PASS" in up
                 elif "RESET Z" in up or "BRICKLAYERS CONTOUR E SYNC" in up:
-                    brick_role = None
+                    brick_role, brick_base_pass = None, False
                 if "SILKSTEEL: VALLEY_FILL_START" in up:
                     valley = True
                 elif "SILKSTEEL: VALLEY_FILL_END" in up:
@@ -133,12 +135,9 @@ def convert(source: Path, destination: Path) -> dict:
                 if "E" in params:
                     e_pos = params["E"]
             elif cmd in ("G0", "G1", "G2", "G3"):
-                new_pos = [params[ax] if xyz_absolute else pos[i] + params[ax]
-                           if ax in params else pos[i] for i, ax in enumerate("XYZ")]
-                # Avoid binding the conditional to the wrong branch for omitted axes.
-                for i, ax in enumerate("XYZ"):
-                    if ax not in params:
-                        new_pos[i] = pos[i]
+                new_pos = [pos[i] if ax not in params else
+                           (params[ax] if xyz_absolute else pos[i] + params[ax])
+                           for i, ax in enumerate("XYZ")]
                 delta_e = 0.0
                 if "E" in params:
                     delta_e = params["E"] - e_pos if e_absolute else params["E"]
@@ -147,7 +146,7 @@ def convert(source: Path, destination: Path) -> dict:
                     ignored_arcs += 1
                 elif cmd == "G1" and delta_e > 0 and all(map(math.isfinite, new_pos + pos)):
                     length = math.dist(pos, new_pos)
-                    if length > 1e-7:
+                    if length > 1e-7 and math.hypot(new_pos[0]-pos[0], new_pos[1]-pos[1]) > 1e-7:
                         if layer is None:
                             begin_layer(0)
                         if not explicit_layers and new_pos[2] > layer_z + layer_height * 0.5 and count:
@@ -156,7 +155,7 @@ def convert(source: Path, destination: Path) -> dict:
                             layer_z = max(layer_z, new_pos[2])
                             layer["z"] = layer_z
                         h = smooth_height if smooth and smooth_height else layer["height"]
-                        if brick_role == 2 and "BASE PASS" in up:
+                        if brick_base_pass:
                             h *= 0.75
                         h = max(0.01, h)
                         area = (delta_e * math.pi * (filament * 0.5) ** 2) / length
