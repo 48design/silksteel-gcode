@@ -72,6 +72,12 @@ main{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height
 body.dragging #dropOverlay{display:flex}
 #progress[hidden]{display:none}
 .stats{font-size:12px;color:var(--muted);line-height:1.7}
+.inspector-list{max-height:210px;overflow:auto;display:grid;gap:4px;margin-top:8px}
+.inspector-list button{text-align:left;font-size:11px;display:flex;gap:8px;align-items:flex-start;padding:7px;background:#202a38;border-color:#354255}
+.inspector-list button:hover{background:#32445a}
+.inspector-list .warn-dot{width:7px;height:7px;border-radius:50%;background:#ffb157;margin-top:5px;flex:none}
+#cutPosition{margin:8px 0}
+#comparisonSummary{margin-top:8px;white-space:pre-line}
 @media(max-width:690px){#layout{flex-direction:column}aside{width:100%;max-height:34dvh;padding:12px;gap:8px}main{min-height:0}#help{display:none}h1{font-size:17px}section{padding-top:7px}#playbackDock{padding:9px 12px}.timeline-header{flex-wrap:wrap;gap:7px}.timeline-controls{flex-wrap:wrap}.timeline-heading{width:100%}#layerRail{right:8px;transform:translateY(-50%) scale(.85);transform-origin:right center}}
 </style>
 <script type="importmap">
@@ -92,6 +98,23 @@ body.dragging #dropOverlay{display:flex}
 <section><h2>Schichten</h2><label for="below">Darunter anzeigen</label><select id="below"><option value="0">Nur aktuelle Schicht</option><option value="3" selected>3 Schichten</option><option value="12">12 Schichten</option><option value="-1">Alle Schichten (GPU-intensiv)</option></select>
 </section>
 <section><h2>Extrusionstypen</h2><div id="legend"></div><button id="resetColors" type="button">Standardfarben wiederherstellen</button></section>
+<section><h2>Schnittansicht</h2>
+<label><span>Schnitt aktivieren</span><input type="checkbox" id="cutEnabled"></label>
+<label for="cutAxis">Schnittebene</label>
+<select id="cutAxis"><option value="x">X – vertikal</option><option value="y">Y – vertikal</option><option value="z">Z – horizontal</option></select>
+<input id="cutPosition" type="range" min="0" max="1000" step="1" value="500" aria-label="Position der Schnittebene">
+<div class="stats" id="cutValue">Schnitt aus</div>
+<label><span>Richtung umkehren</span><input type="checkbox" id="cutInvert"></label>
+</section>
+<section><h2>Diagnose</h2>
+<label><span>Auffälligkeiten markieren</span><input type="checkbox" id="diagnosticsToggle"></label>
+<div id="diagnosticsSummary" class="stats">Kein G-Code geladen</div>
+<div id="diagnosticsList" class="inspector-list"></div>
+</section>
+<section><h2>Originalvergleich</h2>
+<label><span>Differenzansicht</span><input type="checkbox" id="compareToggle"></label>
+<div id="comparisonSummary" class="stats">Benötigt Original- und SilkSteel-Datei</div>
+</section>
 <section><h2>Darstellung</h2><div class="feature-row"><input type="checkbox" id="showHops" checked aria-label="Z-Hops anzeigen"><input type="color" id="hopColor" value="#ff4655" title="Z-Hop-Farbe ändern" aria-label="Z-Hop-Farbe wählen"><span>Z-Hops anzeigen</span></div><label><span>Gitternetz</span><input type="checkbox" id="gridToggle" checked></label>
 <label><span>Unterliegende Schichten transparent</span><input type="checkbox" id="ghost" checked></label>
 </section>
