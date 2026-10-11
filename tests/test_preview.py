@@ -160,5 +160,17 @@ class PreviewGeometryTests(unittest.TestCase):
 
 
 
+    def test_viewer_uses_timed_record_stride_for_every_segment_role(self):
+        from silksteel_preview import HOP_PACK
+        self.assertEqual(PACK.size, 48)
+        self.assertEqual(HOP_PACK.size, 40)
+        viewer = (Path(__file__).resolve().parents[1] / "preview" / "viewer.js").read_text(encoding="utf-8")
+        self.assertIn("SEGMENT_SIZE = 48", viewer)
+        self.assertIn("index*SEGMENT_SIZE+32", viewer)
+        self.assertIn("const role=readRole(i);", viewer)
+        self.assertNotIn("i*40+32", viewer)
+
+
+
 if __name__ == "__main__":
     unittest.main()
