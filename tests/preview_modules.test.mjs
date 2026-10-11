@@ -56,6 +56,29 @@ const varied=[
 assert.equal(computeJoin(i=>varied[i]||null,0,0,true),null);
 assert.equal(buildJoinAttributes([0],i=>varied[i]||null,0).fallbacks.length,1);
 assert.equal(buildJoinAttributes([0],reader,0).fallbacks.length,0);
+
+// A physical continuation with a different feature must not be welded.
+const mixed=[
+    bead([0,0,.2],[10,0,.2]),
+    {...bead([10,0,.2],[20,0,.2],0,1,2),role:3}
+];
+assert.equal(joinContinuity(i=>mixed[i]||null,0,true),null);
+assert.equal(computeJoin(i=>mixed[i]||null,0,0,true),null);
+assert.equal(buildJoinAttributes([0],i=>mixed[i]||null,0).fallbacks.length,0);
+
+// A width spike on the neighboring path must not inflate the corner
+// transition. Both full beads remain independently closed.
+const extreme=[
+    bead([0,0,.2],[10,0,.2]),
+    {...bead([10,0,.2],[12,2,.2],0,1,2),w:8,h:.035}
+];
+const bounded=buildJoinAttributes([0],i=>extreme[i]||null,0);
+assert.equal(bounded.fallbacks.length,1);
+assert(bounded.fallbacks[0].w<=.46+1e-6);
+assert(bounded.fallbacks[0].h<=.035+1e-6);
+assert(junctionVertexShader.includes("min(iSize.x, h*1.5)"));
+assert(!junctionVertexShader.includes("(iSize.x-h)*0.5"));
+
 assert(junctionVertexShader.includes("clipping_planes_vertex"));
 class StubGeometry {
     constructor(){this.attrs={};}
