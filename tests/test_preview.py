@@ -206,6 +206,8 @@ class PreviewGeometryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     preview.write_colors(palette[:-1] + ["not-a-color"])
                 self.assertEqual(preview.read_colors(), palette)
+                file.write_text(__import__("json").dumps({"colors":palette[:-1]}), encoding="utf-8")
+                self.assertEqual(preview.read_colors(), palette)
 
     def test_full_width_timeline_and_editable_colors_are_wired(self):
         root = Path(__file__).resolve().parents[1]
