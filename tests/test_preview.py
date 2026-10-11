@@ -140,6 +140,25 @@ class PreviewGeometryTests(unittest.TestCase):
             raw = bin_file.with_suffix(".hops.bin").read_bytes()
             self.assertEqual([HOP_PACK.unpack_from(raw, i)[6] for i in range(0, len(raw), HOP_PACK.size)], [0, 1, 2])
 
+    def test_snapshot_survives_slicer_temp_file_deletion(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            slicer_temp = root / ".13112.gcode.pp"
+            slicer_temp.write_text("\n".join([
+                "; layer_height = 0.2",
+                "G90", "M83", "G0 X0 Y0 Z0.2",
+                "G1 X10 Y0 E0.4",
+            ]) + "\n", encoding="utf-8")
+            snapshot = root / "processed.gcode"
+            shutil.copyfile(slicer_temp, snapshot)
+            slicer_temp.unlink()
+            self.assertFalse(slicer_temp.exists())
+            meta = convert(snapshot, root / "preview.bin")
+            self.assertEqual(meta["count"], 1)
+            self.assertEqual(meta["layers"][0]["count"], 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()
