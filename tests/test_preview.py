@@ -319,7 +319,7 @@ class PreviewGeometryTests(unittest.TestCase):
         viewer = (root / "preview" / "viewer.js").read_text(encoding="utf-8")
         html = (root / "preview" / "index.html").read_text(encoding="utf-8")
         backend = (root / "silksteel_preview.py").read_text(encoding="utf-8")
-        for module in ("extrusion_joins", "diagnostics", "comparison", "section"):
+        for module in ("extrusion_joins", "bead_junctions", "diagnostics", "comparison", "section"):
             self.assertTrue((root / "preview" / (module + ".js")).is_file())
             self.assertIn('"' + module + '.js"', backend)
             self.assertIn('from "./' + module + '.js"', viewer)
@@ -329,6 +329,9 @@ class PreviewGeometryTests(unittest.TestCase):
             self.assertIn('id="' + control + '"', html)
             self.assertIn('"'+control+'"', viewer)
         self.assertIn("buildJoinAttributes(items,joinRead,role)", viewer)
+        self.assertIn("makeJunctionGeometry(THREE,join.fallbacks)", viewer)
+        self.assertIn("vec3 p=basePoint + joinVector*lateral", viewer)
+        self.assertNotIn("aCap>0.5 && join.z>0.5", viewer)
         self.assertIn("clipping_planes_pars_fragment", viewer)
         self.assertIn("function refreshComparison()", viewer)
         self.assertIn("function showDiagnostics()", viewer)
