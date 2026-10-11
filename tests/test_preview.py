@@ -314,5 +314,27 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertTrue(all(row[-1]>row[-2] for row in parts))
 
 
+    def test_advanced_viewer_modules_and_local_routes_are_connected(self):
+        root = Path(__file__).resolve().parents[1]
+        viewer = (root / "preview" / "viewer.js").read_text(encoding="utf-8")
+        html = (root / "preview" / "index.html").read_text(encoding="utf-8")
+        backend = (root / "silksteel_preview.py").read_text(encoding="utf-8")
+        for module in ("extrusion_joins", "diagnostics", "comparison", "section"):
+            self.assertTrue((root / "preview" / (module + ".js")).is_file())
+            self.assertIn('"' + module + '.js"', backend)
+            self.assertIn('from "./' + module + '.js"', viewer)
+        for control in ("cutEnabled", "cutAxis", "cutPosition", "cutInvert",
+                        "diagnosticsToggle", "diagnosticsList", "compareToggle",
+                        "comparisonSummary"):
+            self.assertIn('id="' + control + '"', html)
+            self.assertIn('"'+control+'"', viewer)
+        self.assertIn("buildJoinAttributes(items,joinRead,role)", viewer)
+        self.assertIn("clipping_planes_pars_fragment", viewer)
+        self.assertIn("function refreshComparison()", viewer)
+        self.assertIn("function showDiagnostics()", viewer)
+        self.assertIn("const SEGMENT_SIZE = 48, HOP_SIZE = 40", viewer)
+
+
+
 if __name__ == "__main__":
     unittest.main()
