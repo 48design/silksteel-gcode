@@ -31,6 +31,12 @@ main{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height
 #pickInfo{position:absolute;left:16px;bottom:16px;max-width:420px;background:#141a23f0;border:1px solid var(--border);padding:12px 16px;border-radius:9px;display:none;font-variant-numeric:tabular-nums}
 #pickInfo strong{display:block;margin-bottom:5px}
 #toolbar{position:absolute;right:16px;top:16px;display:flex;gap:8px}
+.open-file{width:100%;background:#245582;border-color:#3a79b2;font-weight:600}
+.open-file span{font-size:18px;margin-right:4px}
+.drop-hint{font-size:11px;color:var(--muted);margin:8px 0 0}
+#dropOverlay{position:fixed;inset:10px;background:#10243ae8;border:2px dashed #83bcff;border-radius:15px;z-index:50;display:none;align-items:center;justify-content:center;text-align:center;pointer-events:none;font-weight:700;font-size:20px}
+body.dragging #dropOverlay{display:flex}
+#progress[hidden]{display:none}
 .stats{font-size:12px;color:var(--muted);line-height:1.7}
 @media(max-width:690px){#layout{flex-direction:column}aside{width:100%;max-height:45dvh;padding:13px;gap:8px}main{min-height:55dvh}#help{display:none}h1{font-size:17px}section{padding-top:7px}}
 </style>
@@ -39,9 +45,15 @@ main{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height
 </script>
 </head>
 <body>
+<div id="dropOverlay">G-Code hier ablegen</div>
 <div id="layout">
 <aside>
 <header><h1><span>Silk</span>Steel <small> / PREVIEW</small></h1><div id="fileName" class="muted">G-code wird geladen…</div></header>
+<section><h2>G-Code laden</h2>
+<button type="button" id="openFile" class="open-file"> <span aria-hidden="true">＋</span> G-Code-Datei öffnen</button>
+<input type="file" id="gcodeFile" accept=".gcode,.gc,.g,.pp" hidden>
+<p class="drop-hint">Oder eine .gcode / .gcode.pp direkt ins Fenster ziehen.</p>
+</section>
 <section><h2>G-Code-Version</h2><select id="model"></select><div id="stats" class="stats"></div></section>
 <section><h2>Schichten</h2><div id="layerText">—</div><div id="zText" class="muted"></div><input id="layer" type="range" min="0" max="0" value="0" step="1" aria-label="Sichtbare Schicht">
 <label for="below">Darunter anzeigen</label><select id="below"><option value="0">Nur aktuelle Schicht</option><option value="3" selected>3 Schichten</option><option value="12">12 Schichten</option><option value="-1">Alle Schichten (GPU-intensiv)</option></select>
