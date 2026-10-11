@@ -2,7 +2,18 @@ import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 
 const $ = id => document.getElementById(id);
-const colors = ["#adb8c6","#ae7bff","#3bcbec","#298df2","#ffb75e","#f28dc2","#67db8c"];
+const defaultColors = ["#adb8c6","#ae7bff","#3bcbec","#298df2","#ffb75e","#f28dc2","#67db8c"];
+const validPalette = values => Array.isArray(values) &&
+    values.length === defaultColors.length &&
+    values.every(color => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color));
+function loadPalette(serverColors) {
+    if (validPalette(serverColors)) return [...serverColors];
+    try {
+        const cached = JSON.parse(localStorage.getItem("silksteel.feature-colors.v1"));
+        if (validPalette(cached)) return [...cached];
+    } catch {}
+    return [...defaultColors];
+}
 async function loadPreviewMetadata() {
     const indicator = $("progress");
     for (;;) {
@@ -42,10 +53,44 @@ const grid = new THREE.GridHelper(300, 60, "#4d6076", "#263144");
 scene.add(grid);
 const modelSelect = $("model"), slider = $("layer");
 let model = null, data = null, hopData = null, cache = new Map(), hopCache = new Map(), lastPick = null;
-let activeLayers = [], currentTime = 0, visibleCount = 0, playing = false, previousFrame = 0, loadSerial = 0;
+let activeLayers = [], currentTime = 0, visibleCount = 0, playing = false, previousFrame = 0;
+let playbackMode = "print", selectedLayer = 0, visualLayer = 0, markerKey = "", renderLayers = [];
+const TIMELINE_STEPS = 1000000;
 const SEGMENT_SIZE = 48, HOP_SIZE = 40;
 const visibleRoles = new Set(layout.roles.map((_, i) => i));
+const colors = loadPalette(layout.colors);
 const rgb = colors.map(c => new THREE.Color(c));
+const pickers = [];
+async function savePalette() {
+    const palette = [...colors];
+    try { localStorage.setItem("silksteel.feature-colors.v1", JSON.stringify(palette)); } catch {}
+    try {
+        const response = await fetch("/settings/colors", {
+            method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({colors:palette})
+        });
+        if (!response.ok) throw Error("HTTP "+response.status);
+    } catch (error) {
+        console.warn("Feature-Farben konnten nicht dauerhaft gespeichert werden:", error);
+    }
+}
+function applyColor(index, hex) {
+    if (!/^#[0-9a-f]{6}$/i.test(hex)) return;
+    colors[index] = hex;
+    rgb[index].set(hex);
+    for (const group of cache.values()) {
+        for (const mesh of group.children) {
+            if (mesh.userData.role === index)
+                mesh.material.uniforms.uColor.value.copy(rgb[index]);
+        }
+    }
+    if (headMesh.visible) {
+        const current = Number(headMesh.userData.role);
+        if (current === index)
+            headMesh.material.uniforms.uColor.value.copy(rgb[index]);
+    }
+    if (pickers[index]) pickers[index].value = hex;
+}
 
 function refreshModelOptions() {
     modelSelect.replaceChildren();
@@ -58,17 +103,31 @@ function refreshModelOptions() {
 }
 refreshModelOptions();
 layout.roles.forEach((name, i) => {
-    const label = document.createElement("label");
+    const row = document.createElement("div");
+    row.className = "feature-row";
     const check = document.createElement("input");
     check.type = "checkbox"; check.checked = true;
+    check.setAttribute("aria-label", name+" anzeigen");
     check.addEventListener("change", () => {
         if (check.checked) visibleRoles.add(i); else visibleRoles.delete(i);
         updateVisibility();
     });
-    const dot = document.createElement("span");
-    dot.className = "dot"; dot.style.background = colors[i];
-    label.append(check, dot, document.createTextNode(name));
-    $("legend").append(label);
+    const picker = document.createElement("input");
+    picker.type = "color";
+    picker.value = colors[i];
+    picker.title = name+"-Farbe ändern";
+    picker.setAttribute("aria-label", name+"-Farbe wählen");
+    picker.addEventListener("input", () => applyColor(i,picker.value));
+    picker.addEventListener("change", savePalette);
+    pickers.push(picker);
+    const title = document.createElement("span");
+    title.textContent = name;
+    row.append(check,picker,title);
+    $("legend").append(row);
+});
+$("resetColors").addEventListener("click", () => {
+    defaultColors.forEach((hex,index) => applyColor(index,hex));
+    savePalette();
 });
 
 // Unit cross section consists of TWO semicircles and horizontal top/bottom.
@@ -215,10 +274,21 @@ function withinPrefix(indices, cutoff) {
 }
 const endAt = i => data.getFloat32(i*SEGMENT_SIZE+44,true);
 const hopEndAt = i => hopData.getFloat32(i*HOP_SIZE+36,true);
-function layerAt(segmentIndex) {
-    let lo=0,hi=model.layers.length;
-    while(lo<hi){const mid=(lo+hi)>>>1;if(model.layers[mid].start<=segmentIndex)lo=mid+1;else hi=mid;}
-    return Math.max(0,lo-1);
+function layerAtTime(seconds) {
+    let low=0, high=model.layers.length;
+    while (low<high) {
+        const mid=(low+high)>>>1;
+        if (model.layers[mid].timeStart<=seconds) low=mid+1;
+        else high=mid;
+    }
+    return Math.max(0, Math.min(model.layers.length-1,low-1));
+}
+function layerRange(index=selectedLayer) {
+    const layer=model.layers[index];
+    return [Math.max(0,layer.timeStart ?? 0),Math.max(layer.timeStart ?? 0,layer.timeEnd ?? model.duration)];
+}
+function activeRange() {
+    return playbackMode==="layer" ? layerRange() : [0,model.duration];
 }
 function formatTime(seconds) {
     const s=Math.max(0,Math.floor(seconds));
