@@ -3,6 +3,7 @@ import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 import {buildJoinAttributes} from "./extrusion_joins.js";
 import {analysePrint} from "./diagnostics.js";
 import {closestLayer, compareLayerVolumes} from "./comparison.js";
+import {buildCutContours} from "./section.js";
 
 const $ = id => document.getElementById(id);
 const defaultColors = ["#adb8c6","#ae7bff","#3bcbec","#298df2","#ffb75e","#f28dc2","#67db8c","#ff4655"];
@@ -264,6 +265,8 @@ function forgetLayers() {
     cache.clear();hopCache.clear();activeLayers=[];
     disposeOverlay(diagnosticObjects);
     clearComparison();
+    removeSection();
+    sectionKey="";
     diagnosticReport=null;
     comparisonSerial++;
     headMesh.visible=false; hopTip.visible=false;
@@ -331,6 +334,9 @@ function setPlaying(next) {
     playing=next;
     previousFrame=0;
     $("playToggle").textContent=playing?"Ⅱ Pause":"▶ Abspielen";
+    if(!playing && typeof scheduleSection==="function")scheduleSection();
+    else if(playing)removeSection();
+    if(!playing && referenceData)refreshComparison();
 }
 const joinRead = index => index>=0 && model && index<model.count ? readSegment(index) : null;
 function createLayer(index) {
@@ -429,7 +435,7 @@ hopTip.renderOrder=21;hopTip.frustumCulled=false;hopTip.visible=false;scene.add(
 // Inspection overlays are allocated only when explicitly enabled.
 let diagnosticReport=null, diagnosticLayer=null, diagnosticObjects=[];
 let comparisonLayer=-1, comparisonObjects=[], referenceData=null, referenceModel=null;
-let comparisonSerial=0, cutHelper=null;
+let comparisonSerial=0, cutHelper=null, sectionLines=null, sectionKey="", sectionPending=false;
 function disposeOverlay(objects){
     for(const obj of objects){scene.remove(obj);obj.geometry?.dispose();obj.material?.dispose();}
     objects.length=0;
@@ -452,6 +458,50 @@ function refreshCut(){
         cutHelper=new THREE.PlaneHelper(clipPlane,size,0x80c0ff);
         scene.add(cutHelper);
     }
+    sectionKey="";
+    scheduleSection();
+}
+function removeSection(){
+    if(sectionLines){
+        scene.remove(sectionLines);
+        sectionLines.geometry.dispose();
+        sectionLines.material.dispose();
+        sectionLines=null;
+    }
+}
+function scheduleSection(){
+    if(sectionPending)return;
+    sectionPending=true;
+    requestAnimationFrame(()=>{
+        sectionPending=false;
+        refreshSection();
+    });
+}
+function refreshSection(){
+    if(!model || !data || !$("cutEnabled").checked){removeSection();return;}
+    if(playing){removeSection();return;}
+    const axis=$("cutAxis").value, idx=axis==="x"?0:axis==="y"?1:2;
+    const min=model.bounds[0][idx],max=model.bounds[1][idx];
+    const position=min+(max-min)*Number($("cutPosition").value)/1000;
+    const count=completedBefore(model.count,currentTime,endAt);
+    const below=Number($("below").value);
+    const first=below<0?0:Math.max(0,visualLayer-below);
+    const key=[axis,position.toFixed(4),first,visualLayer,count].join(":");
+    if(sectionKey===key)return;
+    sectionKey=key;
+    removeSection();
+    const slice=buildCutContours(data,model.layers.slice(first,visualLayer+1),axis,position,count);
+    if(slice.vertices.length){
+        const geo=new THREE.BufferGeometry();
+        geo.setAttribute("position",new THREE.BufferAttribute(slice.vertices,3));
+        sectionLines=new THREE.LineSegments(geo,new THREE.LineBasicMaterial({
+            color:0xfff5c0,transparent:true,opacity:.88,depthTest:false,depthWrite:false
+        }));
+        sectionLines.renderOrder=30;
+        scene.add(sectionLines);
+    }
+    $("cutValue").textContent=axis.toUpperCase()+" = "+position.toFixed(3)+
+        " mm · "+slice.contours+" Schnittkonturen"+(slice.truncated?" (begrenzt)":"");
 }
 function showDiagnostics(){
     disposeOverlay(diagnosticObjects);
@@ -806,6 +856,7 @@ function updateVisibility() {
     $("layerNext").disabled=current===model.layers.length-1;
     slider.setAttribute("aria-valuetext","Layer "+layer.number+" · Z "+layer.z.toFixed(3)+" mm");
     if($("compareToggle").checked && referenceData)refreshComparison();
+    if($("cutEnabled").checked)scheduleSection();
 }
 function fit() {
     const [lo,hi] = model.bounds;
