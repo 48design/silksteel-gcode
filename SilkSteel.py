@@ -4560,6 +4560,24 @@ if __name__ == "__main__":
     if args.enable_remove_gap_fill is None:
         args.enable_remove_gap_fill = False
     
+    preview_snapshot_dir = None
+    if args.preview:
+        import shutil
+        import tempfile
+        try:
+            preview_snapshot_dir = tempfile.mkdtemp(prefix="silksteel-preview-input-")
+            with open(os.path.join(preview_snapshot_dir, ".silksteel-preview-snapshot"),
+                      "w", encoding="utf-8") as marker:
+                marker.write("Temporary G-code snapshot for SilkSteel Preview")
+            # Snapshot BEFORE process_gcode overwrites SuperSlicer's input.
+            shutil.copyfile(os.path.abspath(args.input_file),
+                            os.path.join(preview_snapshot_dir, "original.gcode"))
+        except OSError as exc:
+            logging.warning("Could not preserve original for preview: %s", exc)
+            if preview_snapshot_dir:
+                shutil.rmtree(preview_snapshot_dir, ignore_errors=True)
+            preview_snapshot_dir = None
+
     try:
         logging.info("Calling process_gcode()...")
         process_gcode(
@@ -4601,6 +4619,8 @@ if __name__ == "__main__":
         print("=" * 85, file=sys.stderr)
         # Never block slicer post-processing, even when stdin is a console.
         # The traceback is in SilkSteel_log.txt and exit 2 signals failure.
+        if preview_snapshot_dir:
+            shutil.rmtree(preview_snapshot_dir, ignore_errors=True)
         sys.exit(2)
     
     if args.preview:
@@ -4617,16 +4637,21 @@ if __name__ == "__main__":
             # SuperSlicer removes its temporary *.gcode.pp immediately when the
             # post-processing script exits. Snapshot the finished G-code before
             # launching the detached viewer, which converts it in the background.
-            snapshot_dir = tempfile.mkdtemp(prefix="silksteel-preview-input-")
-            with open(os.path.join(snapshot_dir, ".silksteel-preview-snapshot"), "w",
-                      encoding="utf-8") as marker:
-                marker.write("Temporary G-code snapshot for SilkSteel Preview")
+            snapshot_dir = preview_snapshot_dir or tempfile.mkdtemp(
+                prefix="silksteel-preview-input-")
+            if not preview_snapshot_dir:
+                with open(os.path.join(snapshot_dir, ".silksteel-preview-snapshot"), "w",
+                          encoding="utf-8") as marker:
+                    marker.write("Temporary G-code snapshot for SilkSteel Preview")
             snapshot = os.path.join(snapshot_dir, "processed.gcode")
             shutil.copyfile(processed, snapshot)
             command = [sys.executable, viewer, snapshot, "--snapshot-dir", snapshot_dir,
                        "--display-name", os.path.basename(processed)]
-            if args.output_file and os.path.abspath(args.input_file) != processed:
-                original_snapshot = os.path.join(snapshot_dir, "original.gcode")
+            original_snapshot = os.path.join(snapshot_dir, "original.gcode")
+            if os.path.isfile(original_snapshot):
+                command += ["--original", original_snapshot,
+                            "--original-display-name", os.path.basename(args.input_file)]
+            elif args.output_file and os.path.abspath(args.input_file) != processed:
                 shutil.copyfile(os.path.abspath(args.input_file), original_snapshot)
                 command += ["--original", original_snapshot,
                             "--original-display-name", os.path.basename(args.input_file)]
