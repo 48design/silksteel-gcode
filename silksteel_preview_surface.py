@@ -39,7 +39,7 @@ class DepositedSurface:
 
     def _effective_height(
         self, x: float, y: float, z: float, area: float, nominal: float,
-        first_layer: float
+        first_layer: float, layer_z: float | None = None
     ) -> float:
         diameter = self.free_diameter(area)
         clearance = max(0.015, min(0.055, nominal * 0.25))
@@ -47,13 +47,24 @@ class DepositedSurface:
         # The build plate is the known support for the first actual layer.
         if z <= first_layer + 0.025:
             support = max(support, 0.0) if support is not None else 0.0
+        # A near-coplanar path is NOT evidence of an additional squeezed
+        # layer. Sparse sampling can mistake adjacent tracks for support,
+        # producing a 0.02-mm "height" and absurdly wide plastic ribbons.
+        # Never squeeze the predicted strand below the programmed pass height.
+        minimum_height = min(nominal, diameter)
         if support is None:
             return diameter
-        return min(diameter, max(clearance, z - support))
+        gap = max(0.0, z - support)
+        # A raised non-planar path has extra clearance even when coarse XY
+        # occupancy accidentally reports a neighboring same-layer strand.
+        if layer_z is not None:
+            gap = max(gap, nominal + max(0.0, z - layer_z))
+        return min(diameter, max(minimum_height, gap))
 
     def sections(
         self, start: tuple[float, float, float], end: tuple[float, float, float],
-        area: float, nominal: float, first_layer: float
+        area: float, nominal: float, first_layer: float,
+        layer_z: float | None = None
     ) -> list[tuple[float, float, float, float]]:
         """Return t0, t1, width, height. All pieces preserve A=volume/length.
 
@@ -73,7 +84,8 @@ class DepositedSurface:
             x = start[0] + (end[0] - start[0]) * t
             y = start[1] + (end[1] - start[1]) * t
             z = start[2] + (end[2] - start[2]) * t
-            heights.append(self._effective_height(x, y, z, area, nominal, first_layer))
+            heights.append(self._effective_height(
+                x, y, z, area, nominal, first_layer, layer_z))
 
         # Group similar cross-sections to keep the GPU instance count small.
         tolerance = max(0.014, min(0.035, nominal * 0.13))
