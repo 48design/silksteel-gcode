@@ -57,7 +57,8 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
         layer_no = number
         layer = {"number": number, "start": count, "count": 0,
                  "hopStart": hop_count, "hopCount": 0,
-                 "z": layer_z, "height": layer_height if number else (first_height or layer_height)}
+                 "z": layer_z, "height": layer_height if number else (first_height or layer_height),
+                 "timeStart": elapsed, "timeEnd": elapsed}
         layers.append(layer)
         brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
 
@@ -241,6 +242,9 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
 
     if not count:
         raise ValueError(f"No extruding G1 XY/XYZ movements found in {source.name}")
+    for index, item in enumerate(layers):
+        item["timeEnd"] = (layers[index + 1]["timeStart"]
+                           if index + 1 < len(layers) else elapsed)
     if not explicit_layers and layers and layers[0]["number"] == -1:
         layers[0]["number"] = 0
     return {"filename": source.name, "url": "", "count": count, "hopCount": hop_count,
