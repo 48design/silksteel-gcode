@@ -729,7 +729,11 @@ function selectSegment(event) {
     const title=document.createElement("strong");
     title.textContent=layout.roles[pick.role]+" · G-Code-Zeile "+pick.line;
     const body=document.createElement("div");
-    body.textContent="Breite "+pick.w.toFixed(3)+" mm · Höhe "+pick.h.toFixed(3)+" mm · Länge "+length.toFixed(2)+" mm · ΔE "+extruded.toFixed(5)+" mm";
+    const freeDiameter = Math.sqrt(4*area/Math.PI);
+    const form = pick.h >= freeDiameter*0.985 ? "rund / frei" : "abgeflacht / aufliegend";
+    body.textContent="Profil "+form+" · Breite "+pick.w.toFixed(3)+" mm · Höhe "+
+        pick.h.toFixed(3)+" mm · Länge "+length.toFixed(2)+" mm · ΔE "+
+        extruded.toFixed(5)+" mm";
     $("pickInfo").append(title,body);
 }
 let down;
