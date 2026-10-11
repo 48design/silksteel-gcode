@@ -10,6 +10,8 @@ import shutil
 import traceback
 import uuid
 from urllib.parse import unquote
+
+from silksteel_preview_surface import DepositedSurface
 from pathlib import Path
 import re
 import struct
@@ -80,6 +82,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     feedrate = 1800.0
     elapsed = 0.0
     hop_active = False
+    surface = DepositedSurface()
     role_type, brick_role, smooth, valley = "", None, False, False
     smooth_height = None
     min_xyz = [math.inf] * 3
@@ -243,37 +246,50 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         if not explicit_layers:
                             layer_z = max(layer_z, new_pos[2])
                             layer["z"] = layer_z
-                        h = smooth_height if smooth and smooth_height else layer["height"]
+                        nominal_h = smooth_height if smooth and smooth_height else layer["height"]
                         if brick_base_pass:
-                            h *= 0.75
-                        h = max(0.01, h)
+                            nominal_h *= 0.75
+                        nominal_h = max(0.01, nominal_h)
                         area = (delta_e * math.pi * (filament * 0.5) ** 2) / length
-                        # Below a full semicircular section, the bead cannot fill
-                        # nominal layer height; reduce its height instead of
-                        # depicting material that was never extruded.
-                        if 0 < area < math.pi * h * h / 4:
-                            h = math.sqrt(4 * area / math.pi)
-                        width = area / h + h * (1 - math.pi / 4)
-                        if math.isfinite(width) and width >= h * 0.25 and width <= 40:
-                            if valley:
-                                role = 5
-                            elif brick_role is not None:
-                                role = brick_role
-                            elif smooth:
-                                role = 1
-                            elif role_type.startswith("BRIDGE") or role_type.startswith("INTERNAL BRIDGE"):
-                                role = 6
-                            elif "INFILL" in role_type and "Z" in params and abs(new_pos[2] - layer["z"]) > 0.005:
-                                role = 4
-                            else:
-                                role = 0
-                            dst.write(PACK.pack(*(pos + new_pos + [width, h]), role, line_no, started, elapsed))
-                            layer["count"] += 1
-                            count += 1
-                            for p in (pos, new_pos):
-                                for i, c in enumerate(p):
-                                    min_xyz[i] = min(min_xyz[i], c)
-                                    max_xyz[i] = max(max_xyz[i], c)
+                        if valley:
+                            role = 5
+                        elif brick_role is not None:
+                            role = brick_role
+                        elif smooth:
+                            role = 1
+                        elif role_type.startswith("BRIDGE") or role_type.startswith("INTERNAL BRIDGE"):
+                            role = 6
+                        elif "INFILL" in role_type and "Z" in params and abs(new_pos[2] - layer["z"]) > 0.005:
+                            role = 4
+                        else:
+                            role = 0
+                        # Determine support along the *entire* raw move before
+                        # recording any part of it, avoiding artificial self-support.
+                        segments = surface.sections(
+                            tuple(pos), tuple(new_pos), area, nominal_h,
+                            first_height or layer_height
+                        )
+                        if segments and all(
+                            math.isfinite(w) and math.isfinite(h) and h > 0 and
+                            h <= w <= 40 for _, _, w, h in segments
+                        ):
+                            dx = [new_pos[i] - pos[i] for i in range(3)]
+                            for t0, t1, width, height in segments:
+                                a_pos = [pos[i] + dx[i] * t0 for i in range(3)]
+                                b_pos = [pos[i] + dx[i] * t1 for i in range(3)]
+                                start_t = started + (elapsed - started) * t0
+                                end_t = started + (elapsed - started) * t1
+                                dst.write(PACK.pack(
+                                    *(a_pos + b_pos + [width, height]),
+                                    role, line_no, start_t, end_t
+                                ))
+                                layer["count"] += 1
+                                count += 1
+                            surface.deposit(tuple(pos), tuple(new_pos), segments)
+                            for point in (pos, new_pos):
+                                for i, coordinate in enumerate(point):
+                                    min_xyz[i] = min(min_xyz[i], coordinate)
+                                    max_xyz[i] = max(max_xyz[i], coordinate)
                 pos = new_pos
 
     if not count:
