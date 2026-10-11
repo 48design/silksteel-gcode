@@ -95,7 +95,7 @@ body.dragging #dropOverlay{display:flex}
 <section><h2>Darstellung</h2><div class="feature-row"><input type="checkbox" id="showHops" checked aria-label="Z-Hops anzeigen"><input type="color" id="hopColor" value="#ff4655" title="Z-Hop-Farbe ändern" aria-label="Z-Hop-Farbe wählen"><span>Z-Hops anzeigen</span></div><label><span>Gitternetz</span><input type="checkbox" id="gridToggle" checked></label>
 <label><span>Unterliegende Schichten transparent</span><input type="checkbox" id="ghost" checked></label>
 </section>
-<p class="muted" style="margin-top:auto;font-size:11px">Echte Mesh-Querschnitte: flache Ober-/Unterseite, halbrunde Flanken. Strangbreite aus extrudiertem Volumen und Schichthöhe berechnet. Idealisierte Geometrie, keine Schmelzsimulation.</p>
+<p class="muted" style="margin-top:auto;font-size:11px">Variable 3D-Strangprofile: abgeflacht auf Material, zunehmend rund bei größerem Z-Abstand oder ohne Untergrund. Die extrudierte Materialmenge bleibt erhalten. Idealisierte Geometrie, keine Schmelzsimulation.</p>
 </aside>
 <main id="viewport"><div id="layerRail" aria-label="Layer auswählen"><span class="layer-title" id="layerText">Layer —</span><button id="layerNext" title="Nächster Layer" aria-label="Nächster Layer">＋</button><input id="layer" type="range" min="0" max="0" value="0" step="1" orient="vertical" aria-label="Aktueller Layer"><button id="layerPrev" title="Vorheriger Layer" aria-label="Vorheriger Layer">−</button><span id="layerZ">Z —</span></div><div id="progress">Initialisierung der 3D-Vorschau…</div><div id="toolbar"><button id="resetView">Ansicht zurücksetzen</button></div><div id="pickInfo"></div><div id="help">Ziehen: Drehen · Rechtsklick: Verschieben · Rad: Zoom · Klick: Bahn-Details · Rot: SilkSteel-Z-Hops</div></main>
 </div>
