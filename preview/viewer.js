@@ -405,7 +405,7 @@ function changeTimelineMode(mode) {
     $("modeLayer").setAttribute("aria-pressed",String(mode==="layer"));
     $("timelineMarkers").classList.toggle("layer-mode",mode==="layer");
     markerKey="";
-    seek(currentTime);
+    seek(mode==="layer" ? layerRange(selectedLayer)[0] : currentTime);
 }
 function chooseLayer(index) {
     if(!model)return;
@@ -413,9 +413,10 @@ function chooseLayer(index) {
     selectedLayer=Math.max(0,Math.min(model.layers.length-1,index));
     const [from,to]=layerRange(selectedLayer);
     const last=model.layers[selectedLayer].start+model.layers[selectedLayer].count-1;
-    // The final deposition time is inside this layer even if a layer change
-    // occurs immediately at the boundary. Empty layers show their endpoint.
-    let time=last>=model.layers[selectedLayer].start?endAt(last):to;
+    // In layer playback, selecting another layer prepares its first move;
+    // in full-print mode it shows that layer already deposited.
+    let time=playbackMode==="layer" ? from :
+        (last>=model.layers[selectedLayer].start?endAt(last):to);
     time=Math.max(from,Math.min(to,time));
     if(playbackMode==="print"&&selectedLayer<model.layers.length-1)
         time=Math.max(from,Math.min(time,to-0.00002));
