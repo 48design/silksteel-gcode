@@ -8,7 +8,8 @@ async function load(file){
     const code=readFileSync(join(root,"preview",file));
     return import("data:text/javascript;base64,"+code.toString("base64"));
 }
-const {computeJoin,buildJoinAttributes}=await load("extrusion_joins.js");
+const {computeJoin,joinContinuity,buildJoinAttributes}=await load("extrusion_joins.js");
+const {makeJunctionGeometry,junctionVertexShader}=await load("bead_junctions.js");
 const {analysePrint}=await load("diagnostics.js");
 const {compareLayerVolumes}=await load("comparison.js");
 const {buildCutContours}=await load("section.js");
@@ -31,6 +32,48 @@ assert.equal(joins.joinsEnd[5],0);
 assert.equal(computeJoin(i=>[
     bead([0,0,.2],[10,0,.2]),bead([10,0,.2],[10,10,.2],0,1,2)
 ][i]||null,0,0,true).miter.length,2);
+
+// Playback must not expose a missing end cap when the next G1 is hidden.
+const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
+assert(viewer.includes("vec3 p=basePoint + joinVector*lateral"));
+assert(!viewer.includes("aCap>0.5 && join.z>0.5"));
+const sharp=[
+    bead([0,0,.2],[10,0,.2]),
+    bead([10,0,.2],[9,.1,.2],0,1,2)
+];
+const sharpReader=i=>sharp[i]||null;
+assert(joinContinuity(sharpReader,0,true));
+assert.equal(computeJoin(sharpReader,0,0,true),null);
+const sharpJoin=buildJoinAttributes([0],sharpReader,0);
+assert.equal(sharpJoin.fallbacks.length,1);
+assert.equal(sharpJoin.fallbacks[0].index,0);
+assert.equal(sharpJoin.joinsEnd[2],0);
+
+const varied=[
+    bead([0,0,.2],[10,0,.2]),
+    {...bead([10,0,.2],[15,2,.2],0,1,2),w:1.1}
+];
+assert.equal(computeJoin(i=>varied[i]||null,0,0,true),null);
+assert.equal(buildJoinAttributes([0],i=>varied[i]||null,0).fallbacks.length,1);
+assert.equal(buildJoinAttributes([0],reader,0).fallbacks.length,0);
+assert(junctionVertexShader.includes("clipping_planes_vertex"));
+class StubGeometry {
+    constructor(){this.attrs={};}
+    setAttribute(name,value){this.attrs[name]=value;}
+    setIndex(indices){this.indices=indices;}
+}
+class StubAttribute {
+    constructor(values,size){this.values=values;this.size=size;}
+}
+const THREEStub={
+    InstancedBufferGeometry:StubGeometry,
+    Float32BufferAttribute:StubAttribute,
+    InstancedBufferAttribute:StubAttribute
+};
+const geom=makeJunctionGeometry(THREEStub,sharpJoin.fallbacks);
+assert.equal(geom.instanceCount,1);
+assert(geom.indices.length>100);
+assert.equal(geom.attrs.iSize.values.length,2);
 
 function packed(records){
     const buffer=new ArrayBuffer(records.length*48),view=new DataView(buffer);
