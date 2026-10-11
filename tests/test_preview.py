@@ -293,6 +293,25 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(upper[-1][7],diameter,places=3)
         self.assertAlmostEqual(sum(row[-1]-row[-2] for row in upper),1.0,places=3)
         self.assertEqual(set(int(row[8]) for row in upper),{0})
+        self.assertEqual(len(set(int(row[9]) for row in upper)),1)
+
+    def test_feature_color_survives_local_cross_section_splitting(self):
+        meta, rows = self.parse([
+            "; layer_height = 0.2",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G90", "M83", "G0 X0 Y0 Z0.2 F1200",
+            "G1 X10 Y0 E0.4",
+            ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2", ";LAYER:1",
+            "G0 X0 Y0 Z0.4",
+            "; SilkSteel: VALLEY_FILL_START",
+            "G1 X20 Y0 E0.8",
+            "; SilkSteel: VALLEY_FILL_END",
+        ])
+        parts = rows[meta["layers"][1]["start"]:]
+        self.assertGreater(len(parts),1)
+        self.assertEqual({int(row[8]) for row in parts},{5})
+        self.assertEqual(len({int(row[9]) for row in parts}),1)
+        self.assertTrue(all(row[-1]>row[-2] for row in parts))
 
 
 if __name__ == "__main__":
