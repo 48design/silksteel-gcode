@@ -6,7 +6,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import os
+import shutil
 import traceback
+import uuid
+from urllib.parse import unquote
 from pathlib import Path
 import re
 import struct
@@ -246,7 +249,8 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             "ignored_arcs": ignored_arcs}
 
 
-def serve(processed: Path, original: Path | None = None) -> None:
+def serve(processed: Path, original: Path | None = None,
+          display_name: str | None = None, original_display_name: str | None = None) -> None:
     """Open the browser before parsing; make failures observable to the user."""
     assets = Path(__file__).resolve().parent / "preview"
     with tempfile.TemporaryDirectory(prefix="silksteel-preview-") as tmp:
@@ -258,6 +262,54 @@ def serve(processed: Path, original: Path | None = None) -> None:
         ready = threading.Event()
 
         class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.path != "/upload":
+                    self.send_error(404)
+                    return
+                origin = self.headers.get("Origin")
+                if origin and origin != f"http://127.0.0.1:{server.server_port}":
+                    self.send_error(403, "Invalid upload origin")
+                    return
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self.send_error(400, "Invalid file size")
+                    return
+                if size <= 0 or size > 2 * 1024 ** 3:
+                    self.send_error(413, "G-code file must be between 1 byte and 2 GiB")
+                    return
+                filename = Path(unquote(self.headers.get("X-Gcode-Filename", "uploaded.gcode"))).name
+                if not filename.lower().endswith((".gcode", ".gcode.pp", ".gc", ".g")):
+                    self.send_error(415, "Only G-code files are supported")
+                    return
+                upload = root / f"upload-{uuid.uuid4().hex}.gcode"
+                try:
+                    remaining = size
+                    with upload.open("wb") as dst:
+                        while remaining:
+                            block = self.rfile.read(min(1024 * 1024, remaining))
+                            if not block:
+                                raise ConnectionError("Incomplete G-code upload")
+                            dst.write(block)
+                            remaining -= len(block)
+                except (OSError, ConnectionError) as exc:
+                    upload.unlink(missing_ok=True)
+                    self.send_error(400, str(exc))
+                    return
+                state.update(status="loading", message=f"{filename} wird analysiert…",
+                             progress=0, lines=0)
+                threading.Thread(target=prepare_upload, args=(upload, filename),
+                                 daemon=True).start()
+                payload = b'{"accepted":true}'
+                self.send_response(202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                try:
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
             def do_GET(self):
                 path = self.path.split("?", 1)[0]
                 if path == "/ping":
@@ -306,12 +358,33 @@ def serve(processed: Path, original: Path | None = None) -> None:
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 
+        def prepare_upload(upload, display):
+            try:
+                target = root / f"model-{uuid.uuid4().hex}.bin"
+                def update(lines, percent):
+                    state["lines"] = lines
+                    state["progress"] = percent
+                model = convert(upload, target, progress=update)
+                model["name"] = display
+                model["filename"] = display
+                model["url"] = "/" + target.name
+                model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
+                models.append(model)
+                state.update(status="ready", message="Vorschau bereit", progress=100)
+                print(f"SilkSteel Preview: loaded {display}", flush=True)
+            except Exception as exc:
+                traceback.print_exc()
+                state.update(status="error", message=f"{type(exc).__name__}: {exc}")
+            finally:
+                upload.unlink(missing_ok=True)
+                ready.set()
+
         def prepare_files():
             try:
-                sources = [("SilkSteel", processed)]
+                sources = [("SilkSteel", processed, display_name or processed.name)]
                 if original is not None:
-                    sources.append(("Original", original))
-                for index, (label, source) in enumerate(sources):
+                    sources.append(("Original", original, original_display_name or original.name))
+                for index, (label, source, display) in enumerate(sources):
                     state["message"] = f"{label}: {source.name} wird analysiert…"
                     state["progress"] = int(index * 100 / len(sources))
                     state["lines"] = 0
@@ -323,6 +396,7 @@ def serve(processed: Path, original: Path | None = None) -> None:
                     target = root / (label.lower() + ".bin")
                     model = convert(source, target, progress=update)
                     model["name"], model["url"] = label, "/" + target.name
+                    model["filename"] = display
                     model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
                     models.append(model)
                 state.update(status="ready", message="Vorschau bereit", progress=100)
@@ -336,7 +410,7 @@ def serve(processed: Path, original: Path | None = None) -> None:
         def idle_watchdog():
             while True:
                 time.sleep(20)
-                if ready.is_set() and time.monotonic() - heartbeat["at"] > 120:
+                if ready.is_set() and state["status"] != "loading" and time.monotonic() - heartbeat["at"] > 120:
                     server.shutdown()
                     return
 
@@ -363,6 +437,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SilkSteel 3D extrusion preview")
     parser.add_argument("processed", type=Path)
     parser.add_argument("--original", type=Path)
+    parser.add_argument("--display-name")
+    parser.add_argument("--original-display-name")
+    parser.add_argument("--snapshot-dir", type=Path)
     arguments = parser.parse_args()
-    serve(arguments.processed.resolve(),
-          arguments.original.resolve() if arguments.original else None)
+    try:
+        serve(arguments.processed.resolve(),
+              arguments.original.resolve() if arguments.original else None,
+              arguments.display_name, arguments.original_display_name)
+    finally:
+        if arguments.snapshot_dir:
+            path = arguments.snapshot_dir.resolve()
+            temp_root = Path(tempfile.gettempdir()).resolve()
+            if (path.parent == temp_root and path.name.startswith("silksteel-preview-input-")
+                    and (path / ".silksteel-preview-snapshot").is_file()):
+                shutil.rmtree(path, ignore_errors=True)
