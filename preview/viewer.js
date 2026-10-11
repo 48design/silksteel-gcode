@@ -3,7 +3,28 @@ import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 
 const $ = id => document.getElementById(id);
 const colors = ["#adb8c6","#ae7bff","#3bcbec","#298df2","#ffb75e","#f28dc2","#67db8c"];
-const layout = await (await fetch("/meta.json")).json();
+async function loadPreviewMetadata() {
+    const indicator = $("progress");
+    for (;;) {
+        const response = await fetch("/meta.json", {cache:"no-store"});
+        if (!response.ok) {
+            indicator.textContent = "Preview-Server nicht erreichbar (HTTP "+response.status+")";
+            throw new Error(indicator.textContent);
+        }
+        const metadata = await response.json();
+        if (metadata.status === "error") {
+            indicator.textContent = "G-Code-Analyse fehlgeschlagen: "+metadata.message;
+            throw new Error(metadata.message);
+        }
+        if (metadata.status === "ready" || !metadata.status) return metadata;
+        indicator.hidden = false;
+        indicator.textContent = (metadata.message || "G-Code wird analysiert…") +
+            " " + (metadata.progress || 0) + "% · " +
+            (metadata.lines || 0).toLocaleString("de-DE") + " Zeilen";
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+}
+const layout = await loadPreviewMetadata();
 const canvasHost = $("viewport");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#0c1119");
