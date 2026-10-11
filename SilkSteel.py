@@ -3966,6 +3966,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                             )
                                         valley_start_e += seg['e_delta']
                                     
+                                    # Mark only the EXTRA filling strokes, not the original valley path.
+                                    write_and_track(output_buffer,
+                                        "; SilkSteel: VALLEY_FILL_START\n", recent_output_lines)
                                     # FILL THE VALLEY - go back and forth to build up to layer_z
                                     min_z = min(seg['z'] for seg in valley_segments)
                                     valley_depth = layer_z - min_z
@@ -4071,6 +4074,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                                     )
                                                 prev_point = (seg['x'], seg['y'])
                                     
+                                    write_and_track(output_buffer,
+                                        "; SilkSteel: VALLEY_FILL_END\n", recent_output_lines)
                                     # DECREMENT crossing count for each unique cell touched by this valley
                                     # This ensures next valley will have one less crossing to skip
                                     for cell_key in cells_touched_by_valley:
@@ -4428,6 +4433,8 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument('input_file', help='Input G-code file')
+    parser.add_argument('-preview', '--preview', action='store_true',
+                        help='Open an interactive 3D extrusion preview after processing')
     parser.add_argument('-o', '--output', dest='output_file', 
                        help='Output G-code file. If not specified, modifies input file IN-PLACE (required for slicer usage). '
                             'Use -o for manual testing to preserve the original file.')
@@ -4596,6 +4603,21 @@ if __name__ == "__main__":
         # The traceback is in SilkSteel_log.txt and exit 2 signals failure.
         sys.exit(2)
     
+    if args.preview:
+        import subprocess
+        viewer = os.path.join(os.path.dirname(os.path.abspath(__file__)), "silksteel_preview.py")
+        processed = os.path.abspath(args.output_file or args.input_file)
+        command = [sys.executable, viewer, processed]
+        if args.output_file and os.path.abspath(args.input_file) != processed:
+            command += ["--original", os.path.abspath(args.input_file)]
+        try:
+            subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            print("  Opening SilkSteel 3D preview in your browser...")
+        except OSError as exc:
+            logging.warning("Unable to launch 3D preview: %s", exc)
+
     # Check for warnings/errors and pause if any occurred (after successful completion)
     if _warning_count > 0 or _error_count > 0:
         print("\n" + "=" * 85)
