@@ -9,10 +9,11 @@ export function closestLayer(layers,z) {
     });
     return best;
 }
-function sampleLayer(data,layer,{xy=.65,z=.20,maxSamples=1000000}={}) {
+function sampleLayer(data,layer,{xy=.65,z=.20,maxSamples=60000}={}) {
     const cells=new Map();
     let volume=0,samples=0;
     const start=layer.start,stop=start+layer.count;
+    const sampleEvery=Math.max(1,Math.ceil(layer.count/maxSamples));
     for(let i=start;i<stop;i++){
         const o=i*STRIDE;
         const a=[0,4,8].map(d=>data.getFloat32(o+d,true));
@@ -23,6 +24,7 @@ function sampleLayer(data,layer,{xy=.65,z=.20,maxSamples=1000000}={}) {
         const area=width*height-(1-Math.PI/4)*height*height;
         const vol=area*length;
         volume+=vol;
+        if((i-start)%sampleEvery!==0)continue;
         const n=Math.max(1,Math.min(64,Math.ceil(length/xy)));
         // Sample budget prevents adversarial G-code from exhausting browser RAM.
         const stride=Math.max(1,Math.ceil(layer.count*n/maxSamples));
@@ -32,7 +34,7 @@ function sampleLayer(data,layer,{xy=.65,z=.20,maxSamples=1000000}={}) {
             const key=[Math.floor(p[0]/xy),Math.floor(p[1]/xy),Math.floor(p[2]/z)].join(",");
             let cell=cells.get(key);
             if(!cell){cell={vol:0,pos:p};cells.set(key,cell);}
-            cell.vol+=vol*(Math.min(n,t+stride)-t)/n;
+            cell.vol+=vol*sampleEvery*(Math.min(n,t+stride)-t)/n;
             samples++;
         }
     }
