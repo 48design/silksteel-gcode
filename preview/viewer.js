@@ -262,6 +262,10 @@ function forgetLayers() {
     for (const group of cache.values()) {scene.remove(group);disposeGroup(group);}
     for (const group of hopCache.values()) {scene.remove(group);disposeHopGroup(group);}
     cache.clear();hopCache.clear();activeLayers=[];
+    disposeOverlay(diagnosticObjects);
+    clearComparison();
+    diagnosticReport=null;
+    comparisonSerial++;
     headMesh.visible=false; hopTip.visible=false;
     if(lastPick){scene.remove(lastPick);lastPick.geometry.dispose();lastPick.material.dispose();lastPick=null;}
     $("pickInfo").style.display="none";
@@ -442,7 +446,7 @@ function refreshCut(){
     clipPlane.normal.copy(n);
     clipPlane.constant=enabled?-position*n.getComponent(coord):1e9;
     $("cutValue").textContent=enabled?axis.toUpperCase()+" = "+position.toFixed(3)+" mm":"Schnitt aus";
-    if(cutHelper){scene.remove(cutHelper);cutHelper.dispose();cutHelper=null;}
+    if(cutHelper){scene.remove(cutHelper);cutHelper.geometry.dispose();cutHelper.material.dispose();cutHelper=null;}
     if(enabled){
         const size=Math.max(10,...bounds[1].map((v,i)=>v-bounds[0][i]))*1.08;
         cutHelper=new THREE.PlaneHelper(clipPlane,size,0x80c0ff);
@@ -801,6 +805,7 @@ function updateVisibility() {
     $("layerPrev").disabled=current===0;
     $("layerNext").disabled=current===model.layers.length-1;
     slider.setAttribute("aria-valuetext","Layer "+layer.number+" · Z "+layer.z.toFixed(3)+" mm");
+    if($("compareToggle").checked && referenceData)refreshComparison();
 }
 function fit() {
     const [lo,hi] = model.bounds;
@@ -831,7 +836,11 @@ async function loadModel(index) {
     selectedLayer=Math.max(0,model.layers.length-1);
     markerKey="";
     fit();
+    refreshCut();
     seek(model.duration);
+    $("diagnosticsSummary").textContent="Diagnose bei Bedarf aktivieren";
+    if($("diagnosticsToggle").checked)showDiagnostics();
+    if($("compareToggle").checked)enableComparison();
     $("progress").hidden=true;
 }
 modelSelect.addEventListener("change",()=>{
@@ -886,6 +895,17 @@ $("ghost").addEventListener("change",updateVisibility);
 $("showHops").addEventListener("change",updateVisibility);
 $("gridToggle").addEventListener("change",()=>{grid.visible=$("gridToggle").checked;});
 $("resetView").addEventListener("click",fit);
+for(const id of ["cutEnabled","cutInvert","cutAxis","cutPosition"]){
+    $(id).addEventListener("input",refreshCut);
+}
+$("diagnosticsToggle").addEventListener("change",showDiagnostics);
+$("compareToggle").addEventListener("change",()=>{
+    if($("compareToggle").checked)enableComparison();
+    else{
+        comparisonSerial++;clearComparison();
+        $("comparisonSummary").textContent="Vergleich deaktiviert";
+    }
+});
 function showError(error) {
     $("progress").hidden=false;
     $("progress").textContent="Vorschaufehler: "+error.message;
