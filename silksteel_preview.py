@@ -159,6 +159,11 @@ def convert(source: Path, destination: Path) -> dict:
                             h *= 0.75
                         h = max(0.01, h)
                         area = (delta_e * math.pi * (filament * 0.5) ** 2) / length
+                        # Below a full semicircular section, the bead cannot fill
+                        # nominal layer height; reduce its height instead of
+                        # depicting material that was never extruded.
+                        if 0 < area < math.pi * h * h / 4:
+                            h = math.sqrt(4 * area / math.pi)
                         width = area / h + h * (1 - math.pi / 4)
                         if math.isfinite(width) and width >= h * 0.25 and width <= 40:
                             if valley:
