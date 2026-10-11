@@ -65,7 +65,17 @@ export function buildJoinAttributes(indices,read,role) {
                 // the full volume and footprint at each end.
                 const h=Math.max(.02,Math.min(match.a.h,match.b.h));
                 const w=Math.max(h,Math.min(match.a.w,match.b.w));
-                fallbacks.push({index:id,pos:[...p.b],w,h,role});
+                // Orient corner fillers along the actual G-code path.
+                // A vertically oriented disc is not a deposited filament.
+                const a=match.a, b=match.b;
+                const u=[a.b[0]-a.a[0],a.b[1]-a.a[1],a.b[2]-a.a[2]];
+                const v=[b.b[0]-b.a[0],b.b[1]-b.a[1],b.b[2]-b.a[2]];
+                const ul=Math.hypot(...u),vl=Math.hypot(...v);
+                const tangent=u.map((x,k)=>x/(ul||1)+v[k]/(vl||1));
+                const tl=Math.hypot(...tangent);
+                const unit=(tl>1e-6?tangent.map(x=>x/tl):u.map(x=>x/(ul||1)));
+                const span=Math.max(0.001,Math.min(.5*h,match.l1*.25,match.l2*.25));
+                fallbacks.push({index:id,pos:[...p.b],w,h,role,tangent:unit,span});
             }
         }
     }
