@@ -18,8 +18,9 @@ controls.dampingFactor = .075;
 const grid = new THREE.GridHelper(300, 60, "#4d6076", "#263144");
 scene.add(grid);
 const modelSelect = $("model"), slider = $("layer");
-let model = null, data = null, cache = new Map(), groups = [], lastPick = null;
-let activeLayers = [];
+let model = null, data = null, hopData = null, cache = new Map(), hopCache = new Map(), lastPick = null;
+let activeLayers = [], currentTime = 0, visibleCount = 0, playing = false, previousFrame = 0, loadSerial = 0;
+const SEGMENT_SIZE = 48, HOP_SIZE = 40;
 const visibleRoles = new Set(layout.roles.map((_, i) => i));
 const rgb = colors.map(c => new THREE.Color(c));
 
@@ -142,19 +143,59 @@ function disposeGroup(group) {
 }
 function forgetLayers() {
     for (const group of cache.values()) {scene.remove(group);disposeGroup(group);}
-    cache.clear(); groups=[]; activeLayers=[];
+    for (const group of hopCache.values()) {scene.remove(group);disposeHopGroup(group);}
+    cache.clear();hopCache.clear();activeLayers=[];
+    headMesh.visible=false; hopTip.visible=false;
     if(lastPick){scene.remove(lastPick);lastPick.geometry.dispose();lastPick.material.dispose();lastPick=null;}
+    $("pickInfo").style.display="none";
 }
 function readSegment(index) {
-    const off=index*40;
+    const off=index*SEGMENT_SIZE;
     return {
       a:[data.getFloat32(off,true),data.getFloat32(off+4,true),data.getFloat32(off+8,true)],
       b:[data.getFloat32(off+12,true),data.getFloat32(off+16,true),data.getFloat32(off+20,true)],
       w:data.getFloat32(off+24,true),
       h:data.getFloat32(off+28,true),
       role:data.getUint32(off+32,true),
-      line:data.getUint32(off+36,true)
+      line:data.getUint32(off+36,true),
+      start:data.getFloat32(off+40,true),
+      end:data.getFloat32(off+44,true)
     };
+}
+function readHop(index) {
+    const off = index*HOP_SIZE;
+    return {
+      a:[hopData.getFloat32(off,true),hopData.getFloat32(off+4,true),hopData.getFloat32(off+8,true)],
+      b:[hopData.getFloat32(off+12,true),hopData.getFloat32(off+16,true),hopData.getFloat32(off+20,true)],
+      kind:hopData.getUint32(off+24,true),line:hopData.getUint32(off+28,true),
+      start:hopData.getFloat32(off+32,true),end:hopData.getFloat32(off+36,true)
+    };
+}
+function completedBefore(n, t, endAt) {
+    let lo=0,hi=n;
+    while(lo<hi){const mid=(lo+hi)>>>1;if(endAt(mid)<=t)lo=mid+1;else hi=mid;}
+    return lo;
+}
+function withinPrefix(indices, cutoff) {
+    let lo=0,hi=indices.length;
+    while(lo<hi){const mid=(lo+hi)>>>1;if(indices[mid]<cutoff)lo=mid+1;else hi=mid;}
+    return lo;
+}
+const endAt = i => data.getFloat32(i*SEGMENT_SIZE+44,true);
+const hopEndAt = i => hopData.getFloat32(i*HOP_SIZE+36,true);
+function layerAt(segmentIndex) {
+    let lo=0,hi=model.layers.length;
+    while(lo<hi){const mid=(lo+hi)>>>1;if(model.layers[mid].start<=segmentIndex)lo=mid+1;else hi=mid;}
+    return Math.max(0,lo-1);
+}
+function formatTime(seconds) {
+    const s=Math.max(0,Math.floor(seconds));
+    return String(Math.floor(s/3600))+":"+String(Math.floor(s%3600/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0");
+}
+function setPlaying(next) {
+    playing=next;
+    previousFrame=0;
+    $("playToggle").textContent=playing?"Ⅱ Pause":"▶ Abspielen";
 }
 function createLayer(index) {
     const info = model.layers[index];
@@ -183,6 +224,7 @@ function createLayer(index) {
             const mesh=new THREE.Mesh(geometry,newMaterial(role,false));
             mesh.frustumCulled=false;
             mesh.userData.role=role;
+            mesh.userData.indices=Uint32Array.from(items);
             group.add(mesh);
         }
     }
@@ -194,18 +236,67 @@ function getLayer(index) {
     if(!g){g=createLayer(index);cache.set(index,g);}
     return g;
 }
+function createHopLayer(index) {
+    const info=model.layers[index], positions=new Float32Array(info.hopCount*6);
+    for(let n=0;n<info.hopCount;n++){
+        const hop=readHop(info.hopStart+n);
+        positions.set([hop.a[0],hop.a[2],hop.a[1],hop.b[0],hop.b[2],hop.b[1]],n*6);
+    }
+    const geometry=new THREE.BufferGeometry();
+    geometry.setAttribute("position",new THREE.BufferAttribute(positions,3));
+    const lines=new THREE.LineSegments(geometry,new THREE.LineBasicMaterial({color:"#ff4655",depthTest:false,depthWrite:false}));
+    lines.frustumCulled=false;lines.renderOrder=20;
+    return lines;
+}
+function disposeHopGroup(group) {
+    group.geometry.dispose();group.material.dispose();
+}
+function renderTip(mesh, p, fraction) {
+    const stop=p.a.map((v,i)=>v+(p.b[i]-v)*fraction);
+    const attrs=mesh.geometry.attributes;
+    attrs.iStart.array.set(p.a);
+    attrs.iStop.array.set(stop);
+    attrs.iStart.needsUpdate=true;
+    attrs.iStop.needsUpdate=true;
+    if(attrs.iSize){attrs.iSize.array.set([p.w,p.h]);attrs.iSize.needsUpdate=true;}
+    mesh.visible=true;
+}
+const headGeometry=base.clone();
+headGeometry.setAttribute("iStart",new THREE.InstancedBufferAttribute(new Float32Array(3),3));
+headGeometry.setAttribute("iStop",new THREE.InstancedBufferAttribute(new Float32Array(3),3));
+headGeometry.setAttribute("iSize",new THREE.InstancedBufferAttribute(new Float32Array(2),2));
+headGeometry.instanceCount=1;
+const headMesh=new THREE.Mesh(headGeometry,newMaterial(0,false));
+headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
+const hopTipGeom=new THREE.BufferGeometry();
+hopTipGeom.setAttribute("position",new THREE.BufferAttribute(new Float32Array(6),3));
+const hopTip=new THREE.Line(hopTipGeom,new THREE.LineBasicMaterial({color:"#ff4655",depthTest:false,depthWrite:false}));
+hopTip.renderOrder=21;hopTip.frustumCulled=false;hopTip.visible=false;scene.add(hopTip);
+function seek(seconds) {
+    if(!model||!data)return;
+    currentTime=Math.max(0,Math.min(model.duration,seconds));
+    $("timeline").value=model.duration?Math.round(currentTime/model.duration*10000):0;
+    $("elapsed").textContent=formatTime(currentTime);
+    $("percent").textContent=(model.duration?100*currentTime/model.duration:100).toFixed(1)+" %";
+    updateVisibility();
+}
 function updateVisibility() {
-    const current=Number(slider.value);
+    if(!model || !data)return;
+    const finished=completedBefore(model.count,currentTime,endAt);
+    const current=layerAt(Math.min(finished,model.count-1));
+    visibleCount=finished;
+    slider.value=String(current);
     const below=Number($("below").value);
     const start=below<0?0:Math.max(0,current-below);
-    const keep = new Set();
+    const keep=new Set();
     activeLayers=[];
     for(let i=start;i<=current;i++){
         const group=getLayer(i);keep.add(i);activeLayers.push(group);
-        if(!group.parent) scene.add(group);
+        if(!group.parent)scene.add(group);
         for(const mesh of group.children){
-            mesh.visible=visibleRoles.has(mesh.userData.role);
-            const faded=i!==current && $("ghost").checked;
+            mesh.geometry.instanceCount=withinPrefix(mesh.userData.indices,finished);
+            mesh.visible=mesh.geometry.instanceCount>0&&visibleRoles.has(mesh.userData.role);
+            const faded=i!==current&&$("ghost").checked;
             if(mesh.userData.faded!==faded){
                 mesh.material.dispose();
                 mesh.material=newMaterial(mesh.userData.role,faded);
@@ -216,11 +307,59 @@ function updateVisibility() {
     for(const [i,group] of cache){
         if(!keep.has(i)){
             scene.remove(group);
-            if(cache.size>24 || below===0){disposeGroup(group);cache.delete(i);}
+            if(cache.size>24||below===0){disposeGroup(group);cache.delete(i);}
         }
     }
-    $("layerText").textContent = "Layer "+ model.layers[current].number+" / "+model.layers.at(-1).number;
-    $("zText").textContent = "Z "+model.layers[current].z.toFixed(3)+" mm · Höhe "+model.layers[current].height.toFixed(3)+" mm · "+model.layers[current].count.toLocaleString("de-DE")+" Segmente";
+    headMesh.visible=false;
+    if(finished<model.count){
+        const p=readSegment(finished);
+        if(p.start<=currentTime&&currentTime<p.end&&visibleRoles.has(p.role)){
+            const alpha=Math.max(0,Math.min(1,(currentTime-p.start)/(p.end-p.start)));
+            if(alpha>0){
+                headMesh.material.uniforms.uColor.value.copy(rgb[p.role]);
+                renderTip(headMesh,p,alpha);
+            }
+        }
+    }
+    const hopsFinished=completedBefore(model.hopCount,currentTime,hopEndAt);
+    const showHops=$("showHops").checked;
+    for(let i=start;i<=current;i++){
+        const info=model.layers[i];
+        if(!showHops||!info.hopCount)continue;
+        let g=hopCache.get(i);
+        if(!g){g=createHopLayer(i);hopCache.set(i,g);}
+        keep.add("h"+i);
+        if(!g.parent)scene.add(g);
+        g.geometry.setDrawRange(0,2*Math.max(0,Math.min(info.hopCount,hopsFinished-info.hopStart)));
+        g.visible=true;
+    }
+    for(const [i,g] of hopCache){
+        if(!showHops||!keep.has("h"+i)){
+            scene.remove(g);
+            if(hopCache.size>24||!showHops){disposeHopGroup(g);hopCache.delete(i);}
+        }
+    }
+    hopTip.visible=false;
+    if(showHops&&hopsFinished<model.hopCount){
+        const hop=readHop(hopsFinished);
+        if(hop.start<=currentTime&&currentTime<hop.end){
+            const startIndex=model.layers.findIndex(l=>hopsFinished>=l.hopStart&&hopsFinished<l.hopStart+l.hopCount);
+            if(startIndex>=start&&startIndex<=current){
+                const ratio=Math.max(0,Math.min(1,(currentTime-hop.start)/(hop.end-hop.start)));
+                const p=hopTip.geometry.attributes.position;
+                p.array.set([hop.a[0],hop.a[2],hop.a[1],
+                    hop.a[0]+(hop.b[0]-hop.a[0])*ratio,
+                    hop.a[2]+(hop.b[2]-hop.a[2])*ratio,
+                    hop.a[1]+(hop.b[1]-hop.a[1])*ratio]);
+                p.needsUpdate=true;hopTip.visible=ratio>0;
+            }
+        }
+    }
+    const layer=model.layers[current];
+    $("layerText").textContent="Layer "+layer.number+" / "+model.layers.at(-1).number;
+    $("zText").textContent="Z "+layer.z.toFixed(3)+" mm · Höhe "+layer.height.toFixed(3)+" mm · "+
+        Math.max(0,Math.min(layer.count,finished-layer.start)).toLocaleString("de-DE")+" / "+
+        layer.count.toLocaleString("de-DE")+" Stränge";
 }
 function fit() {
     const [lo,hi] = model.bounds;
@@ -238,21 +377,35 @@ async function loadModel(index) {
     model=layout.models[index];
     $("progress").hidden=false;
     $("progress").textContent="Lade "+model.name+" · "+model.count.toLocaleString("de-DE")+" Stränge…";
-    const response=await fetch(model.url);
-    if(!response.ok)throw Error("HTTP "+response.status);
+    const [response,hopResponse]=await Promise.all([fetch(model.url),fetch(model.hopUrl)]);
+    if(!response.ok||!hopResponse.ok)throw Error("HTTP "+response.status+" / "+hopResponse.status);
     data=new DataView(await response.arrayBuffer());
+    hopData=new DataView(await hopResponse.arrayBuffer());
     $("fileName").textContent=model.filename;
     $("stats").textContent=model.count.toLocaleString("de-DE")+" Extrusionssegmente · "+model.layers.length+" Layer · Filament Ø "+model.filament.toFixed(2)+" mm"+(model.ignored_arcs?" · Achtung: "+model.ignored_arcs+" Bögen nicht dargestellt":"");
     slider.max=String(model.layers.length-1);
-    slider.value=slider.max;
+    $("duration").textContent=formatTime(model.duration);
     fit();
-    updateVisibility();
+    seek(model.duration);
     $("progress").hidden=true;
 }
-modelSelect.addEventListener("change",()=>loadModel(Number(modelSelect.value)).catch(showError));
-slider.addEventListener("input",()=>updateVisibility());
+modelSelect.addEventListener("change",()=>{setPlaying(false);loadModel(Number(modelSelect.value)).catch(showError);});
+slider.addEventListener("input",()=>{
+    setPlaying(false);
+    const layer=model.layers[Number(slider.value)];
+    const last=layer.start+layer.count-1;
+    seek(last>=0?endAt(last):0);
+});
+$("timeline").addEventListener("input",()=>{setPlaying(false);seek(Number($("timeline").value)/10000*model.duration);});
+$("playToggle").addEventListener("click",()=>{
+    if(!model)return;
+    if(!playing&&currentTime>=model.duration)seek(0);
+    setPlaying(!playing);
+});
+$("restart").addEventListener("click",()=>{setPlaying(false);seek(0);});
 $("below").addEventListener("change",updateVisibility);
 $("ghost").addEventListener("change",updateVisibility);
+$("showHops").addEventListener("change",updateVisibility);
 $("gridToggle").addEventListener("change",()=>{grid.visible=$("gridToggle").checked;});
 $("resetView").addEventListener("click",fit);
 function showError(error) {
@@ -269,7 +422,7 @@ function selectSegment(event) {
     const current=Number(slider.value), layer=model.layers[current];
     let best=12*12, pick=null;
     const a=new THREE.Vector3(),b=new THREE.Vector3();
-    for(let i=layer.start;i<layer.start+layer.count;i++){
+    for(let i=layer.start;i<Math.min(layer.start+layer.count,visibleCount);i++){
         const p=readSegment(i);
         if(!visibleRoles.has(p.role))continue;
         a.set(p.a[0],p.a[2],p.a[1]).project(camera);
@@ -305,7 +458,18 @@ const resize = new ResizeObserver(() => {
     if(w&&h){renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
 });
 resize.observe(canvasHost);
-renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera);});
+renderer.setAnimationLoop(()=>{
+    const now=performance.now();
+    if(playing&&model&&data){
+        if(previousFrame){
+            const next=Math.min(model.duration,currentTime+(now-previousFrame)/1000*Number($("playSpeed").value));
+            seek(next);
+            if(next>=model.duration)setPlaying(false);
+        }
+        previousFrame=now;
+    }
+    controls.update();renderer.render(scene,camera);
+});
 // The detached Python server releases its temporary binary files after inactivity.
 setInterval(() => fetch("/ping", {cache:"no-store"}).catch(() => {}), 20000);
 loadModel(0).catch(showError);
