@@ -59,8 +59,10 @@ export function buildJoinAttributes(indices,read,role) {
             const match=joinContinuity(read,id,true);
             if(match && (match.dot<.995 || Math.abs(match.a.w-match.b.w)>.015 ||
                Math.abs(match.a.h-match.b.h)>.015)){
-                const h=Math.max(.02,Math.min(match.a.h,match.b.h));
-                const w=Math.max(h,Math.min(match.a.w,match.b.w));
+                // Cover the larger adjacent footprint; a smaller patch would
+                // leave a triangular void at a rapid width or height change.
+                const h=Math.max(.02,match.a.h,match.b.h);
+                const w=Math.max(h,match.a.w,match.b.w);
                 fallbacks.push({index:id,pos:[...p.b],w,h,role});
             }
         }
