@@ -76,7 +76,10 @@ const bounded=buildJoinAttributes([0],i=>extreme[i]||null,0);
 assert.equal(bounded.fallbacks.length,1);
 assert(bounded.fallbacks[0].w<=.46+1e-6);
 assert(bounded.fallbacks[0].h<=.035+1e-6);
-assert(junctionVertexShader.includes("min(iSize.x, h*1.5)"));
+assert(junctionVertexShader.includes("min(min(iSize.x,iSize.y*1.5),0.8)"));
+assert(junctionVertexShader.includes("iTangent.x,iTangent.z,iTangent.y"));
+assert(junctionVertexShader.includes("tangent*(span*longitudinal)"));
+assert(!junctionVertexShader.includes("iCenter.x+radius*aCircle.x"));
 assert(!junctionVertexShader.includes("(iSize.x-h)*0.5"));
 
 assert(junctionVertexShader.includes("clipping_planes_vertex"));
@@ -97,6 +100,17 @@ const geom=makeJunctionGeometry(THREEStub,sharpJoin.fallbacks);
 assert.equal(geom.instanceCount,1);
 assert(geom.indices.length>100);
 assert.equal(geom.attrs.iSize.values.length,2);
+assert.equal(geom.attrs.iTangent.values.length,3);
+assert.equal(geom.attrs.iSpan.values.length,1);
+// Reversal falls back to the incoming XY travel direction, not vertical.
+assert(Math.abs(geom.attrs.iTangent.values[0]-1)<1e-6);
+assert(Math.abs(geom.attrs.iTangent.values[1])<1e-6);
+assert(Math.abs(geom.attrs.iTangent.values[2])<1e-6);
+assert(geom.attrs.iSpan.values[0]>0);
+assert(geom.attrs.iSpan.values[0]<=sharpJoin.fallbacks[0].h*.5+1e-6);
+const giantJunction=makeJunctionGeometry(THREEStub,bounded.fallbacks);
+assert(giantJunction.attrs.iSize.values[0]<=.46+1e-6);
+assert(giantJunction.attrs.iSize.values[1]<=.035+1e-6);
 
 function packed(records){
     const buffer=new ArrayBuffer(records.length*48),view=new DataView(buffer);
