@@ -194,7 +194,7 @@ class PreviewGeometryTests(unittest.TestCase):
         from unittest import mock
         import silksteel_preview as preview
         palette = ["#111111", "#AABBCC", "#335577", "#fedcba",
-                   "#550011", "#447799", "#123456"]
+                   "#550011", "#447799", "#123456", "#ff4655"]
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict("os.environ", {"LOCALAPPDATA": tmp}):
                 preview.write_colors(palette)
@@ -220,6 +220,7 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertIn('id="layerRail"', markup)
         self.assertIn('id="timelineTicks"', markup)
         self.assertIn('id="resetColors"', markup)
+        self.assertIn('id="hopColor"', markup)
 
 
 if __name__ == "__main__":
