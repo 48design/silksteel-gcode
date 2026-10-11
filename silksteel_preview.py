@@ -397,10 +397,12 @@ def serve(processed: Path | None = None, original: Path | None = None,
                         {"models": models, "roles": ROLES, "colors": read_colors(), **state}
                     ).encode("utf-8")
                     mime = "application/json"
-                elif path in ("/", "/viewer.js"):
-                    target = assets / ("index.html" if path == "/" else "viewer.js")
+                elif path in ("/", "/viewer.js", "/extrusion_joins.js",
+                              "/diagnostics.js", "/comparison.js"):
+                    target = assets / ("index.html" if path == "/" else path.lstrip("/"))
                     payload = target.read_bytes()
-                    mime = "text/html; charset=utf-8" if path == "/" else "text/javascript; charset=utf-8"
+                    mime = ("text/html; charset=utf-8" if path == "/"
+                            else "text/javascript; charset=utf-8")
                 elif state["status"] == "ready" and any(
                     path in (m["url"], m["hopUrl"]) for m in models
                 ):
