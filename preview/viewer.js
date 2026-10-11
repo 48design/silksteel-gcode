@@ -422,6 +422,166 @@ const hopTipGeom=new THREE.BufferGeometry();
 hopTipGeom.setAttribute("position",new THREE.BufferAttribute(new Float32Array(6),3));
 const hopTip=new THREE.Line(hopTipGeom,new THREE.LineBasicMaterial({color:colors[7],depthTest:false,depthWrite:false,clippingPlanes:clipPlanes}));
 hopTip.renderOrder=21;hopTip.frustumCulled=false;hopTip.visible=false;scene.add(hopTip);
+// Inspection overlays are allocated only when explicitly enabled.
+let diagnosticReport=null, diagnosticLayer=null, diagnosticObjects=[];
+let comparisonLayer=-1, comparisonObjects=[], referenceData=null, referenceModel=null;
+let comparisonSerial=0, cutHelper=null;
+function disposeOverlay(objects){
+    for(const obj of objects){scene.remove(obj);obj.geometry?.dispose();obj.material?.dispose();}
+    objects.length=0;
+}
+function refreshCut(){
+    const enabled=$("cutEnabled").checked && !!model;
+    const axis=$("cutAxis").value, n=new THREE.Vector3(0,0,0);
+    const idx=axis==="x"?0:axis==="y"?1:2;
+    const coord=idx===2?1:idx===1?2:0;
+    n.setComponent(coord,$("cutInvert").checked?-1:1);
+    const bounds=model?.bounds||[[0,0,0],[1,1,1]];
+    const min=bounds[0][idx],max=bounds[1][idx];
+    const position=min+(max-min)*Number($("cutPosition").value)/1000;
+    clipPlane.normal.copy(n);
+    clipPlane.constant=enabled?-position*n.getComponent(coord):1e9;
+    $("cutValue").textContent=enabled?axis.toUpperCase()+" = "+position.toFixed(3)+" mm":"Schnitt aus";
+    if(cutHelper){scene.remove(cutHelper);cutHelper.dispose();cutHelper=null;}
+    if(enabled){
+        const size=Math.max(10,...bounds[1].map((v,i)=>v-bounds[0][i]))*1.08;
+        cutHelper=new THREE.PlaneHelper(clipPlane,size,0x80c0ff);
+        scene.add(cutHelper);
+    }
+}
+function showDiagnostics(){
+    disposeOverlay(diagnosticObjects);
+    const list=$("diagnosticsList");
+    list.replaceChildren();
+    if(!model || !data){$("diagnosticsSummary").textContent="Kein G-Code geladen";return;}
+    if(!$("diagnosticsToggle").checked){
+        $("diagnosticsSummary").textContent="Diagnose deaktiviert";
+        return;
+    }
+    if(!diagnosticReport)diagnosticReport=analysePrint(data,hopData,model.layers);
+    const {findings,counts,total}=diagnosticReport;
+    $("diagnosticsSummary").textContent=total+" Auffälligkeiten ("+
+        findings.length+" exemplarisch gelistet) · heuristische Hinweise, keine Druckfehler-Garantie";
+    for(const issue of findings){
+        const btn=document.createElement("button");
+        const dot=document.createElement("span");dot.className="warn-dot";
+        const label=document.createElement("span");
+        label.textContent=issue.type+": "+issue.text;
+        btn.append(dot,label);
+        btn.title="Zu "+issue.type+" springen";
+        btn.addEventListener("click",()=>{
+            setPlaying(false);
+            if(playbackMode==="layer")selectedLayer=issue.layer;
+            seek(issue.time);
+            controls.target.set(issue.position[0],issue.position[2],issue.position[1]);
+            const dist=Math.max(3,(model.bounds[1][0]-model.bounds[0][0])*.08);
+            camera.position.set(issue.position[0]+dist,issue.position[2]+dist,issue.position[1]+dist);
+            controls.update();
+        });
+        list.append(btn);
+    }
+    const maxPoints=Math.min(findings.length,400);
+    const points=new Float32Array(maxPoints*3);
+    for(let i=0;i<maxPoints;i++){
+        const p=findings[i].position;
+        points.set([p[0],p[2],p[1]],i*3);
+    }
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute("position",new THREE.BufferAttribute(points,3));
+    const obj=new THREE.Points(geo,new THREE.PointsMaterial({
+        color:0xffa54d,size:7,sizeAttenuation:false,depthTest:false,clippingPlanes:clipPlanes
+    }));
+    obj.renderOrder=25;
+    scene.add(obj);diagnosticObjects.push(obj);
+}
+function referenceIndex(){
+    const selected=Number(modelSelect.value);
+    if(layout.models.length<2)return -1;
+    const original=layout.models.findIndex((m,i)=>i!==selected&&m.name==="Original");
+    return original>=0?original:layout.models.findIndex((_,i)=>i!==selected);
+}
+async function enableComparison(){
+    comparisonSerial++;
+    const serial=comparisonSerial;
+    clearComparison();
+    if(!$("compareToggle").checked || !model || !data)return;
+    const idx=referenceIndex();
+    if(idx<0){
+        $("comparisonSummary").textContent="Bitte zuerst Original- und bearbeiteten G-Code laden.";
+        return;
+    }
+    referenceModel=layout.models[idx];
+    $("comparisonSummary").textContent="Lade "+referenceModel.filename+"…";
+    try{
+        const response=await fetch(referenceModel.url);
+        if(!response.ok)throw Error("HTTP "+response.status);
+        const buffer=await response.arrayBuffer();
+        if(serial!==comparisonSerial)return;
+        if(buffer.byteLength!==referenceModel.count*SEGMENT_SIZE)throw Error("Referenz-Binärformat ungültig");
+        referenceData=new DataView(buffer);
+        comparisonLayer=-1;
+        refreshComparison();
+    }catch(error){
+        if(serial===comparisonSerial)$("comparisonSummary").textContent="Vergleich nicht möglich: "+error.message;
+    }
+}
+function clearComparison(){
+    disposeOverlay(comparisonObjects);
+    comparisonLayer=-1;
+    referenceData=null;
+    referenceModel=null;
+}
+function refreshComparison(){
+    if(!$("compareToggle").checked || !model || !data || !referenceData)return;
+    if(comparisonLayer===visualLayer)return;
+    disposeOverlay(comparisonObjects);
+    comparisonLayer=visualLayer;
+    const active=model.layers[visualLayer];
+    if(!active)return;
+    const refIndex=closestLayer(referenceModel.layers,active.z);
+    const refLayer=referenceModel.layers[refIndex];
+    const result=compareLayerVolumes(data,active,referenceData,refLayer);
+    const positions=[];
+    const stride=Math.max(1,Math.ceil(refLayer.count/120000));
+    for(let i=refLayer.start;i<refLayer.start+refLayer.count;i+=stride){
+        const o=i*SEGMENT_SIZE;
+        positions.push(referenceData.getFloat32(o,true),referenceData.getFloat32(o+8,true),
+            referenceData.getFloat32(o+4,true),referenceData.getFloat32(o+12,true),
+            referenceData.getFloat32(o+20,true),referenceData.getFloat32(o+16,true));
+    }
+    if(positions.length){
+        const geo=new THREE.BufferGeometry();
+        geo.setAttribute("position",new THREE.Float32BufferAttribute(positions,3));
+        const lines=new THREE.LineSegments(geo,new THREE.LineBasicMaterial({
+            color:0x7ae0e8,transparent:true,opacity:.55,depthWrite:false,clippingPlanes:clipPlanes
+        }));
+        lines.renderOrder=5;
+        scene.add(lines);comparisonObjects.push(lines);
+    }
+    const colors=[],points=[];
+    for(const entry of result.diffs){
+        points.push(entry.pos[0],entry.pos[2],entry.pos[1]);
+        if(entry.delta>0)colors.push(0.3,1,.45);
+        else colors.push(1,.28,.38);
+    }
+    if(points.length){
+        const geo=new THREE.BufferGeometry();
+        geo.setAttribute("position",new THREE.Float32BufferAttribute(points,3));
+        geo.setAttribute("color",new THREE.Float32BufferAttribute(colors,3));
+        const cloud=new THREE.Points(geo,new THREE.PointsMaterial({
+            vertexColors:true,size:4,sizeAttenuation:false,depthTest:false,clippingPlanes:clipPlanes
+        }));
+        cloud.renderOrder=22;scene.add(cloud);comparisonObjects.push(cloud);
+    }
+    $("comparisonSummary").textContent=
+        "Layer "+active.number+" ↔ "+refLayer.number+" (Z "+active.z.toFixed(2)+
+        " / "+refLayer.z.toFixed(2)+" mm)\n"+
+        "Volumen: "+result.processedVolume.toFixed(1)+" / "+result.originalVolume.toFixed(1)+
+        " mm³ · Δ "+(result.deltaVolume>=0?"+":"")+result.deltaVolume.toFixed(1)+
+        " mm³\nGrün: mehr Material · Rot: weniger · Cyan: Originalpfade\n"+
+        "Räumlicher Vergleich in 0,65-mm-Zellen (Näherung).";
+}
+
 function formatTimelineTime(seconds) {
     if (seconds < 120) {
         const sec=Math.max(0,seconds);
