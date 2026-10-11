@@ -30,6 +30,15 @@ The preview window opens **immediately** after post-processing; large G-code fil
 
 **Substrate-aware extrusion geometry:** The preview maintains a sparse XY height field of previously deposited material. For each motion it samples the available nozzle-to-surface gap *before* depositing the move, and uses that gap to determine the squished stadium profile (flat upper/lower faces) or a circular free-spanning profile. The cross-sectional area always matches the G-code extrusion volume per path length. Where support changes along a G1 move, it creates several smaller segments with preserved E volume, timing, feature color and line number. This improves rendering for non-planar lifts, Bricklayers, gaps and bridges, without altering printer G-code.
 
+**Additional diagnostic tools:**
+
+- **Seamless toolpaths:** Consecutive, geometrically connected extrusion segments share a bounded mitered ring instead of independently closed end caps. Genuine travel gaps, feature changes and sharp reversals remain separate. The viewer continues to use GPU instancing, not an individual CPU mesh for each G-code instruction.
+- **Interactive cross-section:** Enable **Schnittansicht**, select X, Y or Z, and scrub the position slider. Three.js clips the 3D volume and a bounded analytic pass traces intersected bead outlines. The contours are a geometric approximation, not manifold boolean cut caps; processing pauses during animation to preserve playback performance.
+- **Automatic diagnostics:** The optional **Diagnose** panel flags extreme widths, abrupt extrusion Z excursions, unsupported round extrusions, sudden neighboring flow changes and likely in-place Z-hops. Click a finding to seek its timestamp and focus the camera. Findings are heuristic warnings, not validated printer collisions.
+- **Original / SilkSteel difference:** With two loaded G-codes, **Differenzansicht** draws original centerline tracks in cyan and shows spatial material differences in green (added) and red (reduced). Per-layer material totals are computed from bead volume; the location heatmap uses approximate 0.65-mm XY and 0.20-mm Z bins, not exact CSG subtraction. Comparison work is bounded to the active layer and deferred while playing.
+
+**Regression coverage:** `python -m unittest discover -s tests -v` checks the G-code parser and module integration, and `node tests/preview_modules.test.mjs` exercises join continuity, diagnostic heuristics, comparative volumes and clip contours. Both commands are included in the manually triggered GitHub Actions tests workflow.
+
 **Accuracy limits:** This is a geometric approximation, not a thermal/material-flow simulation. Support is inferred from already printed paths at approximately 0.4 mm XY resolution; sparse or partially supported strands and print deformation are approximated, and real sagging, swelling, nozzle pressure and cooling are not simulated. G2/G3 arcs are currently counted but not rendered (the viewer warns when encountered). Avoid relying on the preview as the only safety check for printing.
 
 ---
