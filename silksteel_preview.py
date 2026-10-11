@@ -26,6 +26,42 @@ HOP_PACK = struct.Struct("<6fIIff")  # XYZ endpoints, hop kind, line, start/end 
 ROLES = ("Standard", "Smoothificator", "Bricklayers base", "Bricklayers shifted",
          "Non-planar infill", "Valley filling", "Bridge")
 
+COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def color_settings_path() -> Path:
+    base = Path(os.environ["LOCALAPPDATA"]) if os.environ.get("LOCALAPPDATA") else Path.home() / ".config"
+    return base / "SilkSteel" / "preview-colors.json"
+
+
+def read_colors() -> list[str] | None:
+    try:
+        data = json.loads(color_settings_path().read_text(encoding="utf-8"))
+        values = data.get("colors")
+        if isinstance(values, list) and len(values) == len(ROLES) and all(
+            isinstance(v, str) and COLOR_PATTERN.fullmatch(v) for v in values
+        ):
+            return values
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def write_colors(values: list[str]) -> None:
+    if not isinstance(values, list) or len(values) != len(ROLES) or not all(
+        isinstance(v, str) and COLOR_PATTERN.fullmatch(v) for v in values
+    ):
+        raise ValueError("Invalid feature color palette")
+    file = color_settings_path()
+    file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = file.with_name(file.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps({"colors": values}), encoding="utf-8")
+        os.replace(tmp, file)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 
 def convert(source: Path, destination: Path, hop_destination: Path | None = None,
             progress=None) -> dict:
@@ -267,6 +303,27 @@ def serve(processed: Path | None = None, original: Path | None = None,
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
+                if self.path == "/settings/colors":
+                    origin = self.headers.get("Origin")
+                    if origin and origin != f"http://127.0.0.1:{server.server_port}":
+                        self.send_error(403, "Invalid origin")
+                        return
+                    try:
+                        size = int(self.headers.get("Content-Length", "0"))
+                        if not 0 < size <= 2048:
+                            raise ValueError("Invalid settings size")
+                        payload = json.loads(self.rfile.read(size))
+                        write_colors(payload.get("colors"))
+                        response = b'{"saved":true}'
+                    except (OSError, ValueError, TypeError, AttributeError) as exc:
+                        self.send_error(400, str(exc))
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                    return
                 if self.path != "/upload":
                     self.send_error(404)
                     return
@@ -321,7 +378,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     payload, mime = b"ok", "text/plain"
                 elif path == "/meta.json":
                     payload = json.dumps(
-                        {"models": models, "roles": ROLES, **state}
+                        {"models": models, "roles": ROLES, "colors": read_colors(), **state}
                     ).encode("utf-8")
                     mime = "application/json"
                 elif path in ("/", "/viewer.js"):
