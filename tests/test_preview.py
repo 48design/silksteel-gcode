@@ -76,7 +76,7 @@ class PreviewGeometryTests(unittest.TestCase):
             "G1 X10 Y0 E0.6",
         ])
         self.assertEqual([row[8] for row in rows], [2, 0])
-        self.assertAlmostEqual(rows[0][7], .15)
+        self.assertAlmostEqual(rows[0][7], .2)  # Plate contact at Z=.2 overrides nominal pass height
         self.assertEqual([layer["count"] for layer in meta["layers"]], [1, 1])
         self.assertEqual(meta["layers"][1]["start"], 1)
 
@@ -223,6 +223,76 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertIn('id="timelineTicks"', markup)
         self.assertIn('id="resetColors"', markup)
         self.assertIn('id="hopColor"', markup)
+
+
+    def test_free_vs_supported_cross_sections_conserve_material(self):
+        from silksteel_preview_surface import DepositedSurface
+        field = DepositedSurface()
+        area, nominal = .082, .2
+        ground = (0.0, 0.0, .2), ground_end = (10.0, 0.0, .2)
+        first = field.sections(ground, ground_end, area, nominal, .2)
+        self.assertAlmostEqual(first[0][3], .2, places=4)
+        field.deposit(ground, ground_end, first)
+
+        # The same G1 crosses an already-printed stripe and then open air.
+        start, end = (0.0, 0.0, .4), (20.0, 0.0, .4)
+        pieces = field.sections(start, end, area, nominal, .2)
+        self.assertGreaterEqual(len(pieces), 2)
+        self.assertAlmostEqual(pieces[0][3], .2, places=3)
+        free_d = field.free_diameter(area)
+        self.assertAlmostEqual(pieces[-1][3], free_d, places=3)
+        self.assertAlmostEqual(pieces[-1][2], free_d, places=3)
+        self.assertGreater(pieces[0][2], pieces[-1][2])
+
+        self.assertAlmostEqual(
+            sum((t1-t0)*20.0 *
+                (width*height-(1-math.pi/4)*height*height)
+                for t0,t1,width,height in pieces),
+            20.0*area, places=5
+        )
+
+    def test_same_height_neighbors_do_not_erase_previous_layer_support(self):
+        from silksteel_preview_surface import DepositedSurface
+        field = DepositedSurface()
+        area = .085
+        for z in (.2, .4):
+            start, end = (0.0,0.0,z),(8.0,0.0,z)
+            sections = field.sections(start,end,area,.2,.2)
+            field.deposit(start,end,sections)
+        # The z=.4 strand must not be treated as a supporting surface
+        # for another strand printed at exactly the same Z.
+        same_height = field.sections((0,0,.4),(8,0,.4),area,.2,.2)
+        self.assertAlmostEqual(same_height[0][3], .2, places=3)
+
+    def test_substrate_distance_shifts_stadium_toward_round(self):
+        from silksteel_preview_surface import DepositedSurface
+        field = DepositedSurface()
+        area = .09
+        old = field.sections((0,0,.2),(12,0,.2),area,.2,.2)
+        field.deposit((0,0,.2),(12,0,.2),old)
+        lifted = field.sections((0,0,.4),(12,0,.62),area,.2,.2)
+        self.assertGreaterEqual(len(lifted), 2)
+        self.assertLess(lifted[0][3],lifted[-1][3])
+        self.assertGreater(lifted[0][2],lifted[-1][2])
+        self.assertLessEqual(max(p[3] for p in lifted),field.free_diameter(area)+1e-6)
+
+    def test_parser_splits_one_g1_only_at_real_substrate_change(self):
+        meta, rows = self.parse([
+            "; layer_height = 0.2", "; first_layer_height = 0.2",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G90", "M83", "G0 X0 Y0 Z0.2 F1200",
+            "G1 X10 Y0 E0.4",
+            ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2", ";LAYER:1",
+            "G0 X0 Y0 Z0.4",
+            "G1 X20 Y0 E0.8",
+        ])
+        upper = rows[meta["layers"][1]["start"]:]
+        self.assertGreater(len(upper),1)
+        self.assertAlmostEqual(upper[0][7], .2, places=3)
+        diameter = math.sqrt(4*(.8*math.pi*(1.75/2)**2/20)/math.pi)
+        self.assertAlmostEqual(upper[-1][7],diameter,places=3)
+        self.assertAlmostEqual(sum(row[-1]-row[-2] for row in upper),1.0,places=3)
+        self.assertEqual(set(int(row[8]) for row in upper),{0})
 
 
 if __name__ == "__main__":
