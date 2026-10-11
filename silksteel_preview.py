@@ -15,14 +15,16 @@ import webbrowser
 
 TOKEN = re.compile(r"([A-Z])([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)")
 FLOAT = re.compile(r"([-+]?\d*\.?\d+)")
-PACK = struct.Struct("<8fII")
+PACK = struct.Struct("<8fIIff")  # XYZ endpoints, bead dimensions, role, line, start/end seconds
+HOP_PACK = struct.Struct("<6fIIff")  # XYZ endpoints, hop kind, line, start/end seconds
 
 ROLES = ("Standard", "Smoothificator", "Bricklayers base", "Bricklayers shifted",
          "Non-planar infill", "Valley filling", "Bridge")
 
 
-def convert(source: Path, destination: Path) -> dict:
+def convert(source: Path, destination: Path, hop_destination: Path | None = None) -> dict:
     """Stream G-code into 40-byte segment records; never buffer the source."""
+    hop_destination = hop_destination or destination.with_suffix(".hops.bin")
     pos = [0.0, 0.0, 0.0]
     e_pos = 0.0
     xyz_absolute, e_absolute = True, True
@@ -32,7 +34,10 @@ def convert(source: Path, destination: Path) -> dict:
     brick_base_pass = False
     layer = None
     layers = []
-    count = ignored_arcs = 0
+    count = ignored_arcs = hop_count = 0
+    feedrate = 1800.0
+    elapsed = 0.0
+    hop_active = False
     role_type, brick_role, smooth, valley = "", None, False, False
     smooth_height = None
     min_xyz = [math.inf] * 3
@@ -43,11 +48,13 @@ def convert(source: Path, destination: Path) -> dict:
         nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley, brick_base_pass
         layer_no = number
         layer = {"number": number, "start": count, "count": 0,
+                 "hopStart": hop_count, "hopCount": 0,
                  "z": layer_z, "height": layer_height if number else (first_height or layer_height)}
         layers.append(layer)
         brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
 
-    with source.open("r", encoding="utf-8", errors="replace") as src, destination.open("wb") as dst:
+    with (source.open("r", encoding="utf-8", errors="replace") as src,
+          destination.open("wb") as dst, hop_destination.open("wb") as hops):
         for line_no, raw in enumerate(src, 1):
             code, _, comment = raw.partition(";")
             comment = comment.strip()
@@ -120,14 +127,16 @@ def convert(source: Path, destination: Path) -> dict:
             cmd = words[0]
             # Accept G00/G01, and packed "G1X1Y2" syntax.
             if cmd not in ("G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03",
-                           "G90", "G91", "M82", "M83", "G92"):
-                m = re.match(r"^(G0?[0123]|G9[012]|M8[23])(?=[A-Z])", cmd)
+                           "G90", "G91", "M82", "M83", "G92", "G4", "G04"):
+                m = re.match(r"^(G0?[01234]|G9[012]|M8[23])(?=[A-Z])", cmd)
                 if not m:
                     continue
                 cmd = m.group(1)
-            cmd = {"G00": "G0", "G01": "G1", "G02": "G2", "G03": "G3"}.get(cmd, cmd)
+            cmd = {"G00": "G0", "G01": "G1", "G02": "G2", "G03": "G3", "G04": "G4"}.get(cmd, cmd)
             params = {k: float(v) for k, v in TOKEN.findall(code.upper()) if k not in ("G", "M")}
-            if cmd == "G90":
+            if cmd == "G4":
+                elapsed += max(0.0, params.get("P", 0.0)) / 1000.0 + max(0.0, params.get("S", 0.0))
+            elif cmd == "G90":
                 xyz_absolute = True
             elif cmd == "G91":
                 xyz_absolute = False
@@ -149,10 +158,35 @@ def convert(source: Path, destination: Path) -> dict:
                 if "E" in params:
                     delta_e = params["E"] - e_pos if e_absolute else params["E"]
                     e_pos = params["E"] if e_absolute else e_pos + params["E"]
+                if "F" in params and math.isfinite(params["F"]) and params["F"] > 0:
+                    feedrate = params["F"]
+                distance = math.dist(pos, new_pos)
+                motion_seconds = (distance if distance > 1e-7 else abs(delta_e)) * 60.0 / feedrate
+                started = elapsed
+                elapsed += motion_seconds if math.isfinite(motion_seconds) else 0.0
+
+                hop_kind = None
+                if "SILKSTEEL: ZHOP_LIFT" in up or "Z-HOP LIFT" in up:
+                    hop_kind = 0
+                elif "SILKSTEEL: ZHOP_DROP" in up or "Z-HOP DROP" in up:
+                    hop_kind = 2
+                elif hop_active and distance > 1e-7 and delta_e <= 0:
+                    hop_kind = 1
+                if hop_kind is not None and distance > 1e-7 and all(map(math.isfinite, pos + new_pos)):
+                    if layer is None:
+                        begin_layer(0)
+                    hops.write(HOP_PACK.pack(*(pos + new_pos), hop_kind, line_no, started, elapsed))
+                    layer["hopCount"] += 1
+                    hop_count += 1
+                if hop_kind == 0:
+                    hop_active = True
+                elif hop_kind == 2 or delta_e > 0:
+                    hop_active = False
+
                 if cmd in ("G2", "G3"):
                     ignored_arcs += 1
                 elif cmd == "G1" and delta_e > 0 and all(map(math.isfinite, new_pos + pos)):
-                    length = math.dist(pos, new_pos)
+                    length = distance
                     if length > 1e-7 and math.hypot(new_pos[0]-pos[0], new_pos[1]-pos[1]) > 1e-7:
                         if layer is None:
                             begin_layer(0)
@@ -185,7 +219,7 @@ def convert(source: Path, destination: Path) -> dict:
                                 role = 4
                             else:
                                 role = 0
-                            dst.write(PACK.pack(*(pos + new_pos + [width, h]), role, line_no))
+                            dst.write(PACK.pack(*(pos + new_pos + [width, h]), role, line_no, started, elapsed))
                             layer["count"] += 1
                             count += 1
                             for p in (pos, new_pos):
@@ -198,7 +232,8 @@ def convert(source: Path, destination: Path) -> dict:
         raise ValueError(f"No extruding G1 XY/XYZ movements found in {source.name}")
     if not explicit_layers and layers and layers[0]["number"] == -1:
         layers[0]["number"] = 0
-    return {"filename": source.name, "url": "", "count": count, "layers": layers,
+    return {"filename": source.name, "url": "", "count": count, "hopCount": hop_count,
+            "duration": elapsed, "layers": layers,
             "bounds": [min_xyz, max_xyz], "filament": filament,
             "ignored_arcs": ignored_arcs}
 
@@ -214,6 +249,7 @@ def serve(processed: Path, original: Path | None = None) -> None:
             target = root / (label.lower() + ".bin")
             model = convert(source, target)
             model["name"], model["url"] = label, "/" + target.name
+            model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
             models.append(model)
         info = json.dumps({"models": models, "roles": ROLES}).encode("utf-8")
         heartbeat = {"at": time.monotonic()}
@@ -230,7 +266,7 @@ def serve(processed: Path, original: Path | None = None) -> None:
                     target = assets / ("index.html" if path == "/" else "viewer.js")
                     payload = target.read_bytes()
                     mime = "text/html; charset=utf-8" if path == "/" else "text/javascript; charset=utf-8"
-                elif path in ("/silksteel.bin", "/original.bin") and any(m["url"] == path for m in models):
+                elif any(path in (m["url"], m["hopUrl"]) for m in models):
                     target = root / path.lstrip("/")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/octet-stream")
