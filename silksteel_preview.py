@@ -5,6 +5,8 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import os
+import traceback
 from pathlib import Path
 import re
 import struct
@@ -22,7 +24,8 @@ ROLES = ("Standard", "Smoothificator", "Bricklayers base", "Bricklayers shifted"
          "Non-planar infill", "Valley filling", "Bridge")
 
 
-def convert(source: Path, destination: Path, hop_destination: Path | None = None) -> dict:
+def convert(source: Path, destination: Path, hop_destination: Path | None = None,
+            progress=None) -> dict:
     """Stream G-code into 48-byte timed segments and separate hop records."""
     hop_destination = hop_destination or destination.with_suffix(".hops.bin")
     pos = [0.0, 0.0, 0.0]
@@ -43,6 +46,8 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     min_xyz = [math.inf] * 3
     max_xyz = [-math.inf] * 3
     explicit_layers = False
+    parsed_chars = 0
+    source_size = max(1, source.stat().st_size)
 
     def begin_layer(number: int) -> None:
         nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley, brick_base_pass
@@ -56,6 +61,9 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     with (source.open("r", encoding="utf-8", errors="replace") as src,
           destination.open("wb") as dst, hop_destination.open("wb") as hops):
         for line_no, raw in enumerate(src, 1):
+            parsed_chars += len(raw)
+            if progress is not None and line_no % 20000 == 0:
+                progress(line_no, min(99, int(parsed_chars * 100 / source_size)))
             code, _, comment = raw.partition(";")
             comment = comment.strip()
             up = comment.upper()
@@ -239,20 +247,15 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
 
 
 def serve(processed: Path, original: Path | None = None) -> None:
+    """Open the browser before parsing; make failures observable to the user."""
     assets = Path(__file__).resolve().parent / "preview"
     with tempfile.TemporaryDirectory(prefix="silksteel-preview-") as tmp:
         root = Path(tmp)
-        models = []
-        for label, source in (("SilkSteel", processed), ("Original", original)):
-            if source is None:
-                continue
-            target = root / (label.lower() + ".bin")
-            model = convert(source, target)
-            model["name"], model["url"] = label, "/" + target.name
-            model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
-            models.append(model)
-        info = json.dumps({"models": models, "roles": ROLES}).encode("utf-8")
         heartbeat = {"at": time.monotonic()}
+        state = {"status": "loading", "message": "G-Code-Analyse wird gestartet…",
+                 "progress": 0, "lines": 0}
+        models = []
+        ready = threading.Event()
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -261,21 +264,29 @@ def serve(processed: Path, original: Path | None = None) -> None:
                     heartbeat["at"] = time.monotonic()
                     payload, mime = b"ok", "text/plain"
                 elif path == "/meta.json":
-                    payload, mime = info, "application/json"
+                    payload = json.dumps(
+                        {"models": models, "roles": ROLES, **state}
+                    ).encode("utf-8")
+                    mime = "application/json"
                 elif path in ("/", "/viewer.js"):
                     target = assets / ("index.html" if path == "/" else "viewer.js")
                     payload = target.read_bytes()
                     mime = "text/html; charset=utf-8" if path == "/" else "text/javascript; charset=utf-8"
-                elif any(path in (m["url"], m["hopUrl"]) for m in models):
+                elif state["status"] == "ready" and any(
+                    path in (m["url"], m["hopUrl"]) for m in models
+                ):
                     target = root / path.lstrip("/")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header("Content-Length", str(target.stat().st_size))
                     self.send_header("Cache-Control", "no-store")
                     self.end_headers()
-                    with target.open("rb") as stream:
-                        while block := stream.read(1024 * 1024):
-                            self.wfile.write(block)
+                    try:
+                        with target.open("rb") as stream:
+                            while block := stream.read(1024 * 1024):
+                                self.wfile.write(block)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
                     return
                 else:
                     self.send_error(404)
@@ -285,24 +296,61 @@ def serve(processed: Path, original: Path | None = None) -> None:
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(payload)
+                try:
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
             def log_message(self, fmt, *args):
                 pass
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 
+        def prepare_files():
+            try:
+                sources = [("SilkSteel", processed)]
+                if original is not None:
+                    sources.append(("Original", original))
+                for index, (label, source) in enumerate(sources):
+                    state["message"] = f"{label}: {source.name} wird analysiert…"
+                    state["progress"] = int(index * 100 / len(sources))
+                    state["lines"] = 0
+
+                    def update(lines, percent, index=index):
+                        state["lines"] = lines
+                        state["progress"] = int((index + percent / 100) * 100 / len(sources))
+
+                    target = root / (label.lower() + ".bin")
+                    model = convert(source, target, progress=update)
+                    model["name"], model["url"] = label, "/" + target.name
+                    model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
+                    models.append(model)
+                state.update(status="ready", message="Vorschau bereit", progress=100)
+                print("SilkSteel Preview: finished parsing", flush=True)
+            except Exception as exc:
+                traceback.print_exc()
+                state.update(status="error", message=f"{type(exc).__name__}: {exc}")
+            finally:
+                ready.set()
+
         def idle_watchdog():
             while True:
                 time.sleep(20)
-                if time.monotonic() - heartbeat["at"] > 120:
+                if ready.is_set() and time.monotonic() - heartbeat["at"] > 120:
                     server.shutdown()
                     return
 
+        threading.Thread(target=prepare_files, daemon=True).start()
         threading.Thread(target=idle_watchdog, daemon=True).start()
         url = f"http://127.0.0.1:{server.server_port}/"
         print(f"SilkSteel Preview: {url}", flush=True)
-        webbrowser.open(url)
+
+        opened = webbrowser.open(url, new=1)
+        if not opened and os.name == "nt":
+            try:
+                os.startfile(url)
+            except OSError:
+                traceback.print_exc()
         try:
             server.serve_forever(poll_interval=0.25)
         except KeyboardInterrupt:
