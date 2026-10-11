@@ -133,7 +133,7 @@ void main(){
 `;
 const newMaterial = (role, faded) => new THREE.ShaderMaterial({
     vertexShader, fragmentShader, side:THREE.DoubleSide,
-    uniforms:{uColor:{value:rgb[role]},uAlpha:{value:faded?.19:1}},
+    uniforms:{uColor:{value:rgb[role].clone()},uAlpha:{value:faded?.19:1}},
     transparent:!!faded,depthWrite:!faded
 });
 function disposeGroup(group) {
