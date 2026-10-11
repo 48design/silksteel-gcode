@@ -350,5 +350,52 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertIn('command += ["--original", original_snapshot,',script)
 
 
+    def test_tiny_detected_gap_never_creates_flat_extrusion_spikes(self):
+        from silksteel_preview_surface import DepositedSurface
+        field = DepositedSurface()
+        field._tops[(0, 0)] = (0.34, 0.2)
+        area, nominal = .12, .2
+        h = field._effective_height(.1, .1, .4, area, nominal, .2, .4)
+        self.assertAlmostEqual(h, nominal, places=5)
+        w = field.width_for_area(area, h)
+        self.assertLess(w, 0.7)
+        self.assertAlmostEqual(w*h-(1-math.pi/4)*h*h, area)
+
+    def test_raised_nozzle_grows_height_not_width_even_near_adjacent_tracks(self):
+        from silksteel_preview_surface import DepositedSurface
+        field = DepositedSurface()
+        field._tops[(0, 0)] = (.37, .2)
+        area, nominal = .12, .2
+        at_layer = field._effective_height(.1, .1, .4, area, nominal, .2, .4)
+        raised = field._effective_height(.1, .1, .45, area, nominal, .2, .4)
+        self.assertAlmostEqual(at_layer, nominal)
+        self.assertAlmostEqual(raised, .25)
+        self.assertGreater(raised, at_layer)
+        self.assertLess(field.width_for_area(area, raised),
+                        field.width_for_area(area, at_layer))
+        self.assertLessEqual(raised, field.free_diameter(area))
+
+    def test_layer_reference_z_controls_adaptive_width_in_converter(self):
+        meta, rows = self.parse([
+            "; layer_height = 0.2", "; first_layer_height = 0.2",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G90", "M83", "G0 X0 Y0 Z0.2 F1200",
+            "G1 X10 Y0 E0.5",
+            ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2", ";LAYER:1",
+            "G0 X0 Y0 Z0.4",
+            "G1 X10 Y0 E0.5",
+            "G0 Z0.5",
+            "G1 X20 Y0 E0.5",
+        ])
+        upper = rows[meta["layers"][1]["start"]:]
+        # Greater free Z must produce at least one taller, narrower bead,
+        # not a collapsed .02 mm section with an inflated width.
+        self.assertTrue(all(p[7] >= min(.2, p[6])-1e-5 for p in upper))
+        base = next(p for p in upper if p[2] <= .4 + .001)
+        lifted = next(p for p in upper if p[2] >= .5 - .001)
+        self.assertGreaterEqual(lifted[7], base[7]-1e-4)
+        self.assertTrue(all(p[7] <= p[6]+1e-5 for p in upper))
+
+
 if __name__ == "__main__":
     unittest.main()
