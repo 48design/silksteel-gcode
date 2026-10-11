@@ -375,18 +375,144 @@ const hopTipGeom=new THREE.BufferGeometry();
 hopTipGeom.setAttribute("position",new THREE.BufferAttribute(new Float32Array(6),3));
 const hopTip=new THREE.Line(hopTipGeom,new THREE.LineBasicMaterial({color:"#ff4655",depthTest:false,depthWrite:false}));
 hopTip.renderOrder=21;hopTip.frustumCulled=false;hopTip.visible=false;scene.add(hopTip);
+function formatTimelineTime(seconds) {
+    if (seconds < 120) {
+        const sec=Math.max(0,seconds);
+        return Math.floor(sec/60)+":"+String(Math.floor(sec%60)).padStart(2,"0")+
+            "."+String(Math.floor((sec%1)*100)).padStart(2,"0");
+    }
+    return formatTime(seconds);
+}
+function changeTimelineMode(mode) {
+    if (!model || (mode!=="print"&&mode!=="layer")) return;
+    setPlaying(false);
+    selectedLayer=layerAtTime(currentTime);
+    playbackMode=mode;
+    if(mode==="layer") $("playSpeed").value="1";
+    else $("playSpeed").value="100";
+    $("modePrint").setAttribute("aria-pressed",String(mode==="print"));
+    $("modeLayer").setAttribute("aria-pressed",String(mode==="layer"));
+    $("timelineMarkers").classList.toggle("layer-mode",mode==="layer");
+    markerKey="";
+    seek(currentTime);
+}
+function chooseLayer(index) {
+    if(!model)return;
+    setPlaying(false);
+    selectedLayer=Math.max(0,Math.min(model.layers.length-1,index));
+    const [from,to]=layerRange(selectedLayer);
+    const last=model.layers[selectedLayer].start+model.layers[selectedLayer].count-1;
+    // The final deposition time is inside this layer even if a layer change
+    // occurs immediately at the boundary. Empty layers show their endpoint.
+    let time=last>=model.layers[selectedLayer].start?endAt(last):to;
+    time=Math.max(from,Math.min(to,time));
+    if(playbackMode==="print"&&selectedLayer<model.layers.length-1)
+        time=Math.max(from,Math.min(time,to-0.00002));
+    seek(time);
+    if(playbackMode==="layer"){markerKey="";updateTimelineMarkers();}
+}
+function markerLabel(text,x,width,onClick) {
+    const mark=document.createElement("button");
+    mark.type="button"; mark.className="timeline-marker";
+    mark.style.left=(100*x/Math.max(1,width)).toFixed(5)+"%";
+    mark.title=text;
+    const label=document.createElement("span");
+    label.className="marker-label";
+    label.textContent=text;
+    if(x<32){label.style.left="0";label.style.transform="none";}
+    else if(width-x<32){label.style.left="auto";label.style.right="0";label.style.transform="none";}
+    mark.append(label);
+    mark.addEventListener("click",onClick);
+    $("timelineMarkers").append(mark);
+}
+function updateTimelineMarkers() {
+    if(!model)return;
+    const wrap=$("timelineMarkers");
+    const width=Math.max(1,wrap.clientWidth);
+    const active=playbackMode==="layer"?selectedLayer:visualLayer;
+    const key=playbackMode+"|"+active+"|"+width;
+    if(key===markerKey)return;
+    markerKey=key;
+    wrap.querySelectorAll(".timeline-marker").forEach(node=>node.remove());
+    const canvas=$("timelineTicks");
+    const ratio=Math.min(window.devicePixelRatio||1,2);
+    canvas.width=Math.max(1,Math.round(width*ratio));
+    canvas.height=Math.round(30*ratio);
+    const ctx=canvas.getContext("2d");
+    if(!ctx)return;
+    ctx.setTransform(ratio,0,0,ratio,0,0);
+    ctx.clearRect(0,0,width,30);
+    if(playbackMode==="layer"){
+        ctx.fillStyle="#6ea6cb";
+        ctx.fillRect(0,18,2,12);ctx.fillRect(width-2,18,2,12);
+        const number=model.layers[selectedLayer].number;
+        markerLabel("Start L"+number,0,width,()=>{setPlaying(false);seek(layerRange()[0]);});
+        markerLabel("Ende L"+number,width,width,()=>{setPlaying(false);seek(layerRange()[1]);});
+        return;
+    }
+    const duration=Math.max(0.001,model.duration);
+    const boundaries=model.layers.map((layer,index)=>({
+        index, x:Math.max(0,Math.min(width,width*layer.timeStart/duration)),
+        name:"L"+layer.number
+    }));
+    ctx.fillStyle="#55697f";
+    for(const point of boundaries){
+        const current=point.index===visualLayer;
+        ctx.fillStyle=current?"#a8d7ff":"#526478";
+        ctx.fillRect(Math.round(point.x),current?15:21,current?2:1,current?15:9);
+    }
+    const minDistance=64;
+    let lastShown=-1000;
+    const labeled=[];
+    for(const point of boundaries){
+        if(point.x-lastShown<minDistance)continue;
+        labeled.push(point);
+        lastShown=point.x;
+    }
+    const selected=boundaries[visualLayer];
+    if(selected && !labeled.some(p=>p.index===selected.index)){
+        const clash=labeled.findIndex(p=>Math.abs(p.x-selected.x)<minDistance);
+        if(clash>=0)labeled.splice(clash,1);
+        labeled.push(selected);
+    }
+    for(const point of labeled){
+        markerLabel(point.name,point.x,width,()=>{
+            selectedLayer=point.index;
+            chooseLayer(point.index);
+        });
+        const el=wrap.lastElementChild;
+        if(point.index===visualLayer)el.classList.add("current");
+    }
+}
+function updateTimelineUI() {
+    const [from,to]=activeRange();
+    const span=Math.max(0,to-from);
+    const fraction=span>1e-8?Math.max(0,Math.min(1,(currentTime-from)/span)):1;
+    $("timeline").value=String(Math.round(fraction*TIMELINE_STEPS));
+    $("elapsed").textContent=formatTimelineTime(Math.max(0,currentTime-from));
+    $("duration").textContent=formatTimelineTime(span);
+    $("percent").textContent=(fraction*100).toFixed(2)+" %";
+    if(playbackMode==="layer"){
+        const layer=model.layers[selectedLayer];
+        $("timelineScope").textContent="Layer "+layer.number+
+            " · Z "+layer.z.toFixed(3)+" mm · "+formatTime(from)+" – "+formatTime(to)+" (Druckzeit)";
+    }else{
+        $("timelineScope").textContent=model.layers.length+" Layer · "+formatTime(model.duration)+" Gesamtdauer";
+    }
+    updateTimelineMarkers();
+}
 function seek(seconds) {
     if(!model||!data)return;
     currentTime=Math.max(0,Math.min(model.duration,seconds));
-    $("timeline").value=model.duration?Math.round(currentTime/model.duration*10000):0;
-    $("elapsed").textContent=formatTime(currentTime);
-    $("percent").textContent=(model.duration?100*currentTime/model.duration:100).toFixed(1)+" %";
+    visualLayer=playbackMode==="layer"?selectedLayer:layerAtTime(currentTime);
+    if(playbackMode==="print")selectedLayer=visualLayer;
+    updateTimelineUI();
     updateVisibility();
 }
 function updateVisibility() {
     if(!model || !data)return;
     const finished=completedBefore(model.count,currentTime,endAt);
-    const current=layerAt(Math.min(finished,model.count-1));
+    const current=visualLayer;
     visibleCount=finished;
     slider.value=String(current);
     const below=Number($("below").value);
@@ -420,6 +546,7 @@ function updateVisibility() {
             const alpha=Math.max(0,Math.min(1,(currentTime-p.start)/(p.end-p.start)));
             if(alpha>0){
                 headMesh.material.uniforms.uColor.value.copy(rgb[p.role]);
+                headMesh.userData.role=p.role;
                 renderTip(headMesh,p,alpha);
             }
         }
@@ -460,9 +587,10 @@ function updateVisibility() {
     }
     const layer=model.layers[current];
     $("layerText").textContent="Layer "+layer.number+" / "+model.layers.at(-1).number;
-    $("zText").textContent="Z "+layer.z.toFixed(3)+" mm · Höhe "+layer.height.toFixed(3)+" mm · "+
-        Math.max(0,Math.min(layer.count,finished-layer.start)).toLocaleString("de-DE")+" / "+
-        layer.count.toLocaleString("de-DE")+" Stränge";
+    $("layerZ").textContent="Z "+layer.z.toFixed(3)+" mm";
+    $("layerPrev").disabled=current===0;
+    $("layerNext").disabled=current===model.layers.length-1;
+    slider.setAttribute("aria-valuetext","Layer "+layer.number+" · Z "+layer.z.toFixed(3)+" mm");
 }
 function fit() {
     const [lo,hi] = model.bounds;
