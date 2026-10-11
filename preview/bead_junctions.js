@@ -3,21 +3,32 @@
 export const junctionVertexShader=`
 precision highp float;
 attribute vec2 aCircle, aProfile;
-attribute vec3 iCenter;
+attribute vec3 iCenter, iTangent;
 attribute vec2 iSize;
+attribute float iSpan;
 varying vec3 vNormal;
 varying vec3 vPosition;
 #include <clipping_planes_pars_vertex>
 void main(){
-  float h=max(iSize.y,0.0001);
-  // A corner patch is a compact rounded transition, NOT another bead:
-  // wide, flat discs (radius=(w-h)/2) produced the visible gold spikes.
-  // The neighboring closed volumes already carry their actual width.
-  float radius=min(iSize.x, h*1.5)*0.5*aProfile.x;
-  vec3 p=vec3(iCenter.x+radius*aCircle.x,
-              iCenter.z-h*0.5+h*0.5*aProfile.y,
-              iCenter.y+radius*aCircle.y);
-  vNormal=normalize(vec3(aCircle.x*aProfile.x,aProfile.y,aCircle.y*aProfile.x));
+  // Orient the rounded junction along the local G-code path, NOT Z.
+  // Width is lateral, height is vertical, and span is along travel.
+  vec3 tangent=normalize(vec3(iTangent.x,iTangent.z,iTangent.y));
+  float horizontal=length(tangent.xz);
+  vec3 lateral=horizontal>0.0001 ?
+      vec3(-tangent.z/horizontal,0.0,tangent.x/horizontal) : vec3(1.0,0.0,0.0);
+  vec3 vertical=normalize(cross(lateral,tangent));
+  // Closed adjacent beads own the material volume. This filler must stay
+  // strictly local even when one of those beads is abnormally over-wide.
+  float radiusW=max(0.0001,min(min(iSize.x,iSize.y*1.5),0.8)*0.5);
+  float radiusH=max(0.0001,min(iSize.y,0.8)*0.5);
+  float span=max(0.0001,min(iSpan,0.4));
+  float longitudinal=aProfile.y;
+  float circle=aProfile.x;
+  vec3 p=vec3(iCenter.x,iCenter.z,iCenter.y)
+      +tangent*(span*longitudinal)
+      +circle*(lateral*(radiusW*aCircle.x)+vertical*(radiusH*aCircle.y));
+  vNormal=normalize(tangent*(longitudinal/span)
+      +circle*(lateral*(aCircle.x/radiusW)+vertical*(aCircle.y/radiusH)));
   vPosition=p;
   vec4 mvPosition=modelViewMatrix*vec4(p,1.0);
   gl_Position=projectionMatrix*mvPosition;
@@ -56,12 +67,18 @@ export function makeJunctionGeometry(THREE,fallbacks){
     geometry.setIndex(indices);
     const centers=new Float32Array(fallbacks.length*3);
     const sizes=new Float32Array(fallbacks.length*2);
+    const tangents=new Float32Array(fallbacks.length*3);
+    const spans=new Float32Array(fallbacks.length);
     for(let i=0;i<fallbacks.length;i++){
         centers.set(fallbacks[i].pos,i*3);
         sizes.set([fallbacks[i].w,fallbacks[i].h],i*2);
+        tangents.set(fallbacks[i].tangent,i*3);
+        spans[i]=fallbacks[i].span;
     }
     geometry.setAttribute("iCenter",new THREE.InstancedBufferAttribute(centers,3));
     geometry.setAttribute("iSize",new THREE.InstancedBufferAttribute(sizes,2));
+    geometry.setAttribute("iTangent",new THREE.InstancedBufferAttribute(tangents,3));
+    geometry.setAttribute("iSpan",new THREE.InstancedBufferAttribute(spans,1));
     geometry.instanceCount=fallbacks.length;
     return geometry;
 }
