@@ -253,7 +253,10 @@ const newMaterial = (role, faded, geometryShader=vertexShader) => new THREE.Shad
     vertexShader:geometryShader, fragmentShader, side:THREE.DoubleSide,
     clipping:true, clippingPlanes:clipPlanes,
     uniforms:{uColor:{value:rgb[role].clone()},uAlpha:{value:faded?.19:1}},
-    transparent:!!faded,depthWrite:!faded
+    transparent:!!faded,depthWrite:!faded,
+    polygonOffset:geometryShader===junctionVertexShader,
+    polygonOffsetFactor:geometryShader===junctionVertexShader?-1:0,
+    polygonOffsetUnits:geometryShader===junctionVertexShader?-1:0
 });
 function disposeGroup(group) {
     group.traverse(o => {
