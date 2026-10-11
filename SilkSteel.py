@@ -4605,24 +4605,42 @@ if __name__ == "__main__":
     
     if args.preview:
         import subprocess
+        import shutil
+        import tempfile
         viewer = os.path.join(os.path.dirname(os.path.abspath(__file__)), "silksteel_preview.py")
         processed = os.path.abspath(args.output_file or args.input_file)
-        command = [sys.executable, viewer, processed]
-        if args.output_file and os.path.abspath(args.input_file) != processed:
-            command += ["--original", os.path.abspath(args.input_file)]
         preview_log = os.path.join(script_dir, "SilkSteel_preview_log.txt")
+        snapshot_dir = None
         try:
             if not os.path.isfile(viewer):
                 raise FileNotFoundError(f"Missing preview module: {viewer}")
+            # SuperSlicer removes its temporary *.gcode.pp immediately when the
+            # post-processing script exits. Snapshot the finished G-code before
+            # launching the detached viewer, which converts it in the background.
+            snapshot_dir = tempfile.mkdtemp(prefix="silksteel-preview-input-")
+            with open(os.path.join(snapshot_dir, ".silksteel-preview-snapshot"), "w",
+                      encoding="utf-8") as marker:
+                marker.write("Temporary G-code snapshot for SilkSteel Preview")
+            snapshot = os.path.join(snapshot_dir, "processed.gcode")
+            shutil.copyfile(processed, snapshot)
+            command = [sys.executable, viewer, snapshot, "--snapshot-dir", snapshot_dir]
+            if args.output_file and os.path.abspath(args.input_file) != processed:
+                original_snapshot = os.path.join(snapshot_dir, "original.gcode")
+                shutil.copyfile(os.path.abspath(args.input_file), original_snapshot)
+                command += ["--original", original_snapshot]
             with open(preview_log, "a", encoding="utf-8") as stream:
                 stream.write(f"\n=== SilkSteel Preview: {processed} ===\n")
                 stream.flush()
                 subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                  stdout=stream, stderr=subprocess.STDOUT,
                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            snapshot_dir = None  # Child viewer deletes its own snapshot after closing.
             print(f"  SilkSteel 3D preview started (errors: {preview_log})")
         except OSError as exc:
             logging.warning("Unable to launch 3D preview: %s", exc)
+        finally:
+            if snapshot_dir is not None:
+                shutil.rmtree(snapshot_dir, ignore_errors=True)
 
     # Check for warnings/errors and pause if any occurred (after successful completion)
     if _warning_count > 0 or _error_count > 0:
