@@ -249,7 +249,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             "ignored_arcs": ignored_arcs}
 
 
-def serve(processed: Path, original: Path | None = None,
+def serve(processed: Path | None = None, original: Path | None = None,
           display_name: str | None = None, original_display_name: str | None = None) -> None:
     """Open the browser before parsing; make failures observable to the user."""
     assets = Path(__file__).resolve().parent / "preview"
@@ -381,7 +381,7 @@ def serve(processed: Path, original: Path | None = None,
 
         def prepare_files():
             try:
-                sources = [("SilkSteel", processed, display_name or processed.name)]
+                sources = [("SilkSteel", processed, display_name or processed.name)] if processed else []
                 if original is not None:
                     sources.append(("Original", original, original_display_name or original.name))
                 for index, (label, source, display) in enumerate(sources):
@@ -414,7 +414,11 @@ def serve(processed: Path, original: Path | None = None,
                     server.shutdown()
                     return
 
-        threading.Thread(target=prepare_files, daemon=True).start()
+        if processed is None:
+            state.update(status="ready", message="G-Code per Drag & Drop laden", progress=100)
+            ready.set()
+        else:
+            threading.Thread(target=prepare_files, daemon=True).start()
         threading.Thread(target=idle_watchdog, daemon=True).start()
         url = f"http://127.0.0.1:{server.server_port}/"
         print(f"SilkSteel Preview: {url}", flush=True)
@@ -435,14 +439,14 @@ def serve(processed: Path, original: Path | None = None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SilkSteel 3D extrusion preview")
-    parser.add_argument("processed", type=Path)
+    parser.add_argument("processed", nargs="?", type=Path)
     parser.add_argument("--original", type=Path)
     parser.add_argument("--display-name")
     parser.add_argument("--original-display-name")
     parser.add_argument("--snapshot-dir", type=Path)
     arguments = parser.parse_args()
     try:
-        serve(arguments.processed.resolve(),
+        serve(arguments.processed.resolve() if arguments.processed else None,
               arguments.original.resolve() if arguments.original else None,
               arguments.display_name, arguments.original_display_name)
     finally:
