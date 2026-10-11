@@ -306,4 +306,6 @@ const resize = new ResizeObserver(() => {
 });
 resize.observe(canvasHost);
 renderer.setAnimationLoop(()=>{controls.update();renderer.render(scene,camera);});
+// The detached Python server releases its temporary binary files after inactivity.
+setInterval(() => fetch("/ping", {cache:"no-store"}).catch(() => {}), 20000);
 loadModel(0).catch(showError);
