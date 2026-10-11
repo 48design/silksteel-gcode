@@ -33,7 +33,7 @@ class DepositedSurface:
         threshold = z - clearance
         if levels[0] <= threshold:
             return levels[0]
-        if levels[1] <= threshold:
+        if math.isfinite(levels[1]) and levels[1] <= threshold:
             return levels[1]
         return None
 
