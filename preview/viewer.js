@@ -2,12 +2,15 @@ import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 
 const $ = id => document.getElementById(id);
-const defaultColors = ["#adb8c6","#ae7bff","#3bcbec","#298df2","#ffb75e","#f28dc2","#67db8c"];
+const defaultColors = ["#adb8c6","#ae7bff","#3bcbec","#298df2","#ffb75e","#f28dc2","#67db8c","#ff4655"];
 const validPalette = values => Array.isArray(values) &&
     values.length === defaultColors.length &&
     values.every(color => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color));
 function loadPalette(serverColors) {
     if (validPalette(serverColors)) return [...serverColors];
+    if (Array.isArray(serverColors) && serverColors.length===defaultColors.length-1 &&
+        serverColors.every(color=>typeof color==="string"&&/^#[0-9a-f]{6}$/i.test(color)))
+        return [...serverColors,defaultColors.at(-1)];
     try {
         const cached = JSON.parse(localStorage.getItem("silksteel.feature-colors.v1"));
         if (validPalette(cached)) return [...cached];
@@ -89,6 +92,11 @@ function applyColor(index, hex) {
         if (current === index)
             headMesh.material.uniforms.uColor.value.copy(rgb[index]);
     }
+    if(index===7 && typeof hopTip!=="undefined"){
+        for(const group of hopCache.values())group.material.color.set(hex);
+        hopTip.material.color.set(hex);
+        $("hopColor").value=hex;
+    }
     if (pickers[index]) pickers[index].value = hex;
 }
 
@@ -129,6 +137,9 @@ $("resetColors").addEventListener("click", () => {
     defaultColors.forEach((hex,index) => applyColor(index,hex));
     savePalette();
 });
+$("hopColor").value=colors[7];
+$("hopColor").addEventListener("input",event=>applyColor(7,event.target.value));
+$("hopColor").addEventListener("change",savePalette);
 
 // Unit cross section consists of TWO semicircles and horizontal top/bottom.
 // Width is NOT applied by scaling a circle: shader keeps the end radii = h/2.
@@ -347,7 +358,7 @@ function createHopLayer(index) {
     }
     const geometry=new THREE.BufferGeometry();
     geometry.setAttribute("position",new THREE.BufferAttribute(positions,3));
-    const lines=new THREE.LineSegments(geometry,new THREE.LineBasicMaterial({color:"#ff4655",depthTest:false,depthWrite:false}));
+    const lines=new THREE.LineSegments(geometry,new THREE.LineBasicMaterial({color:colors[7],depthTest:false,depthWrite:false}));
     lines.frustumCulled=false;lines.renderOrder=20;
     return lines;
 }
@@ -373,7 +384,7 @@ const headMesh=new THREE.Mesh(headGeometry,newMaterial(0,false));
 headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
 const hopTipGeom=new THREE.BufferGeometry();
 hopTipGeom.setAttribute("position",new THREE.BufferAttribute(new Float32Array(6),3));
-const hopTip=new THREE.Line(hopTipGeom,new THREE.LineBasicMaterial({color:"#ff4655",depthTest:false,depthWrite:false}));
+const hopTip=new THREE.Line(hopTipGeom,new THREE.LineBasicMaterial({color:colors[7],depthTest:false,depthWrite:false}));
 hopTip.renderOrder=21;hopTip.frustumCulled=false;hopTip.visible=false;scene.add(hopTip);
 function formatTimelineTime(seconds) {
     if (seconds < 120) {
