@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
+import {buildJoinAttributes} from "./extrusion_joins.js";
 
 const $ = id => document.getElementById(id);
 const defaultColors = ["#adb8c6","#ae7bff","#3bcbec","#298df2","#ffb75e","#f28dc2","#67db8c","#ff4655"];
@@ -195,22 +196,28 @@ precision highp float;
 attribute float aSide, aCos, aSin, aEnd, aCap;
 attribute vec3 iStart, iStop;
 attribute vec2 iSize;
+attribute vec3 iJoinStart, iJoinEnd;
+attribute vec2 iSizeStart, iSizeEnd;
 uniform float uAlpha;
 varying vec3 vNormal;
 varying vec3 vPosition;
 void main(){
   vec3 d=iStop-iStart;
   float len=length(d.xy);
+  vec3 join=mix(iJoinStart,iJoinEnd,aEnd);
   vec3 perpendicular=len>0.0000001 ? vec3(-d.y/len,0.0,d.x/len) : vec3(1.0,0.0,0.0);
-  float h=iSize.y;
-  float w=max(iSize.x,h);
+  vec3 joinVector=vec3(join.x,0.0,join.y);
+  float h=mix(iSizeStart.y,iSizeEnd.y,aEnd);
+  float w=max(mix(iSizeStart.x,iSizeEnd.x,aEnd),h);
   float lateral=aSide*(w-h)*0.5 + aCos*h*0.5;
   vec3 origin=mix(iStart,iStop,aEnd);
-  vec3 p=vec3(origin.x,origin.z-h*0.5,origin.y)
-      + perpendicular*lateral + vec3(0.0,h*0.5*aSin,0.0);
+  vec3 basePoint=vec3(origin.x,origin.z-h*0.5,origin.y);
+  // Shared boundary rings meet exactly. Internal caps collapse to a point.
+  vec3 p=(aCap>0.5 && join.z>0.5) ? basePoint :
+      basePoint + joinVector*lateral + vec3(0.0,h*0.5*aSin,0.0);
   vec3 tangent=normalize(vec3(d.x,d.z,d.y));
   vNormal=aCap>0.5 ? (aEnd>0.5 ? tangent : -tangent)
-                      : normalize(perpendicular*aCos+vec3(0.0,aSin,0.0));
+                      : normalize(joinVector*aCos+vec3(0.0,aSin,0.0));
   vPosition=p;
   gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
 }
@@ -310,6 +317,7 @@ function setPlaying(next) {
     previousFrame=0;
     $("playToggle").textContent=playing?"Ⅱ Pause":"▶ Abspielen";
 }
+const joinRead = index => index>=0 && model && index<model.count ? readSegment(index) : null;
 function createLayer(index) {
     const info = model.layers[index];
     const buckets = Array.from({length:layout.roles.length},()=>[]);
@@ -330,7 +338,12 @@ function createLayer(index) {
                 starts.set(p.a,j*3);ends.set(p.b,j*3);
                 sizes.set([p.w,p.h],j*2);
             }
+            const join=buildJoinAttributes(items,joinRead,role);
             const geometry=base.clone();
+            geometry.setAttribute("iJoinStart",new THREE.InstancedBufferAttribute(join.joinsStart,3));
+            geometry.setAttribute("iJoinEnd",new THREE.InstancedBufferAttribute(join.joinsEnd,3));
+            geometry.setAttribute("iSizeStart",new THREE.InstancedBufferAttribute(join.sizesStart,2));
+            geometry.setAttribute("iSizeEnd",new THREE.InstancedBufferAttribute(join.sizesEnd,2));
             geometry.setAttribute("iStart",new THREE.InstancedBufferAttribute(starts,3));
             geometry.setAttribute("iStop",new THREE.InstancedBufferAttribute(ends,3));
             geometry.setAttribute("iSize",new THREE.InstancedBufferAttribute(sizes,2));
@@ -373,9 +386,21 @@ function renderTip(mesh, p, fraction) {
     attrs.iStart.needsUpdate=true;
     attrs.iStop.needsUpdate=true;
     if(attrs.iSize){attrs.iSize.array.set([p.w,p.h]);attrs.iSize.needsUpdate=true;}
+    const dx=p.b[0]-p.a[0],dy=p.b[1]-p.a[1],l=Math.hypot(dx,dy)||1;
+    const direction=[-dy/l,dx/l,0];
+    attrs.iJoinStart.array.set(direction);
+    attrs.iJoinEnd.array.set(direction);
+    attrs.iJoinStart.needsUpdate=attrs.iJoinEnd.needsUpdate=true;
+    for(const key of ["iSizeStart","iSizeEnd"]){
+        attrs[key].array.set([p.w,p.h]);attrs[key].needsUpdate=true;
+    }
     mesh.visible=true;
 }
 const headGeometry=base.clone();
+headGeometry.setAttribute("iJoinStart",new THREE.InstancedBufferAttribute(new Float32Array(3),3));
+headGeometry.setAttribute("iJoinEnd",new THREE.InstancedBufferAttribute(new Float32Array(3),3));
+headGeometry.setAttribute("iSizeStart",new THREE.InstancedBufferAttribute(new Float32Array(2),2));
+headGeometry.setAttribute("iSizeEnd",new THREE.InstancedBufferAttribute(new Float32Array(2),2));
 headGeometry.setAttribute("iStart",new THREE.InstancedBufferAttribute(new Float32Array(3),3));
 headGeometry.setAttribute("iStop",new THREE.InstancedBufferAttribute(new Float32Array(3),3));
 headGeometry.setAttribute("iSize",new THREE.InstancedBufferAttribute(new Float32Array(2),2));
