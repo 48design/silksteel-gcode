@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import struct
 import tempfile
+import threading
+import time
 import webbrowser
 
 TOKEN = re.compile(r"([A-Z])([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)")
@@ -207,11 +209,15 @@ def serve(processed: Path, original: Path | None = None) -> None:
             model["name"], model["url"] = label, "/" + target.name
             models.append(model)
         info = json.dumps({"models": models, "roles": ROLES}).encode("utf-8")
+        heartbeat = {"at": time.monotonic()}
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 path = self.path.split("?", 1)[0]
-                if path == "/meta.json":
+                if path == "/ping":
+                    heartbeat["at"] = time.monotonic()
+                    payload, mime = b"ok", "text/plain"
+                elif path == "/meta.json":
                     payload, mime = info, "application/json"
                 elif path in ("/", "/viewer.js"):
                     target = assets / ("index.html" if path == "/" else "viewer.js")
@@ -242,6 +248,15 @@ def serve(processed: Path, original: Path | None = None) -> None:
                 pass
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+
+        def idle_watchdog():
+            while True:
+                time.sleep(20)
+                if time.monotonic() - heartbeat["at"] > 120:
+                    server.shutdown()
+                    return
+
+        threading.Thread(target=idle_watchdog, daemon=True).start()
         url = f"http://127.0.0.1:{server.server_port}/"
         print(f"SilkSteel Preview: {url}", flush=True)
         webbrowser.open(url)
