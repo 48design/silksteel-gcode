@@ -4343,7 +4343,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         # Only hop if difference is significant (> 0.1mm threshold)
                         hop_distance = safe_z - zhop_working_z
                         if hop_distance > 0.1:
-                            final_output.write(f"G0 Z{safe_z:.3f} F8400 ; Z-hop lift\n")
+                            final_output.write(f"G0 Z{safe_z:.3f} F8400 ; SilkSteel: ZHOP_LIFT\n")
                             is_hopped = True
                             zhop_lift_count += 1
                         else:
@@ -4358,7 +4358,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     # In non-planar infill each segment carries its own Z target.
                     # Without this separate drop the nozzle extrudes diagonally
                     # from the elevated hop height, producing vertical spikes.
-                    final_output.write(f"G0 Z{zhop_working_z:.3f} F8400 ; Z-hop drop\n")
+                    final_output.write(f"G0 Z{zhop_working_z:.3f} F8400 ; SilkSteel: ZHOP_DROP\n")
                     zhop_drop_count += 1
                     is_hopped = False
                     zhop_has_extruded_on_layer = True
