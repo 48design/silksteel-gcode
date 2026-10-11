@@ -16,6 +16,12 @@ label{display:flex;align-items:center;justify-content:space-between;gap:9px}sele
 select{width:100%;margin:5px 0}button:hover,select:hover{background:#344255}
 input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}input[type=checkbox]{accent-color:var(--accent)}
 #layerText{font-size:24px;font-weight:650;font-variant-numeric:tabular-nums}
+.playback-row{display:flex;gap:7px;align-items:center;margin-bottom:12px}
+.playback-row #playToggle{flex:1;white-space:nowrap;background:#245582;border-color:#3a79b2}
+.playback-row #restart{flex:0 0 38px}
+.playback-row #playSpeed{flex:0 0 83px;width:83px;margin:0}
+.playback-time{display:flex;justify-content:space-between;font-variant-numeric:tabular-nums;color:var(--muted);font-size:11px}
+#timeline{margin-bottom:5px}
 #legend{display:grid;gap:10px}
 #legend label{justify-content:flex-start;cursor:pointer;font-size:12px}
 .dot{display:inline-block;width:11px;height:11px;border-radius:3px;flex:0 0 auto}
@@ -40,13 +46,18 @@ main{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height
 <section><h2>Schichten</h2><div id="layerText">—</div><div id="zText" class="muted"></div><input id="layer" type="range" min="0" max="0" value="0" step="1" aria-label="Sichtbare Schicht">
 <label for="below">Darunter anzeigen</label><select id="below"><option value="0">Nur aktuelle Schicht</option><option value="3" selected>3 Schichten</option><option value="12">12 Schichten</option><option value="-1">Alle Schichten (GPU-intensiv)</option></select>
 </section>
+<section><h2>Druckablauf</h2>
+<div class="playback-row"><button id="playToggle" type="button">▶ Abspielen</button><button id="restart" type="button" title="Zum Druckbeginn">↺</button><select id="playSpeed" aria-label="Abspielgeschwindigkeit"><option value="1">1×</option><option value="20">20×</option><option value="100">100×</option><option value="500" selected>500×</option><option value="2000">2000×</option></select></div>
+<input id="timeline" type="range" min="0" max="10000" step="1" value="10000" aria-label="Druckfortschritt">
+<div class="playback-time"><span id="elapsed">0:00:00</span><span id="percent">100 %</span><span id="duration">0:00:00</span></div>
+</section>
 <section><h2>Extrusionstypen</h2><div id="legend"></div></section>
-<section><h2>Darstellung</h2><label><span>Gitternetz</span><input type="checkbox" id="gridToggle" checked></label>
+<section><h2>Darstellung</h2><label><span style="color:#ff4655">Z-Hops rot anzeigen</span><input type="checkbox" id="showHops" checked></label><label><span>Gitternetz</span><input type="checkbox" id="gridToggle" checked></label>
 <label><span>Unterliegende Schichten transparent</span><input type="checkbox" id="ghost" checked></label>
 </section>
 <p class="muted" style="margin-top:auto;font-size:11px">Echte Mesh-Querschnitte: flache Ober-/Unterseite, halbrunde Flanken. Strangbreite aus extrudiertem Volumen und Schichthöhe berechnet. Idealisierte Geometrie, keine Schmelzsimulation.</p>
 </aside>
-<main id="viewport"><div id="progress">Initialisierung der 3D-Vorschau…</div><div id="toolbar"><button id="resetView">Ansicht zurücksetzen</button></div><div id="pickInfo"></div><div id="help">Ziehen: Drehen · Rechtsklick: Verschieben · Rad: Zoom · Klick: Bahn-Details</div></main>
+<main id="viewport"><div id="progress">Initialisierung der 3D-Vorschau…</div><div id="toolbar"><button id="resetView">Ansicht zurücksetzen</button></div><div id="pickInfo"></div><div id="help">Ziehen: Drehen · Rechtsklick: Verschieben · Rad: Zoom · Klick: Bahn-Details · Rot: SilkSteel-Z-Hops</div></main>
 </div>
 <script type="module" src="/viewer.js"></script>
 </body>
