@@ -4610,11 +4610,17 @@ if __name__ == "__main__":
         command = [sys.executable, viewer, processed]
         if args.output_file and os.path.abspath(args.input_file) != processed:
             command += ["--original", os.path.abspath(args.input_file)]
+        preview_log = os.path.join(script_dir, "SilkSteel_preview_log.txt")
         try:
-            subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            print("  Opening SilkSteel 3D preview in your browser...")
+            if not os.path.isfile(viewer):
+                raise FileNotFoundError(f"Missing preview module: {viewer}")
+            with open(preview_log, "a", encoding="utf-8") as stream:
+                stream.write(f"\n=== SilkSteel Preview: {processed} ===\n")
+                stream.flush()
+                subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                 stdout=stream, stderr=subprocess.STDOUT,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            print(f"  SilkSteel 3D preview started (errors: {preview_log})")
         except OSError as exc:
             logging.warning("Unable to launch 3D preview: %s", exc)
 
