@@ -23,7 +23,7 @@ ROLES = ("Standard", "Smoothificator", "Bricklayers base", "Bricklayers shifted"
 
 
 def convert(source: Path, destination: Path, hop_destination: Path | None = None) -> dict:
-    """Stream G-code into 40-byte segment records; never buffer the source."""
+    """Stream G-code into 48-byte timed segments and separate hop records."""
     hop_destination = hop_destination or destination.with_suffix(".hops.bin")
     pos = [0.0, 0.0, 0.0]
     e_pos = 0.0
