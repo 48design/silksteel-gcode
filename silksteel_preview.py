@@ -26,7 +26,7 @@ def convert(source: Path, destination: Path) -> dict:
     pos = [0.0, 0.0, 0.0]
     e_pos = 0.0
     xyz_absolute, e_absolute = True, True
-    filament, layer_height, first_height = 1.75, 0.2, 0.2
+    filament, layer_height, first_height = 1.75, 0.2, None
     layer_z = 0.0
     layer_no = -1
     brick_base_pass = False
@@ -43,7 +43,7 @@ def convert(source: Path, destination: Path) -> dict:
         nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley, brick_base_pass
         layer_no = number
         layer = {"number": number, "start": count, "count": 0,
-                 "z": layer_z, "height": layer_height if number else first_height}
+                 "z": layer_z, "height": layer_height if number else (first_height or layer_height)}
         layers.append(layer)
         brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
 
@@ -66,6 +66,11 @@ def convert(source: Path, destination: Path) -> dict:
                     if m and float(m.group(1)) > 0:
                         first_height = float(m.group(1))
                 elif up.startswith("LAYER_CHANGE"):
+                    # Purge lines before the first slicer layer belong to
+                    # a separate preamble, not to layer zero.
+                    if not explicit_layers and layer is not None and len(layers) == 1:
+                        layer["number"] = -1
+                        layer_no = -1
                     explicit_layers = True
                     begin_layer(layer_no + 1)
                 elif re.match(r"LAYER:\s*\d+", comment, re.I):
@@ -191,6 +196,8 @@ def convert(source: Path, destination: Path) -> dict:
 
     if not count:
         raise ValueError(f"No extruding G1 XY/XYZ movements found in {source.name}")
+    if not explicit_layers and layers and layers[0]["number"] == -1:
+        layers[0]["number"] = 0
     return {"filename": source.name, "url": "", "count": count, "layers": layers,
             "bounds": [min_xyz, max_xyz], "filament": filament,
             "ignored_arcs": ignored_arcs}
