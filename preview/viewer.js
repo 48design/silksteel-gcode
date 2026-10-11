@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 import {buildJoinAttributes} from "./extrusion_joins.js";
+import {makeJunctionGeometry,junctionVertexShader} from "./bead_junctions.js";
 import {analysePrint} from "./diagnostics.js";
 import {closestLayer, compareLayerVolumes} from "./comparison.js";
 import {buildCutContours} from "./section.js";
@@ -219,9 +220,9 @@ void main(){
   float lateral=aSide*(w-h)*0.5 + aCos*h*0.5;
   vec3 origin=mix(iStart,iStop,aEnd);
   vec3 basePoint=vec3(origin.x,origin.z-h*0.5,origin.y);
-  // Shared boundary rings meet exactly. Internal caps collapse to a point.
-  vec3 p=(aCap>0.5 && join.z>0.5) ? basePoint :
-      basePoint + joinVector*lateral + vec3(0.0,h*0.5*aSin,0.0);
+  // Closed sections are mandatory: the next segment may not yet be visible
+  // during playback, and collapsing internal caps exposes open mesh holes.
+  vec3 p=basePoint + joinVector*lateral + vec3(0.0,h*0.5*aSin,0.0);
   vec3 tangent=normalize(vec3(d.x,d.z,d.y));
   vNormal=aCap>0.5 ? (aEnd>0.5 ? tangent : -tangent)
                       : normalize(joinVector*aCos+vec3(0.0,aSin,0.0));
@@ -248,8 +249,8 @@ void main(){
  #include <colorspace_fragment>
 }
 `;
-const newMaterial = (role, faded) => new THREE.ShaderMaterial({
-    vertexShader, fragmentShader, side:THREE.DoubleSide,
+const newMaterial = (role, faded, geometryShader=vertexShader) => new THREE.ShaderMaterial({
+    vertexShader:geometryShader, fragmentShader, side:THREE.DoubleSide,
     clipping:true, clippingPlanes:clipPlanes,
     uniforms:{uColor:{value:rgb[role].clone()},uAlpha:{value:faded?.19:1}},
     transparent:!!faded,depthWrite:!faded
@@ -374,6 +375,15 @@ function createLayer(index) {
             mesh.userData.role=role;
             mesh.userData.indices=Uint32Array.from(items);
             group.add(mesh);
+            if(join.fallbacks.length){
+                const patchGeometry=makeJunctionGeometry(THREE,join.fallbacks);
+                const patches=new THREE.Mesh(patchGeometry,newMaterial(role,false,junctionVertexShader));
+                patches.frustumCulled=false;
+                patches.userData.role=role;
+                patches.userData.junction=true;
+                patches.userData.indices=Uint32Array.from(join.fallbacks.map(item=>item.index));
+                group.add(patches);
+            }
         }
     }
     group.userData.layer=index;
@@ -796,7 +806,8 @@ function updateVisibility() {
             const faded=i!==current&&$("ghost").checked;
             if(mesh.userData.faded!==faded){
                 mesh.material.dispose();
-                mesh.material=newMaterial(mesh.userData.role,faded);
+                mesh.material=newMaterial(mesh.userData.role,faded,
+                    mesh.userData.junction?junctionVertexShader:vertexShader);
                 mesh.userData.faded=faded;
             }
         }
