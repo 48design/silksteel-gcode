@@ -172,5 +172,55 @@ class PreviewGeometryTests(unittest.TestCase):
 
 
 
+    def test_layer_time_windows_include_travel_and_dwell(self):
+        meta, rows = self.parse([
+            "; layer_height = 0.2",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G90", "M83", "G0 X0 Y0 Z0.2 F600",
+            "G1 X10 Y0 E0.3 F600",
+            "G4 P500",
+            ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2", ";LAYER:1",
+            "G0 Z0.4 F600",
+            "G1 X20 Y0 E0.3",
+        ])
+        first, second = meta["layers"]
+        self.assertAlmostEqual(first["timeStart"], 0.0, places=4)
+        self.assertAlmostEqual(first["timeEnd"], 1.52, places=3)
+        self.assertAlmostEqual(second["timeStart"], first["timeEnd"], places=4)
+        self.assertAlmostEqual(second["timeEnd"], meta["duration"], places=4)
+        self.assertAlmostEqual(second["timeEnd"] - second["timeStart"], 1.02, places=3)
+
+    def test_colors_are_validated_and_persisted_outside_viewer_port(self):
+        from unittest import mock
+        import silksteel_preview as preview
+        palette = ["#111111", "#AABBCC", "#335577", "#fedcba",
+                   "#550011", "#447799", "#123456"]
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"LOCALAPPDATA": tmp}):
+                preview.write_colors(palette)
+                self.assertEqual(preview.read_colors(), palette)
+                file = preview.color_settings_path()
+                self.assertTrue(file.is_file())
+                with self.assertRaises(ValueError):
+                    preview.write_colors(palette[:-1])
+                with self.assertRaises(ValueError):
+                    preview.write_colors(palette[:-1] + ["not-a-color"])
+                self.assertEqual(preview.read_colors(), palette)
+
+    def test_full_width_timeline_and_editable_colors_are_wired(self):
+        root = Path(__file__).resolve().parents[1]
+        viewer = (root / "preview" / "viewer.js").read_text(encoding="utf-8")
+        markup = (root / "preview" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('TIMELINE_STEPS = 1000000', viewer)
+        self.assertIn("function layerRange(", viewer)
+        self.assertIn("function activeRange(", viewer)
+        self.assertIn('changeTimelineMode("layer")', viewer)
+        self.assertIn('fetch("/settings/colors"', viewer)
+        self.assertIn('id="playbackDock"', markup)
+        self.assertIn('id="layerRail"', markup)
+        self.assertIn('id="timelineTicks"', markup)
+        self.assertIn('id="resetColors"', markup)
+
+
 if __name__ == "__main__":
     unittest.main()
