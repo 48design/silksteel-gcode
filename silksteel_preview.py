@@ -267,7 +267,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         # recording any part of it, avoiding artificial self-support.
                         segments = surface.sections(
                             tuple(pos), tuple(new_pos), area, nominal_h,
-                            first_height or layer_height
+                            first_height or layer_height, layer_z=layer["z"]
                         )
                         if segments and all(
                             math.isfinite(w) and math.isfinite(h) and h > 0 and
