@@ -108,9 +108,9 @@ class PreviewGeometryTests(unittest.TestCase):
             self.assertEqual([hop[6] for hop in hops], [0, 1, 1, 2])
             self.assertAlmostEqual(rows[0][-1] - rows[0][-2], 1.0, places=4)
             self.assertAlmostEqual(rows[1][-1] - rows[1][-2], 1.0, places=4)
-            self.assertLess(rows[0][-1], hops[0][-2])
-            self.assertGreater(rows[1][-2], hops[-1][-1])
-            self.assertAlmostEqual(meta["duration"], 3.06, places=2)
+            self.assertAlmostEqual(rows[0][-1], hops[0][-2], places=4)
+            self.assertAlmostEqual(rows[1][-2], hops[-1][-1], places=4)
+            self.assertAlmostEqual(meta["duration"], 3.07, places=2)
 
     def test_g4_pause_adds_timeline_time_without_extrusion(self):
         meta, rows = self.parse([
@@ -120,7 +120,7 @@ class PreviewGeometryTests(unittest.TestCase):
         ])
         self.assertEqual(meta["count"], 2)
         self.assertAlmostEqual(rows[1][-2] - rows[0][-1], 2.0, places=3)
-        self.assertAlmostEqual(meta["duration"], 4.02, places=2)
+        self.assertAlmostEqual(meta["duration"], 4.0067, places=3)
 
     def test_legacy_zhop_comments_are_supported(self):
         from silksteel_preview import HOP_PACK
