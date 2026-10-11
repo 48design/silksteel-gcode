@@ -32,12 +32,15 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}input[typ
 #playSpeed{width:85px;margin:0;font-size:12px;padding:5px 7px}
 .timeline-markers{height:30px;position:relative;margin:4px 8px 0}
 #timelineTicks{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
-.timeline-marker{position:absolute;bottom:0;width:1px;height:9px;background:#65758a;cursor:pointer}
-.timeline-marker:hover,.timeline-marker.current{background:#b0d7ff}
-.timeline-marker.current{width:2px;height:13px}
+.timeline-marker{position:absolute;bottom:0;width:18px;height:30px;transform:translateX(-50%);padding:0;border:0;border-radius:0;background:transparent;cursor:pointer}
+.timeline-marker::after{content:"";display:block;position:absolute;bottom:0;left:50%;width:1px;height:9px;background:#65758a;pointer-events:none}
+.timeline-marker:hover::after,.timeline-marker.current::after{background:#b0d7ff}
+.timeline-marker.current::after{width:2px;height:13px}
+.timeline-marker:first-of-type{transform:translateX(-6px)}
+.timeline-marker:focus-visible{outline:1px solid #a8d7ff;outline-offset:0}
 .marker-label{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);font-size:10px;color:#a8b6c6;white-space:nowrap;font-variant-numeric:tabular-nums;pointer-events:none}
 .timeline-marker.current .marker-label{color:#b9dbff}
-.timeline-markers.layer-mode .timeline-marker{background:#497a9d}
+.timeline-markers.layer-mode .timeline-marker::after{background:#497a9d}
 #timeline{display:block;width:100%;height:18px;margin:0;accent-color:#83bcff;cursor:ew-resize}
 .timeline-times{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
 #percent{color:#d5e4f6}
