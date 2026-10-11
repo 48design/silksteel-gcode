@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 import {buildJoinAttributes} from "./extrusion_joins.js";
+import {analysePrint} from "./diagnostics.js";
+import {closestLayer, compareLayerVolumes} from "./comparison.js";
 
 const $ = id => document.getElementById(id);
 const defaultColors = ["#adb8c6","#ae7bff","#3bcbec","#298df2","#ffb75e","#f28dc2","#67db8c","#ff4655"];
@@ -49,10 +51,13 @@ const camera = new THREE.PerspectiveCamera(45, 1, .02, 100000);
 const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:"high-performance"});
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.localClippingEnabled = true;
 canvasHost.insertBefore(renderer.domElement, canvasHost.firstChild);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = .075;
+const clipPlane = new THREE.Plane(new THREE.Vector3(1,0,0),1e9);
+const clipPlanes=[clipPlane];
 const grid = new THREE.GridHelper(300, 60, "#4d6076", "#263144");
 scene.add(grid);
 const modelSelect = $("model"), slider = $("layer");
@@ -201,6 +206,7 @@ attribute vec2 iSizeStart, iSizeEnd;
 uniform float uAlpha;
 varying vec3 vNormal;
 varying vec3 vPosition;
+#include <clipping_planes_pars_vertex>
 void main(){
   vec3 d=iStop-iStart;
   float len=length(d.xy);
@@ -219,7 +225,9 @@ void main(){
   vNormal=aCap>0.5 ? (aEnd>0.5 ? tangent : -tangent)
                       : normalize(joinVector*aCos+vec3(0.0,aSin,0.0));
   vPosition=p;
-  gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);
+  vec4 mvPosition=modelViewMatrix*vec4(p,1.0);
+  gl_Position=projectionMatrix*mvPosition;
+  #include <clipping_planes_vertex>
 }
 `;
 const fragmentShader = `
@@ -228,7 +236,9 @@ uniform vec3 uColor;
 uniform float uAlpha;
 varying vec3 vNormal;
 varying vec3 vPosition;
+#include <clipping_planes_pars_fragment>
 void main(){
+ #include <clipping_planes_fragment>
  vec3 light=normalize(vec3(-0.45,0.85,0.5));
  float diffuse=max(dot(normalize(vNormal),light),0.0);
  float shade=0.47+0.53*diffuse;
@@ -239,6 +249,7 @@ void main(){
 `;
 const newMaterial = (role, faded) => new THREE.ShaderMaterial({
     vertexShader, fragmentShader, side:THREE.DoubleSide,
+    clipping:true, clippingPlanes:clipPlanes,
     uniforms:{uColor:{value:rgb[role].clone()},uAlpha:{value:faded?.19:1}},
     transparent:!!faded,depthWrite:!faded
 });
@@ -371,7 +382,7 @@ function createHopLayer(index) {
     }
     const geometry=new THREE.BufferGeometry();
     geometry.setAttribute("position",new THREE.BufferAttribute(positions,3));
-    const lines=new THREE.LineSegments(geometry,new THREE.LineBasicMaterial({color:colors[7],depthTest:false,depthWrite:false}));
+    const lines=new THREE.LineSegments(geometry,new THREE.LineBasicMaterial({color:colors[7],depthTest:false,depthWrite:false,clippingPlanes:clipPlanes}));
     lines.frustumCulled=false;lines.renderOrder=20;
     return lines;
 }
@@ -409,7 +420,7 @@ const headMesh=new THREE.Mesh(headGeometry,newMaterial(0,false));
 headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
 const hopTipGeom=new THREE.BufferGeometry();
 hopTipGeom.setAttribute("position",new THREE.BufferAttribute(new Float32Array(6),3));
-const hopTip=new THREE.Line(hopTipGeom,new THREE.LineBasicMaterial({color:colors[7],depthTest:false,depthWrite:false}));
+const hopTip=new THREE.Line(hopTipGeom,new THREE.LineBasicMaterial({color:colors[7],depthTest:false,depthWrite:false,clippingPlanes:clipPlanes}));
 hopTip.renderOrder=21;hopTip.frustumCulled=false;hopTip.visible=false;scene.add(hopTip);
 function formatTimelineTime(seconds) {
     if (seconds < 120) {
