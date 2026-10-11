@@ -71,7 +71,11 @@ export function buildJoinAttributes(indices,read,role) {
                 const u=[a.b[0]-a.a[0],a.b[1]-a.a[1],a.b[2]-a.a[2]];
                 const v=[b.b[0]-b.a[0],b.b[1]-b.a[1],b.b[2]-b.a[2]];
                 const ul=Math.hypot(...u),vl=Math.hypot(...v);
-                const tangent=u.map((x,k)=>x/(ul||1)+v[k]/(vl||1));
+                // At a near-U-turn, averaging opposite directions makes
+                // the tangent point *sideways*. Retain the incoming direction.
+                const tangent=match.dot < -0.5
+                    ? u.map(x=>x/(ul||1))
+                    : u.map((x,k)=>x/(ul||1)+v[k]/(vl||1));
                 const tl=Math.hypot(...tangent);
                 const unit=(tl>1e-6?tangent.map(x=>x/tl):u.map(x=>x/(ul||1)));
                 const span=Math.max(0.001,Math.min(.5*h,match.l1*.25,match.l2*.25));
