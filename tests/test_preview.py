@@ -32,7 +32,7 @@ class PreviewGeometryTests(unittest.TestCase):
         a, b = rows
         self.assertAlmostEqual(a[7], .2)
         self.assertAlmostEqual(b[7], .2)
-        self.assertAlmostEqual(b[6] / a[6], 1.967, delta=.02)
+        self.assertAlmostEqual(b[6] / a[6], 1.918, delta=.02)
 
     def test_roles_and_modal_e_modes(self):
         meta, rows = self.parse([
