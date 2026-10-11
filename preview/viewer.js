@@ -566,4 +566,10 @@ window.addEventListener("drop",event=>{
     document.body.classList.remove("dragging");
     uploadGcode(event.dataTransfer?.files?.[0]);
 });
-if(layout.models.length)loadModel(0).catch(showError);
+if(layout.models.length){
+    loadModel(0).catch(showError);
+}else{
+    $("fileName").textContent="Keine G-Code-Datei geladen";
+    $("stats").textContent="G-Code per Drag & Drop oder über „Datei öffnen“ laden.";
+    if(layout.status!=="error")$("progress").hidden=true;
+}
