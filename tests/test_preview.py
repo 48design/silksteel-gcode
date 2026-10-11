@@ -336,5 +336,16 @@ class PreviewGeometryTests(unittest.TestCase):
 
 
 
+    def test_preview_preserves_original_before_in_place_processing(self):
+        script = (Path(__file__).resolve().parents[1] / "SilkSteel.py").read_text(encoding="utf-8")
+        begin = script.index("preview_snapshot_dir = None")
+        process = script.index('logging.info("Calling process_gcode()...")')
+        preserve = script.index('os.path.join(preview_snapshot_dir, "original.gcode")')
+        self.assertLess(begin, preserve)
+        self.assertLess(preserve, process)
+        self.assertIn('if os.path.isfile(original_snapshot):',script)
+        self.assertIn('command += ["--original", original_snapshot,',script)
+
+
 if __name__ == "__main__":
     unittest.main()
