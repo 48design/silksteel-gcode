@@ -51,12 +51,12 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}input[typ
 #layerRail button{font-size:17px;line-height:1;padding:3px 9px}
 #layerRail button:disabled{opacity:.35;cursor:default}
 #legend{display:grid;gap:10px}
-#legend .feature-row{display:flex;align-items:center;gap:9px;font-size:12px}
-#legend .feature-row>span{flex:1}
-#legend .feature-row input[type=checkbox]{flex:none}
-#legend .feature-row input[type=color]{padding:0;width:25px;height:23px;border:1px solid #5b697c;border-radius:5px;background:transparent;cursor:pointer;flex:none}
-#legend .feature-row input[type=color]::-webkit-color-swatch-wrapper{padding:2px}
-#legend .feature-row input[type=color]::-webkit-color-swatch{border:0;border-radius:2px}
+.feature-row{display:flex;align-items:center;gap:9px;font-size:12px}
+.feature-row>span{flex:1}
+.feature-row input[type=checkbox]{flex:none}
+.feature-row input[type=color]{padding:0;width:25px;height:23px;border:1px solid #5b697c;border-radius:5px;background:transparent;cursor:pointer;flex:none}
+.feature-row input[type=color]::-webkit-color-swatch-wrapper{padding:2px}
+.feature-row input[type=color]::-webkit-color-swatch{border:0;border-radius:2px}
 #resetColors{margin-top:10px;padding:4px 9px;font-size:11px;color:var(--muted);background:transparent}
 
 main{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height:100%}
@@ -92,7 +92,7 @@ body.dragging #dropOverlay{display:flex}
 <section><h2>Schichten</h2><label for="below">Darunter anzeigen</label><select id="below"><option value="0">Nur aktuelle Schicht</option><option value="3" selected>3 Schichten</option><option value="12">12 Schichten</option><option value="-1">Alle Schichten (GPU-intensiv)</option></select>
 </section>
 <section><h2>Extrusionstypen</h2><div id="legend"></div><button id="resetColors" type="button">Standardfarben wiederherstellen</button></section>
-<section><h2>Darstellung</h2><label><span style="color:#ff4655">Z-Hops rot anzeigen</span><input type="checkbox" id="showHops" checked></label><label><span>Gitternetz</span><input type="checkbox" id="gridToggle" checked></label>
+<section><h2>Darstellung</h2><div class="feature-row"><input type="checkbox" id="showHops" checked aria-label="Z-Hops anzeigen"><input type="color" id="hopColor" value="#ff4655" title="Z-Hop-Farbe ändern" aria-label="Z-Hop-Farbe wählen"><span>Z-Hops anzeigen</span></div><label><span>Gitternetz</span><input type="checkbox" id="gridToggle" checked></label>
 <label><span>Unterliegende Schichten transparent</span><input type="checkbox" id="ghost" checked></label>
 </section>
 <p class="muted" style="margin-top:auto;font-size:11px">Echte Mesh-Querschnitte: flache Ober-/Unterseite, halbrunde Flanken. Strangbreite aus extrudiertem Volumen und Schichthöhe berechnet. Idealisierte Geometrie, keine Schmelzsimulation.</p>
