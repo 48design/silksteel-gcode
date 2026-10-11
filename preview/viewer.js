@@ -384,7 +384,7 @@ function formatTimelineTime(seconds) {
     return formatTime(seconds);
 }
 function changeTimelineMode(mode) {
-    if (!model || (mode!=="print"&&mode!=="layer")) return;
+    if (!model || mode===playbackMode || (mode!=="print"&&mode!=="layer")) return;
     setPlaying(false);
     selectedLayer=layerAtTime(currentTime);
     playbackMode=mode;
@@ -414,7 +414,7 @@ function chooseLayer(index) {
 function markerLabel(text,x,width,onClick) {
     const mark=document.createElement("button");
     mark.type="button"; mark.className="timeline-marker";
-    mark.style.left=(100*x/Math.max(1,width)).toFixed(5)+"%";
+    mark.style.left=(100*Math.max(9,Math.min(width-9,x))/Math.max(1,width)).toFixed(5)+"%";
     mark.title=text;
     const label=document.createElement("span");
     label.className="marker-label";
