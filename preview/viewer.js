@@ -178,6 +178,9 @@ function forgetLayers() {
     if(lastPick){scene.remove(lastPick);lastPick.geometry.dispose();lastPick.material.dispose();lastPick=null;}
     $("pickInfo").style.display="none";
 }
+function readRole(index) {
+    return data.getUint32(index*SEGMENT_SIZE+32,true);
+}
 function readSegment(index) {
     const off=index*SEGMENT_SIZE;
     return {
@@ -185,7 +188,7 @@ function readSegment(index) {
       b:[data.getFloat32(off+12,true),data.getFloat32(off+16,true),data.getFloat32(off+20,true)],
       w:data.getFloat32(off+24,true),
       h:data.getFloat32(off+28,true),
-      role:data.getUint32(off+32,true),
+      role:readRole(index),
       line:data.getUint32(off+36,true),
       start:data.getFloat32(off+40,true),
       end:data.getFloat32(off+44,true)
@@ -230,8 +233,9 @@ function createLayer(index) {
     const info = model.layers[index];
     const buckets = Array.from({length:layout.roles.length},()=>[]);
     for(let i=info.start;i<info.start+info.count;i++){
-        const role = data.getUint32(i*40+32,true);
-        if(buckets[role]) buckets[role].push(i);
+        const role=readRole(i);
+        if(role>=buckets.length)throw new Error("Ungültiger Extrusionstyp "+role+" in Segment "+i);
+        buckets[role].push(i);
     }
     const group = new THREE.Group();
     const maxInstances = 28000;
@@ -410,6 +414,9 @@ async function loadModel(index) {
     if(!response.ok||!hopResponse.ok)throw Error("HTTP "+response.status+" / "+hopResponse.status);
     data=new DataView(await response.arrayBuffer());
     hopData=new DataView(await hopResponse.arrayBuffer());
+    if(data.byteLength!==model.count*SEGMENT_SIZE || hopData.byteLength!==model.hopCount*HOP_SIZE){
+        throw new Error("G-Code-Vorschau: Ungültiges Binärformat oder Segmentgröße");
+    }
     $("fileName").textContent=model.filename;
     $("stats").textContent=model.count.toLocaleString("de-DE")+" Extrusionssegmente · "+model.layers.length+" Layer · Filament Ø "+model.filament.toFixed(2)+" mm"+(model.ignored_arcs?" · Achtung: "+model.ignored_arcs+" Bögen nicht dargestellt":"");
     slider.max=String(model.layers.length-1);
