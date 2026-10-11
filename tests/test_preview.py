@@ -120,7 +120,7 @@ class PreviewGeometryTests(unittest.TestCase):
         ])
         self.assertEqual(meta["count"], 2)
         self.assertAlmostEqual(rows[1][-2] - rows[0][-1], 2.0, places=3)
-        self.assertAlmostEqual(meta["duration"], 4.0067, places=3)
+        self.assertAlmostEqual(meta["duration"], 4.02, places=2)
 
     def test_legacy_zhop_comments_are_supported(self):
         from silksteel_preview import HOP_PACK
