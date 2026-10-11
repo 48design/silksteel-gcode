@@ -10,7 +10,10 @@ varying vec3 vPosition;
 #include <clipping_planes_pars_vertex>
 void main(){
   float h=max(iSize.y,0.0001);
-  float radius=max(0.0,(iSize.x-h)*0.5)+h*0.5*aProfile.x;
+  // A corner patch is a compact rounded transition, NOT another bead:
+  // wide, flat discs (radius=(w-h)/2) produced the visible gold spikes.
+  // The neighboring closed volumes already carry their actual width.
+  float radius=min(iSize.x, h*1.5)*0.5*aProfile.x;
   vec3 p=vec3(iCenter.x+radius*aCircle.x,
               iCenter.z-h*0.5+h*0.5*aProfile.y,
               iCenter.y+radius*aCircle.y);
