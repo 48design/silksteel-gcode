@@ -13,8 +13,10 @@ async function loadPreviewMetadata() {
         }
         const metadata = await response.json();
         if (metadata.status === "error") {
-            indicator.textContent = "G-Code-Analyse fehlgeschlagen: "+metadata.message;
-            throw new Error(metadata.message);
+            indicator.hidden = false;
+            indicator.textContent = "G-Code-Analyse fehlgeschlagen: "+metadata.message+
+                " · Du kannst eine andere Datei öffnen oder ins Fenster ziehen.";
+            return metadata;
         }
         if (metadata.status === "ready" || !metadata.status) return metadata;
         indicator.hidden = false;
@@ -24,7 +26,7 @@ async function loadPreviewMetadata() {
         await new Promise(resolve => setTimeout(resolve, 500));
     }
 }
-const layout = await loadPreviewMetadata();
+let layout = await loadPreviewMetadata();
 const canvasHost = $("viewport");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#0c1119");
@@ -45,10 +47,16 @@ const SEGMENT_SIZE = 48, HOP_SIZE = 40;
 const visibleRoles = new Set(layout.roles.map((_, i) => i));
 const rgb = colors.map(c => new THREE.Color(c));
 
-layout.models.forEach((item, i) => {
-    const opt = document.createElement("option");
-    opt.value = String(i); opt.textContent = item.name; modelSelect.append(opt);
-});
+function refreshModelOptions() {
+    modelSelect.replaceChildren();
+    layout.models.forEach((item,i) => {
+        const opt=document.createElement("option");
+        opt.value=String(i);
+        opt.textContent=item.name;
+        modelSelect.append(opt);
+    });
+}
+refreshModelOptions();
 layout.roles.forEach((name, i) => {
     const label = document.createElement("label");
     const check = document.createElement("input");
@@ -493,4 +501,69 @@ renderer.setAnimationLoop(()=>{
 });
 // The detached Python server releases its temporary binary files after inactivity.
 setInterval(() => fetch("/ping", {cache:"no-store"}).catch(() => {}), 20000);
-loadModel(0).catch(showError);
+async function uploadGcode(file) {
+    if(!file || uploading)return;
+    if(!/\.(?:gcode(?:\.pp)?|gc|g)$/i.test(file.name)){
+        showError(new Error("Bitte eine .gcode-, .gcode.pp-, .gc- oder .g-Datei wählen."));
+        return;
+    }
+    uploading=true;
+    setPlaying(false);
+    $("openFile").disabled=true;
+    const indicator=$("progress");
+    indicator.hidden=false;
+    indicator.textContent="Lade "+file.name+" hoch…";
+    try{
+        await new Promise((resolve,reject)=>{
+            const xhr=new XMLHttpRequest();
+            xhr.open("POST","/upload");
+            xhr.setRequestHeader("X-Gcode-Filename",encodeURIComponent(file.name));
+            xhr.upload.onprogress=event=>{
+                if(event.lengthComputable){
+                    indicator.textContent="Lade "+file.name+" hoch: "+
+                        Math.floor(event.loaded/event.total*100)+" %";
+                }
+            };
+            xhr.onerror=()=>reject(new Error("Upload fehlgeschlagen: Server nicht erreichbar"));
+            xhr.onload=()=>xhr.status===202?resolve():
+                reject(new Error("Upload fehlgeschlagen (HTTP "+xhr.status+"): "+xhr.responseText.slice(0,180)));
+            xhr.send(file);
+        });
+        const next=await loadPreviewMetadata();
+        if(next.status==="error")throw new Error(next.message);
+        layout=next;
+        refreshModelOptions();
+        modelSelect.value=String(layout.models.length-1);
+        await loadModel(layout.models.length-1);
+    }catch(error){
+        showError(error);
+    }finally{
+        uploading=false;
+        $("openFile").disabled=false;
+        $("gcodeFile").value="";
+    }
+}
+let uploading=false;
+$("openFile").addEventListener("click",()=>$("gcodeFile").click());
+$("gcodeFile").addEventListener("change",event=>uploadGcode(event.target.files?.[0]));
+let dragDepth=0;
+window.addEventListener("dragenter",event=>{
+    if(!Array.from(event.dataTransfer?.types||[]).includes("Files"))return;
+    event.preventDefault();
+    dragDepth++;
+    document.body.classList.add("dragging");
+});
+window.addEventListener("dragover",event=>{
+    if(Array.from(event.dataTransfer?.types||[]).includes("Files"))event.preventDefault();
+});
+window.addEventListener("dragleave",event=>{
+    dragDepth=Math.max(0,dragDepth-1);
+    if(!dragDepth)document.body.classList.remove("dragging");
+});
+window.addEventListener("drop",event=>{
+    event.preventDefault();
+    dragDepth=0;
+    document.body.classList.remove("dragging");
+    uploadGcode(event.dataTransfer?.files?.[0]);
+});
+if(layout.models.length)loadModel(0).catch(showError);
