@@ -3,7 +3,7 @@
 export function joinContinuity(read,index,atEnd) {
     const a=read(atEnd?index:index-1),b=read(atEnd?index+1:index);
     if(!a || !b)return null;
-    if(!a.b || !b.a)return null;
+    if(!a.b || !b.a || a.role!==b.role)return null;
     if(Math.hypot(a.b[0]-b.a[0],a.b[1]-b.a[1],a.b[2]-b.a[2])>.012)return null;
     // Tolerate Float32 timestamp quantization on long prints.
     if(b.start-a.end>.08 || b.start<a.end-.12)return null;
@@ -59,10 +59,12 @@ export function buildJoinAttributes(indices,read,role) {
             const match=joinContinuity(read,id,true);
             if(match && (match.dot<.995 || Math.abs(match.a.w-match.b.w)>.015 ||
                Math.abs(match.a.h-match.b.h)>.015)){
-                // Cover the larger adjacent footprint; a smaller patch would
-                // leave a triangular void at a rapid width or height change.
-                const h=Math.max(.02,match.a.h,match.b.h);
-                const w=Math.max(h,match.a.w,match.b.w);
+                // Junction fillers must NEVER inherit the largest width from
+                // an adjacent over-extruded track: that created giant flat
+                // discs at bends. The still-closed tracks already preserve
+                // the full volume and footprint at each end.
+                const h=Math.max(.02,Math.min(match.a.h,match.b.h));
+                const w=Math.max(h,Math.min(match.a.w,match.b.w));
                 fallbacks.push({index:id,pos:[...p.b],w,h,role});
             }
         }
