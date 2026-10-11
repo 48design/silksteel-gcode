@@ -38,17 +38,17 @@ def read_colors() -> list[str] | None:
     try:
         data = json.loads(color_settings_path().read_text(encoding="utf-8"))
         values = data.get("colors")
-        if isinstance(values, list) and len(values) == len(ROLES) and all(
+        if isinstance(values, list) and len(values) in (len(ROLES),len(ROLES)+1) and all(
             isinstance(v, str) and COLOR_PATTERN.fullmatch(v) for v in values
         ):
-            return values
+            return values if len(values)==len(ROLES)+1 else values+["#ff4655"]
     except (OSError, ValueError, TypeError, AttributeError):
         pass
     return None
 
 
 def write_colors(values: list[str]) -> None:
-    if not isinstance(values, list) or len(values) != len(ROLES) or not all(
+    if not isinstance(values, list) or len(values) != len(ROLES)+1 or not all(
         isinstance(v, str) and COLOR_PATTERN.fullmatch(v) for v in values
     ):
         raise ValueError("Invalid feature color palette")
