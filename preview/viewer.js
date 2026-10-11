@@ -477,8 +477,9 @@ function updateTimelineMarkers() {
     }
     for(const point of labeled){
         markerLabel(point.name,point.x,width,()=>{
+            setPlaying(false);
             selectedLayer=point.index;
-            chooseLayer(point.index);
+            seek(model.layers[point.index].timeStart);
         });
         const el=wrap.lastElementChild;
         if(point.index===visualLayer)el.classList.add("current");
@@ -618,25 +619,59 @@ async function loadModel(index) {
     $("fileName").textContent=model.filename;
     $("stats").textContent=model.count.toLocaleString("de-DE")+" Extrusionssegmente · "+model.layers.length+" Layer · Filament Ø "+model.filament.toFixed(2)+" mm"+(model.ignored_arcs?" · Achtung: "+model.ignored_arcs+" Bögen nicht dargestellt":"");
     slider.max=String(model.layers.length-1);
-    $("duration").textContent=formatTime(model.duration);
+    selectedLayer=Math.max(0,model.layers.length-1);
+    markerKey="";
     fit();
     seek(model.duration);
     $("progress").hidden=true;
 }
-modelSelect.addEventListener("change",()=>{setPlaying(false);loadModel(Number(modelSelect.value)).catch(showError);});
-slider.addEventListener("input",()=>{
+modelSelect.addEventListener("change",()=>{
     setPlaying(false);
-    const layer=model.layers[Number(slider.value)];
-    const last=layer.start+layer.count-1;
-    seek(last>=0?endAt(last):0);
+    loadModel(Number(modelSelect.value)).catch(showError);
 });
-$("timeline").addEventListener("input",()=>{setPlaying(false);seek(Number($("timeline").value)/10000*model.duration);});
+slider.addEventListener("input",()=>chooseLayer(Number(slider.value)));
+$("layerNext").addEventListener("click",()=>chooseLayer(selectedLayer+1));
+$("layerPrev").addEventListener("click",()=>chooseLayer(selectedLayer-1));
+$("modePrint").addEventListener("click",()=>changeTimelineMode("print"));
+$("modeLayer").addEventListener("click",()=>changeTimelineMode("layer"));
+$("timeline").addEventListener("input",()=>{
+    if(!model)return;
+    setPlaying(false);
+    const [from,to]=activeRange();
+    seek(from+Number($("timeline").value)/TIMELINE_STEPS*(to-from));
+});
+$("timelineTicks").addEventListener("click",event=>{
+    if(!model)return;
+    const bounds=$("timelineTicks").getBoundingClientRect();
+    if(!bounds.width)return;
+    setPlaying(false);
+    const [from,to]=activeRange();
+    const fraction=Math.max(0,Math.min(1,(event.clientX-bounds.left)/bounds.width));
+    seek(from+(to-from)*fraction);
+});
+$("timelineTicks").addEventListener("mousemove",event=>{
+    if(!model)return;
+    const canvas=$("timelineTicks");
+    if(playbackMode==="layer"){
+        canvas.title="Layer "+model.layers[selectedLayer].number+": Position setzen";
+        return;
+    }
+    const bounds=canvas.getBoundingClientRect();
+    const fraction=Math.max(0,Math.min(1,(event.clientX-bounds.left)/Math.max(1,bounds.width)));
+    const time=fraction*model.duration;
+    const index=layerAtTime(time);
+    canvas.title="Layer "+model.layers[index].number+" · "+formatTime(time);
+});
 $("playToggle").addEventListener("click",()=>{
     if(!model)return;
-    if(!playing&&currentTime>=model.duration)seek(0);
+    const [from,to]=activeRange();
+    if(!playing&&currentTime>=to-1e-6)seek(from);
     setPlaying(!playing);
 });
-$("restart").addEventListener("click",()=>{setPlaying(false);seek(0);});
+$("restart").addEventListener("click",()=>{
+    setPlaying(false);
+    seek(activeRange()[0]);
+});
 $("below").addEventListener("change",updateVisibility);
 $("ghost").addEventListener("change",updateVisibility);
 $("showHops").addEventListener("change",updateVisibility);
@@ -692,13 +727,19 @@ const resize = new ResizeObserver(() => {
     if(w&&h){renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
 });
 resize.observe(canvasHost);
+const timelineResize=new ResizeObserver(()=>{
+    markerKey="";
+    if(model)updateTimelineMarkers();
+});
+timelineResize.observe($("timelineMarkers"));
 renderer.setAnimationLoop(()=>{
     const now=performance.now();
     if(playing&&model&&data){
         if(previousFrame){
-            const next=Math.min(model.duration,currentTime+(now-previousFrame)/1000*Number($("playSpeed").value));
+            const [from,to]=activeRange();
+            const next=Math.min(to,Math.max(from,currentTime+(now-previousFrame)/1000*Number($("playSpeed").value)));
             seek(next);
-            if(next>=model.duration)setPlaying(false);
+            if(next>=to)setPlaying(false);
         }
         previousFrame=now;
     }
