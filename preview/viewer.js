@@ -65,6 +65,8 @@ scene.add(grid);
 const modelSelect = $("model"), slider = $("layer");
 let model = null, data = null, hopData = null, cache = new Map(), hopCache = new Map(), lastPick = null;
 let activeLayers = [], currentTime = 0, visibleCount = 0, playing = false, previousFrame = 0;
+let rawData = null, rawLayerCache = new Map(), rawRequest = 0, selectedSourceLine = 0;
+const RAW_SIZE = 40;
 let playbackMode = "print", selectedLayer = 0, visualLayer = 0, markerKey = "", renderLayers = [];
 const TIMELINE_STEPS = 1000000;
 const SEGMENT_SIZE = 48, HOP_SIZE = 40;
@@ -267,6 +269,15 @@ function forgetLayers() {
     for (const group of cache.values()) {scene.remove(group);disposeGroup(group);}
     for (const group of hopCache.values()) {scene.remove(group);disposeHopGroup(group);}
     cache.clear();hopCache.clear();activeLayers=[];
+    for(const overlay of rawLayerCache.values()) {
+        scene.remove(overlay);
+        overlay.geometry.dispose();
+        overlay.material.dispose();
+    }
+    rawLayerCache.clear();
+    rawData=null;rawRequest++;selectedSourceLine=0;
+    $("rawInfo").textContent="Originalbewegungen im G-Code prüfen";
+    $("sourceDrawer").classList.remove("visible");
     disposeOverlay(diagnosticObjects);
     clearComparison();
     removeSection();
@@ -291,6 +302,17 @@ function readSegment(index) {
       line:data.getUint32(off+36,true),
       start:data.getFloat32(off+40,true),
       end:data.getFloat32(off+44,true)
+    };
+}
+function readRaw(index) {
+    const off=index*RAW_SIZE;
+    return {
+        a:[rawData.getFloat32(off,true),rawData.getFloat32(off+4,true),rawData.getFloat32(off+8,true)],
+        b:[rawData.getFloat32(off+12,true),rawData.getFloat32(off+16,true),rawData.getFloat32(off+20,true)],
+        kind:rawData.getUint32(off+24,true),
+        line:rawData.getUint32(off+28,true),
+        start:rawData.getFloat32(off+32,true),
+        end:rawData.getFloat32(off+36,true)
     };
 }
 function readHop(index) {
@@ -875,6 +897,7 @@ function updateVisibility() {
     slider.setAttribute("aria-valuetext","Layer "+layer.number+" · Z "+layer.z.toFixed(3)+" mm");
     if($("compareToggle").checked && referenceData)refreshComparison();
     if($("cutEnabled").checked && !playing)scheduleSection();
+    updateRawOverlay();
 }
 function fit() {
     const [lo,hi] = model.bounds;
@@ -900,7 +923,10 @@ async function loadModel(index) {
         throw new Error("G-Code-Vorschau: Ungültiges Binärformat oder Segmentgröße");
     }
     $("fileName").textContent=model.filename;
-    $("stats").textContent=model.count.toLocaleString("de-DE")+" Extrusionssegmente · "+model.layers.length+" Layer · Filament Ø "+model.filament.toFixed(2)+" mm"+(model.ignored_arcs?" · Achtung: "+model.ignored_arcs+" Bögen nicht dargestellt":"");
+    $("stats").textContent=model.count.toLocaleString("de-DE")+" Extrusionssegmente · "+model.layers.length+" Layer · Filament Ø "+model.filament.toFixed(2)+" mm"+
+        (model.omittedCount?" · "+model.omittedCount+" nicht gerenderte Bewegungen":"")+
+        (model.ignored_arcs?" · Achtung: "+model.ignored_arcs+" Bögen nicht dargestellt":"");
+    if($("rawOmitted").checked)loadRawMoves().catch(showError);
     slider.max=String(model.layers.length-1);
     selectedLayer=Math.max(0,model.layers.length-1);
     markerKey="";
