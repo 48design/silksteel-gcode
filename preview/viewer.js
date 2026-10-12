@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
-import {buildJoinAttributes} from "./extrusion_joins.js";
+import {buildJoinAttributes,sharedSplitSection} from "./extrusion_joins.js";
 import {makeJunctionGeometry,junctionVertexShader} from "./bead_junctions.js";
 import {nearestSourceRecord,rawClass} from "./gcode_inspector.js";
 import {analysePrint} from "./diagnostics.js";
@@ -396,8 +396,10 @@ function createLayer(index) {
                     const nx=-dy/l,ny=dx/l;
                     join.joinsStart.set([nx,ny,0],j*3);
                     join.joinsEnd.set([nx,ny,0],j*3);
-                    join.sizesStart.set([p.w,p.h],j*2);
-                    join.sizesEnd.set([p.w,p.h],j*2);
+                    join.sizesStart.set(
+                        sharedSplitSection(joinRead,items[j],false)||[p.w,p.h],j*2);
+                    join.sizesEnd.set(
+                        sharedSplitSection(joinRead,items[j],true)||[p.w,p.h],j*2);
                 }
                 join.fallbacks.length=0;
             }
