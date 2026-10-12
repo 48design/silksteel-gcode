@@ -439,6 +439,20 @@ class PreviewGeometryTests(unittest.TestCase):
             self.assertEqual(meta["omittedCount"],1)
             self.assertEqual(meta["count"],2)
 
+    def test_sidebar_preferences_survive_local_preview_port_changes(self):
+        from unittest import mock
+        from silksteel_preview import read_sidebar, write_sidebar, sidebar_settings_path
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"LOCALAPPDATA": tmp}):
+                values={"Diagnose": True, "Schichten": False}
+                write_sidebar(values)
+                self.assertEqual(read_sidebar(), values)
+                self.assertTrue(sidebar_settings_path().is_file())
+                with self.assertRaises(ValueError):
+                    write_sidebar({"unknown": True})
+                with self.assertRaises(ValueError):
+                    write_sidebar({"Diagnose": "yes"})
+
     def test_sidebar_groups_and_source_inspector_in_viewer(self):
         root=Path(__file__).resolve().parents[1]
         markup=(root/"preview"/"index.html").read_text(encoding="utf-8")
