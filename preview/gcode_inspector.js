@@ -14,8 +14,9 @@ export function nearestSourceRecord(view,stride,lineOffset,count,line) {
     return Math.abs(line-a)<Math.abs(b-line)?lo-1:lo;
 }
 export function rawClass(kind) {
-    return kind===1?"Im G-Code extrudiert, aber nicht als 3D-Strang dargestellt":
-        kind===2?"G2/G3-Bogen: nur Start/Ende verfügbar":
+    return kind===1?"G-Code-Bahn im Preview ganz oder teilweise ausgelassen":
+        kind===2?"Ungültiger G2/G3-Bogen: als gerade Näherung gezeigt":
         kind===3?"Reine Z-Extrusion":
+        kind===4?"G2/G3-Bogen gekrümmt gerendert (Rohreferenz zeigt nur Sehne)":
         "Gerenderte Extrusion";
 }
