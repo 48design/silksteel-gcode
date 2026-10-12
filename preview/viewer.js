@@ -682,11 +682,12 @@ function createRawOverlay(index){
     const indices=[],positions=[],colors=[];
     for(let j=layer.rawStart;j<layer.rawStart+layer.rawCount;j++){
         const record=readRaw(j);
-        if(record.kind===0)continue;
+        if(record.kind===0 && !$("rawAll").checked)continue;
         indices.push(j);
         positions.push(record.a[0],record.a[2],record.a[1],
                        record.b[0],record.b[2],record.b[1]);
-        const c=record.kind===1?[1,.30,.18]:record.kind===2?[1,.38,.85]:[.25,.9,1];
+        const c=record.kind===1?[1,.30,.18]:record.kind===2?[1,.38,.85]:
+            record.kind===3?[.72,.55,1]:[.20,.85,.95];
         colors.push(...c,...c);
     }
     const geo=new THREE.BufferGeometry();
@@ -718,9 +719,9 @@ async function loadRawMoves(){
     const count=[0,0,0,0];
     for(let i=0;i<model.rawCount;i++)
         count[rawData.getUint32(i*RAW_SIZE+24,true)]++;
-    $("rawInfo").textContent=count[1]+" nicht gerendert · "+count[2]+
-        " Bögen (als gerade Referenz) · "+count[3]+" vertikale Extrusionen. "+
-        "Farbige Linien anklicken, um den G-Code zu prüfen.";
+    $("rawInfo").textContent=count[0]+" gerendert · "+count[1]+" ausgelassen · "+count[2]+
+        " Bögen (gerade Referenz) · "+count[3]+" vertikale Extrusionen. "+
+        "Rohbahnen anklicken → G-Code-Zeile.";
     updateRawOverlay();
 }
 function updateRawOverlay(){
@@ -803,6 +804,15 @@ $("sourceCopy").addEventListener("click",async()=>{
 });
 $("rawOmitted").addEventListener("change",()=>{
     if($("rawOmitted").checked)loadRawMoves().catch(showError);
+    else updateRawOverlay();
+});
+$("rawAll").addEventListener("change",()=>{
+    for(const overlay of rawLayerCache.values()){
+        scene.remove(overlay);overlay.geometry.dispose();overlay.material.dispose();
+    }
+    rawLayerCache.clear();
+    if($("rawAll").checked && !$("rawOmitted").checked)$("rawOmitted").checked=true;
+    if($("rawOmitted").checked)loadRawMoves().then(updateRawOverlay).catch(showError);
     else updateRawOverlay();
 });
 const sideGroups=[...document.querySelectorAll("details[data-side-section]")];
@@ -1197,7 +1207,7 @@ function selectSegment(event) {
             i=>rawData.getFloat32(i*RAW_SIZE+36,true));
         for(let i=layer.rawStart;i<Math.min(layer.rawStart+layer.rawCount,rawEnd);i++){
             const p=readRaw(i);
-            if(p.kind===0)continue;
+            if(p.kind===0 && !$("rawAll").checked)continue;
             const distance=test(p);
             if(distance<best){best=distance;pick=p;isRaw=true;}
         }
