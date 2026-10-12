@@ -139,6 +139,44 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0][0],5.0)
         self.assertAlmostEqual(rows[0][3],10.0)
 
+    def test_real_bricklayers_line_709_is_not_lost(self):
+        # Reproduction supplied from a known-good printed G-code:
+        # the preview selected line 709 but showed no resulting volume.
+        lines=[
+            "; layer_height = 0.2",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G90", "M82", "G92 E7.98193",
+            "G0 X165.506 Y102.976 Z0.2",
+            "G1 X166.173 Y103.252 E7.99890",
+            "G1 X166.449 Y103.919 E8.01586",
+            "G1 X166.449 Y117.948 E8.34577",
+            "G1 X166.714 Y117.912 E8.35206",
+            "G1 X167.096 Y117.757 E8.36173",
+            "G1 X167.316 Y117.573 E8.36849",
+            "G1 X167.401 Y117.34 E8.37431",
+            "G1 X167.401 Y102.25 E8.72916",
+            "G1 X167.28 Y102.139 E8.73304",
+        ]
+        meta, rows = self.parse(lines)
+        expected_line=lines.index("G1 X167.401 Y102.25 E8.72916")+1
+        selected=[p for p in rows if int(p[9])==expected_line]
+        self.assertTrue(selected, "Long Bricklayers base pass must be present")
+        self.assertAlmostEqual(selected[0][0],167.401,places=3)
+        self.assertAlmostEqual(selected[-1][4],102.25,places=3)
+        self.assertAlmostEqual(sum(math.dist(p[:3],p[3:6]) for p in selected),
+                               15.09,places=3)
+        self.assertTrue(all(.20 <= p[7] <= p[6] < 1.0 for p in selected))
+        self.assertEqual(meta["omittedCount"],0)
+
+    def test_closed_path_fallback_is_enabled_by_default(self):
+        root=Path(__file__).resolve().parents[1]
+        markup=(root/"preview"/"index.html").read_text(encoding="utf-8")
+        viewer=(root/"preview"/"viewer.js").read_text(encoding="utf-8")
+        self.assertIn('id="seamlessJoins"',markup)
+        self.assertNotIn('id="seamlessJoins" checked',markup)
+        self.assertIn('if(!$("seamlessJoins").checked)',viewer)
+        self.assertIn('join.fallbacks.length=0',viewer)
+
     def test_more_extrusion_is_physically_wider(self):
         meta, rows = self.parse([
             "; filament_diameter = 1.75",
