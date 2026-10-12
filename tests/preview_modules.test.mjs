@@ -13,6 +13,7 @@ const {makeJunctionGeometry,junctionVertexShader}=await load("bead_junctions.js"
 const {analysePrint}=await load("diagnostics.js");
 const {compareLayerVolumes}=await load("comparison.js");
 const {buildCutContours}=await load("section.js");
+const {nearestSourceRecord,rawClass}=await load("gcode_inspector.js");
 
 const bead=(a,b,role=0,start=0,end=1)=>({a,b,w:.46,h:.20,role,start,end});
 const tracks=[
@@ -111,6 +112,27 @@ assert(geom.attrs.iSpan.values[0]<=sharpJoin.fallbacks[0].h*.5+1e-6);
 const giantJunction=makeJunctionGeometry(THREEStub,bounded.fallbacks);
 assert(giantJunction.attrs.iSize.values[0]<=.46+1e-6);
 assert(giantJunction.attrs.iSize.values[1]<=.035+1e-6);
+
+// The G-code inspector must point to the actual source line even when
+// the preview omits a full extrusion, rather than guessing by segment index.
+const sourceBuffer=new ArrayBuffer(4*48),sourceView=new DataView(sourceBuffer);
+for(const [index,line] of [15,20,20,42].entries())
+    sourceView.setUint32(index*48+36,line,true);
+assert.equal(nearestSourceRecord(sourceView,48,36,4,20),1);
+assert.equal(nearestSourceRecord(sourceView,48,36,4,40),3);
+assert.equal(nearestSourceRecord(sourceView,48,36,4,17),0);
+assert.equal(nearestSourceRecord(sourceView,48,36,4,1),0);
+assert.equal(nearestSourceRecord(sourceView,48,36,0,20),-1);
+assert(rawClass(1).includes("nicht als 3D-Strang"));
+assert(rawClass(2).includes("G2/G3"));
+const rawLine=new DataView(new ArrayBuffer(40));
+rawLine.setUint32(28,369,true);
+assert.equal(nearestSourceRecord(rawLine,40,28,1,369),0);
+const page=readFileSync(join(root,"preview","index.html"),"utf-8");
+assert.equal((page.match(/<details class="side-group"/g)||[]).length,8);
+assert(page.includes('id="sourceDrawer"'));
+assert(viewer.includes("openSourceLine(pick.line)"));
+assert(viewer.includes("loadRawMoves()"));
 
 function packed(records){
     const buffer=new ArrayBuffer(records.length*48),view=new DataView(buffer);
