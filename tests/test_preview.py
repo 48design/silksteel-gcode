@@ -18,6 +18,101 @@ class PreviewGeometryTests(unittest.TestCase):
             rows = [PACK.unpack_from(data, i) for i in range(0, len(data), PACK.size)]
             return metadata, rows
 
+    def test_g2_g3_slicer_arcs_are_rendered_as_actual_toolpaths(self):
+        # Ordinary Arc-Fitting output previously disappeared in its entirety.
+        from silksteel_preview import RAW_PACK
+        cases = [
+            ("G3 X0 Y10 I-10 J0 E0.6 F1200", 10.0, 0.0, 0.0, 10.0),
+            ("G3 X0 Y10 R10 E0.6 F1200", 10.0, 0.0, 0.0, 10.0),
+        ]
+        for command, x0, y0, x1, y1 in cases:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as tmp:
+                    source = Path(tmp) / "arc.gcode"
+                    target = Path(tmp) / "arc.bin"
+                    source.write_text("\n".join([
+                        "; layer_height = 0.2",
+                        ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+                        "G90", "M83", f"G0 X{x0} Y{y0} Z0.2",
+                        command,
+                    ]) + "\n", encoding="utf-8")
+                    meta=convert(source,target)
+                    data=target.read_bytes()
+                    rows=[PACK.unpack_from(data,i)
+                          for i in range(0,len(data),PACK.size)]
+                    self.assertGreater(meta["count"], 10)
+                    self.assertEqual(meta["arcCount"], 1)
+                    self.assertEqual(meta["ignored_arcs"], 0)
+                    self.assertEqual(meta["omittedCount"], 0)
+                    self.assertEqual(meta["rawCount"], 1)
+                    self.assertEqual(meta["layers"][0]["count"], meta["count"])
+                    self.assertAlmostEqual(rows[0][0],x0,places=4)
+                    self.assertAlmostEqual(rows[-1][3],x1,places=4)
+                    self.assertAlmostEqual(rows[-1][4],y1,places=4)
+                    total_length=sum(math.dist(row[0:3],row[3:6]) for row in rows)
+                    self.assertAlmostEqual(total_length, math.pi*5,delta=.035)
+                    self.assertTrue(any(row[0]!=row[3] and row[1]!=row[4] for row in rows))
+                    raw=target.with_suffix(".raw.bin").read_bytes()
+                    self.assertEqual(RAW_PACK.unpack_from(raw,0)[6],0)
+                    filament_area=math.pi*(meta["filament"]/2)**2
+                    estimated_e=sum(
+                        (row[6]*row[7]-(1-math.pi/4)*row[7]**2)
+                        * math.dist(row[0:3],row[3:6])/filament_area
+                        for row in rows)
+                    self.assertAlmostEqual(estimated_e,.6,places=3)
+
+    def test_arc_radius_full_circle_and_helical_coordinates(self):
+        from silksteel_preview_arcs import interpolate_arc
+        base=[10.0,0.0,.2]
+        ending=[0.0,10.0,.6]
+        ccw=interpolate_arc(base,ending,{"I":-10.0,"J":0.0},False)
+        self.assertIsNotNone(ccw)
+        points,length=ccw
+        self.assertAlmostEqual(length,math.hypot(math.pi*5,.4),places=5)
+        self.assertAlmostEqual(points[-1][2],.6)
+        self.assertTrue(all(math.isclose(math.hypot(p[0],p[1]),10,abs_tol=1e-4) for p in points))
+        reflex=interpolate_arc(base,ending,{"R":-10.0},False)
+        self.assertAlmostEqual(reflex[1],15*math.pi,places=4)
+        full=interpolate_arc(base,base,{"I":-10.0,"J":0.0},True)
+        self.assertAlmostEqual(full[1],20*math.pi,places=4)
+        self.assertGreater(len(full[0]),60)
+        self.assertIsNone(interpolate_arc(base,ending,{},False))
+
+    def test_arc_center_modes_and_plane_selection(self):
+        from silksteel_preview_arcs import interpolate_arc
+        start=[10.,0.,.2]
+        end=[0.,10.,.2]
+        relative=interpolate_arc(start,end,{"I":-10.,"J":0.},False)
+        absolute=interpolate_arc(start,end,{"I":0.,"J":0.},False,
+                                 absolute_center=True)
+        self.assertAlmostEqual(relative[1],absolute[1],places=5)
+        g18=interpolate_arc([0.,0.,10.],[10.,0.,0.],
+                            {"K":-10.,"I":0.},False,plane="G18")
+        self.assertIsNotNone(g18)
+        self.assertAlmostEqual(g18[1],math.pi*5,places=5)
+        self.assertTrue(all(p[1]==0. for p in g18[0]))
+
+    def test_invalid_subsection_cannot_hide_entire_valid_g1(self):
+        from unittest.mock import patch
+        from silksteel_preview_surface import DepositedSurface
+        actual=DepositedSurface.sections
+
+        def patched(self,start,end,area,nominal,first_layer,layer_z=None):
+            result=actual(self,start,end,area,nominal,first_layer,layer_z)
+            if len(result)==1:
+                t0,t1,w,h=result[0]
+                return [(0.,.5,41.,h),(.5,1.,w,h)]
+            return result
+
+        with patch.object(DepositedSurface,"sections",patched):
+            meta,rows=self.parse(["G90","M83","G0 X0 Y0 Z0.2",
+                                   "G1 X10 Y0 E0.25"])
+        self.assertEqual(meta["count"],1)
+        self.assertEqual(meta["partialCount"],1)
+        self.assertEqual(meta["omittedCount"],0)
+        self.assertAlmostEqual(rows[0][0],5.0)
+        self.assertAlmostEqual(rows[0][3],10.0)
+
     def test_more_extrusion_is_physically_wider(self):
         meta, rows = self.parse([
             "; filament_diameter = 1.75",
