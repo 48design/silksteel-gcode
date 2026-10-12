@@ -1154,18 +1154,31 @@ function selectSegment(event) {
     mouse.set(((event.clientX-bounds.left)/bounds.width)*2-1,
               -((event.clientY-bounds.top)/bounds.height)*2+1);
     const current=Number(slider.value), layer=model.layers[current];
-    let best=12*12, pick=null;
+    let best=14*14, pick=null, isRaw=false;
     const a=new THREE.Vector3(),b=new THREE.Vector3();
-    for(let i=layer.start;i<Math.min(layer.start+layer.count,visibleCount);i++){
-        const p=readSegment(i);
-        if(!visibleRoles.has(p.role))continue;
+    const test=p=>{
         a.set(p.a[0],p.a[2],p.a[1]).project(camera);
         b.set(p.b[0],p.b[2],p.b[1]).project(camera);
         const dx=b.x-a.x,dy=b.y-a.y;
         const t=Math.max(0,Math.min(1,((mouse.x-a.x)*dx+(mouse.y-a.y)*dy)/(dx*dx+dy*dy||1)));
         const x=a.x+t*dx,y=a.y+t*dy;
-        const d=((x-mouse.x)*bounds.width/2)**2+((y-mouse.y)*bounds.height/2)**2;
-        if(d<best){best=d;pick=p;}
+        return ((x-mouse.x)*bounds.width/2)**2+((y-mouse.y)*bounds.height/2)**2;
+    };
+    if($("rawOmitted").checked && rawData){
+        const rawEnd=completedBefore(model.rawCount,currentTime,
+            i=>rawData.getFloat32(i*RAW_SIZE+36,true));
+        for(let i=layer.rawStart;i<Math.min(layer.rawStart+layer.rawCount,rawEnd);i++){
+            const p=readRaw(i);
+            if(p.kind===0)continue;
+            const distance=test(p);
+            if(distance<best){best=distance;pick=p;isRaw=true;}
+        }
+    }
+    for(let i=layer.start;i<Math.min(layer.start+layer.count,visibleCount);i++){
+        const p=readSegment(i);
+        if(!visibleRoles.has(p.role))continue;
+        const distance=test(p);
+        if(distance<best){best=distance;pick=p;isRaw=false;}
     }
     if(lastPick){scene.remove(lastPick);lastPick.geometry.dispose();lastPick.material.dispose();lastPick=null;}
     if(!pick){$("pickInfo").style.display="none";return;}
@@ -1174,19 +1187,24 @@ function selectSegment(event) {
     lastPick=new THREE.Line(geom,new THREE.LineBasicMaterial({color:"#ffffff",depthTest:false}));
     lastPick.renderOrder=999;scene.add(lastPick);
     const length=Math.hypot(...pick.a.map((v,i)=>pick.b[i]-v));
-    const area=pick.h*(pick.w-pick.h)+Math.PI*pick.h*pick.h/4;
-    const extruded=area*length/(Math.PI*(model.filament/2)**2);
     $("pickInfo").style.display="block";
     $("pickInfo").replaceChildren();
     const title=document.createElement("strong");
-    title.textContent=layout.roles[pick.role]+" · G-Code-Zeile "+pick.line;
+    title.textContent=(isRaw?"Rohbewegung":layout.roles[pick.role])+" · G-Code-Zeile "+pick.line;
     const body=document.createElement("div");
-    const freeDiameter = Math.sqrt(4*area/Math.PI);
-    const form = pick.h >= freeDiameter*0.985 ? "rund / frei" : "abgeflacht / aufliegend";
-    body.textContent="Profil "+form+" · Breite "+pick.w.toFixed(3)+" mm · Höhe "+
-        pick.h.toFixed(3)+" mm · Länge "+length.toFixed(2)+" mm · ΔE "+
-        extruded.toFixed(5)+" mm";
+    if(isRaw){
+        body.textContent=rawClass(pick.kind)+" · Länge "+length.toFixed(2)+" mm";
+    }else{
+        const area=pick.h*(pick.w-pick.h)+Math.PI*pick.h*pick.h/4;
+        const extruded=area*length/(Math.PI*(model.filament/2)**2);
+        const freeDiameter=Math.sqrt(4*area/Math.PI);
+        const form=pick.h>=freeDiameter*.985?"rund / frei":"abgeflacht / aufliegend";
+        body.textContent="Profil "+form+" · Breite "+pick.w.toFixed(3)+" mm · Höhe "+
+            pick.h.toFixed(3)+" mm · Länge "+length.toFixed(2)+" mm · ΔE "+
+            extruded.toFixed(5)+" mm";
+    }
     $("pickInfo").append(title,body);
+    openSourceLine(pick.line).catch(showError);
 }
 let down;
 renderer.domElement.addEventListener("pointerdown",e=>{down=[e.clientX,e.clientY]});
