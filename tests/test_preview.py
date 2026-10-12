@@ -563,7 +563,7 @@ class PreviewGeometryTests(unittest.TestCase):
     def test_raised_nozzle_grows_height_not_width_even_near_adjacent_tracks(self):
         from silksteel_preview_surface import DepositedSurface
         field = DepositedSurface()
-        field._tops[(0, 0)] = (.37, .2)
+        field._tops[(0, 0)] = (.2, -math.inf)
         area, nominal = .12, .2
         at_layer = field._effective_height(.1, .1, .4, area, nominal, .2, .4)
         raised = field._effective_height(.1, .1, .45, area, nominal, .2, .4)
@@ -573,6 +573,26 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertLess(field.width_for_area(area, raised),
                         field.width_for_area(area, at_layer))
         self.assertLessEqual(raised, field.free_diameter(area))
+
+    def test_bricklayers_second_pass_uses_actual_support_gap_not_double_z(self):
+        from silksteel_preview_surface import DepositedSurface
+        field = DepositedSurface()
+        # The first Bricklayers pass has already deposited material at Z=.200.
+        # The nozzle is at Z=.350 on the second pass: available gap is .150.
+        field._tops[(int(150.0/.4),int(103.353/.4))] = (.2, -math.inf)
+        length = 165.506 - 144.494
+        area = ((7.09795 - 6.60382) * math.pi * (.875)**2) / length
+        diameter = field.free_diameter(area)
+        h = field._effective_height(150.0,103.353,.350,area,.150,.2,.2)
+        w = field.width_for_area(area,h)
+        self.assertAlmostEqual(h,.150,places=4)
+        self.assertAlmostEqual(w,.4093,delta=.001)
+        self.assertAlmostEqual(.350-h,.200,places=4)
+        self.assertGreater(diameter,.25)
+        # Regression: old code added the layer-Z offset twice, producing a
+        # 0.268-mm cylinder whose bottom was buried beneath the support.
+        old_buried_bottom=.350-diameter
+        self.assertLess(old_buried_bottom,.1)
 
     def test_layer_reference_z_controls_adaptive_width_in_converter(self):
         meta, rows = self.parse([
