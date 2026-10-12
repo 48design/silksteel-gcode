@@ -15,6 +15,20 @@ export function joinContinuity(read,index,atEnd) {
     return {a,b,dot,l1,l2};
 }
 
+export function sharedSplitSection(read, index, atEnd) {
+    // Subsections originating from the SAME G1 must share the same physical
+    // boundary, even when width changes because the support grid changes.
+    const match=joinContinuity(read,index,atEnd);
+    if(!match || !Number.isInteger(match.a.line) ||
+       match.a.line!==match.b.line || match.dot<.999)return null;
+    const a=match.a,b=match.b;
+    const h=(a.h+b.h)*.5;
+    if(!(h>0))return null;
+    const k=1-Math.PI/4;
+    const area=((a.w*a.h-k*a.h*a.h)+(b.w*b.h-k*b.h*b.h))*.5;
+    return [Math.max(h,area/h+k*h),h];
+}
+
 export function computeJoin(read,index,role,atEnd) {
     const continuity=joinContinuity(read,index,atEnd);
     if(!continuity)return null;
@@ -53,12 +67,13 @@ export function buildJoinAttributes(indices,read,role) {
         const end=computeJoin(read,id,role,true);
         joinsStart.set([...(start?.miter||normal),start?1:0],i*3);
         joinsEnd.set([...(end?.miter||normal),end?1:0],i*3);
-        sizesStart.set(start?.size||[p.w,p.h],i*2);
-        sizesEnd.set(end?.size||[p.w,p.h],i*2);
+        sizesStart.set(sharedSplitSection(read,id,false)||start?.size||[p.w,p.h],i*2);
+        sizesEnd.set(sharedSplitSection(read,id,true)||end?.size||[p.w,p.h],i*2);
         if(!end){
             const match=joinContinuity(read,id,true);
-            if(match && (match.dot<.995 || Math.abs(match.a.w-match.b.w)>.015 ||
-               Math.abs(match.a.h-match.b.h)>.015)){
+            if(match && !sharedSplitSection(read,id,true) &&
+               (match.dot<.995 || Math.abs(match.a.w-match.b.w)>.015 ||
+                Math.abs(match.a.h-match.b.h)>.015)){
                 // Junction fillers must NEVER inherit the largest width from
                 // an adjacent over-extruded track: that created giant flat
                 // discs at bends. The still-closed tracks already preserve
