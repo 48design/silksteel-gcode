@@ -67,6 +67,41 @@ def write_colors(values: list[str]) -> None:
 
 
 
+SIDEBAR_SECTIONS = ("G-Code laden", "G-Code-Version", "Schichten", "Extrusionstypen",
+                    "Schnittansicht", "Diagnose", "Originalvergleich", "Darstellung")
+
+
+def sidebar_settings_path() -> Path:
+    return color_settings_path().with_name("preview-sidebar.json")
+
+
+def read_sidebar() -> dict[str, bool]:
+    try:
+        data = json.loads(sidebar_settings_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {key: data[key] for key in SIDEBAR_SECTIONS
+                    if key in data and isinstance(data[key], bool)}
+    except (OSError, ValueError, TypeError):
+        pass
+    return {}
+
+
+def write_sidebar(state: dict[str, bool]) -> None:
+    if not isinstance(state, dict) or not all(
+        key in SIDEBAR_SECTIONS and isinstance(value, bool)
+        for key, value in state.items()
+    ):
+        raise ValueError("Invalid sidebar settings")
+    path = sidebar_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def convert(source: Path, destination: Path, hop_destination: Path | None = None,
             progress=None, raw_destination: Path | None = None,
             source_offsets: list[int] | None = None) -> dict:
@@ -367,6 +402,27 @@ def serve(processed: Path | None = None, original: Path | None = None,
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
+                if self.path == "/settings/sidebar":
+                    origin = self.headers.get("Origin")
+                    if origin and origin != f"http://127.0.0.1:{server.server_port}":
+                        self.send_error(403, "Invalid origin")
+                        return
+                    try:
+                        length = int(self.headers.get("Content-Length", "0"))
+                        if not 0 < length <= 4096:
+                            raise ValueError("Invalid sidebar settings size")
+                        settings = json.loads(self.rfile.read(length))
+                        write_sidebar(settings)
+                    except (OSError, ValueError, TypeError) as exc:
+                        self.send_error(400, str(exc))
+                        return
+                    payload = b'{"saved":true}'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 if self.path == "/settings/colors":
                     origin = self.headers.get("Origin")
                     if origin and origin != f"http://127.0.0.1:{server.server_port}":
@@ -475,7 +531,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     payload, mime = b"ok", "text/plain"
                 elif path == "/meta.json":
                     payload = json.dumps(
-                        {"models": models, "roles": ROLES, "colors": read_colors(), **state}
+                        {"models": models, "roles": ROLES, "colors": read_colors(), "sidebar": read_sidebar(), **state}
                     ).encode("utf-8")
                     mime = "application/json"
                 elif path in ("/", "/viewer.js", "/extrusion_joins.js",
