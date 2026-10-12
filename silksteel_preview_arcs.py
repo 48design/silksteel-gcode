@@ -102,9 +102,9 @@ def interpolate_arc(
         return None
     samples = max(2, math.ceil(length / resolution),
                   math.ceil(abs(sweep) / (math.pi / 36)))
-    if samples > max_segments:
-        # Geometry must not silently collapse a huge arc to a chord.
-        return None
+    # Cap tessellation cost without discarding otherwise valid geometry.
+    # The arc remains curved even when the requested resolution cannot fit.
+    samples = min(samples, max_segments)
     points = [list(start)]
     for i in range(1, samples):
         t = i / samples
