@@ -815,20 +815,26 @@ for(const group of sideGroups){
         else if(fallback!==null)group.open=fallback==="1";
     }catch{}
 }
-let sidebarSaving=false;
-async function saveSidebarState(){
+let sidebarSaving=false, sidebarDirty=false;
+function saveSidebarState(){
+    sidebarDirty=true;
     if(sidebarSaving)return;
     sidebarSaving=true;
-    try{
-        const state=Object.fromEntries(sideGroups.map(group=>
-            [group.dataset.sideSection,group.open]));
-        const response=await fetch("/settings/sidebar",{
-            method:"POST",headers:{"Content-Type":"application/json"},
-            body:JSON.stringify(state)
-        });
-        if(!response.ok)console.warn("Sidebar-Einstellungen konnten nicht gespeichert werden.");
-    }catch(error){console.warn("Sidebar-Einstellungen:",error);}
-    finally{sidebarSaving=false;}
+    (async()=>{
+        try{
+            do{
+                sidebarDirty=false;
+                const state=Object.fromEntries(sideGroups.map(group=>
+                    [group.dataset.sideSection,group.open]));
+                const response=await fetch("/settings/sidebar",{
+                    method:"POST",headers:{"Content-Type":"application/json"},
+                    body:JSON.stringify(state)
+                });
+                if(!response.ok)console.warn("Sidebar-Einstellungen konnten nicht gespeichert werden.");
+            }while(sidebarDirty);
+        }catch(error){console.warn("Sidebar-Einstellungen:",error);}
+        finally{sidebarSaving=false;}
+    })();
 }
 for(const group of sideGroups){
     group.addEventListener("toggle",()=>{
