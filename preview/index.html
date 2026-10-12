@@ -11,7 +11,16 @@ aside{width:318px;flex-shrink:0;background:var(--panel);padding:22px;display:fle
 h1{font-size:21px;margin:0;font-weight:700;letter-spacing:-.5px}h1 span{color:var(--accent)}
 h2{font-size:11px;letter-spacing:.11em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}
 small,.muted{color:var(--muted)}#fileName{overflow-wrap:anywhere;font-size:12px}
-section{border-top:1px solid var(--border);padding-top:15px}
+.side-group{border-top:1px solid var(--border);padding:0;flex:0 0 auto}
+.side-group summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer;list-style:none;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#bcc8d9;padding:13px 2px;user-select:none}
+.side-group summary::-webkit-details-marker{display:none}
+.side-group summary::after{content:"";border:solid #98abc4;border-width:0 1.5px 1.5px 0;padding:3px;transform:rotate(45deg);transition:transform .18s}
+.side-group[open] summary::after{transform:rotate(225deg)}
+.side-group summary:hover{color:#fff}
+.side-content{padding:0 0 13px;display:flex;flex-direction:column;gap:7px}
+.side-content>.drop-hint{margin:0}
+.side-content>#legend{padding-top:4px}
+
 label{display:flex;align-items:center;justify-content:space-between;gap:9px}select,button{background:#273241;border:1px solid #475467;border-radius:7px;padding:8px 10px;color:inherit;font:inherit;cursor:pointer}
 select{width:100%;margin:5px 0}button:hover,select:hover{background:#344255}
 input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}input[type=checkbox]{accent-color:var(--accent)}
@@ -64,6 +73,23 @@ main{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height
 #help{position:absolute;right:16px;bottom:16px;background:#141a23b8;padding:8px 12px;border-radius:7px;color:var(--muted);font-size:12px}
 #pickInfo{position:absolute;left:16px;bottom:16px;max-width:420px;background:#141a23f0;border:1px solid var(--border);padding:12px 16px;border-radius:9px;display:none;font-variant-numeric:tabular-nums}
 #pickInfo strong{display:block;margin-bottom:5px}
+#sourceDrawer{position:absolute;right:70px;top:62px;bottom:15px;width:min(520px,calc(100% - 100px));display:none;flex-direction:column;gap:10px;z-index:16;background:#131b27f5;border:1px solid #506076;border-radius:12px;box-shadow:0 20px 70px #0009;padding:15px;backdrop-filter:blur(10px)}
+#sourceDrawer.visible{display:flex}
+.source-head{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.source-head h3{font-size:14px;margin:0}
+.source-head button{padding:4px 9px}
+.source-controls{display:flex;align-items:center;gap:8px}
+.source-controls input{background:#0c141f;color:#e9f0fa;border:1px solid #405267;border-radius:6px;padding:7px;width:110px;font:inherit}
+#sourceLines{flex:1;overflow:auto;background:#0b111b;border-radius:8px;border:1px solid #2c3949;font:12px/1.5 Consolas,monospace;white-space:pre}
+.source-line{display:flex;min-width:max-content;padding:1px 9px;cursor:pointer}
+.source-line:hover{background:#2c3b4c}
+.source-line.active{background:#265072;color:#fff}
+.source-line .line-num{display:inline-block;width:7ch;min-width:7ch;text-align:right;color:#859bb5;padding-right:10px;user-select:none}
+.source-line.active .line-num{color:#c1e6ff}
+#sourceStatus{font-size:11px;color:#99acc4}
+#sourceDrawer code{color:#bfe5ff}
+@media(max-width:690px){#sourceDrawer{top:8px;right:8px;bottom:8px;width:calc(100% - 16px)}}
+
 #toolbar{position:absolute;right:16px;top:16px;display:flex;gap:8px}
 .open-file{width:100%;background:#245582;border-color:#3a79b2;font-weight:600}
 .open-file span{font-size:18px;margin-right:4px}
@@ -78,7 +104,7 @@ body.dragging #dropOverlay{display:flex}
 .inspector-list .warn-dot{width:7px;height:7px;border-radius:50%;background:#ffb157;margin-top:5px;flex:none}
 #cutPosition{margin:8px 0}
 #comparisonSummary{margin-top:8px;white-space:pre-line}
-@media(max-width:690px){#layout{flex-direction:column}aside{width:100%;max-height:34dvh;padding:12px;gap:8px}main{min-height:0}#help{display:none}h1{font-size:17px}section{padding-top:7px}#playbackDock{padding:9px 12px}.timeline-header{flex-wrap:wrap;gap:7px}.timeline-controls{flex-wrap:wrap}.timeline-heading{width:100%}#layerRail{right:8px;transform:translateY(-50%) scale(.85);transform-origin:right center}}
+@media(max-width:690px){#layout{flex-direction:column}aside{width:100%;max-height:34dvh;padding:12px;gap:8px}main{min-height:0}#help{display:none}h1{font-size:17px}.side-group summary{padding:8px 2px}#playbackDock{padding:9px 12px}.timeline-header{flex-wrap:wrap;gap:7px}.timeline-controls{flex-wrap:wrap}.timeline-heading{width:100%}#layerRail{right:8px;transform:translateY(-50%) scale(.85);transform-origin:right center}}
 </style>
 <script type="importmap">
 {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"}}
@@ -89,38 +115,48 @@ body.dragging #dropOverlay{display:flex}
 <div id="layout">
 <aside>
 <header><h1><span>Silk</span>Steel <small> / PREVIEW</small></h1><div id="fileName" class="muted">G-code wird geladen…</div></header>
-<section><h2>G-Code laden</h2>
+<details class="side-group" data-side-section="G-Code laden" open><summary>G-Code laden</summary><div class="side-content">
 <button type="button" id="openFile" class="open-file"> <span aria-hidden="true">＋</span> G-Code-Datei öffnen</button>
 <input type="file" id="gcodeFile" accept=".gcode,.gc,.g,.pp" hidden>
 <p class="drop-hint">Oder eine .gcode / .gcode.pp direkt ins Fenster ziehen.</p>
-</section>
-<section><h2>G-Code-Version</h2><select id="model"></select><div id="stats" class="stats"></div></section>
-<section><h2>Schichten</h2><label for="below">Darunter anzeigen</label><select id="below"><option value="0">Nur aktuelle Schicht</option><option value="3" selected>3 Schichten</option><option value="12">12 Schichten</option><option value="-1">Alle Schichten (GPU-intensiv)</option></select>
-</section>
-<section><h2>Extrusionstypen</h2><div id="legend"></div><button id="resetColors" type="button">Standardfarben wiederherstellen</button></section>
-<section><h2>Schnittansicht</h2>
+</div></details>
+<details class="side-group" data-side-section="G-Code-Version" open><summary>G-Code-Version</summary><div class="side-content"><select id="model"></select><div id="stats" class="stats"></div></div></details>
+<details class="side-group" data-side-section="Schichten"><summary>Schichten</summary><div class="side-content"><label for="below">Darunter anzeigen</label><select id="below"><option value="0">Nur aktuelle Schicht</option><option value="3" selected>3 Schichten</option><option value="12">12 Schichten</option><option value="-1">Alle Schichten (GPU-intensiv)</option></select>
+</div></details>
+<details class="side-group" data-side-section="Extrusionstypen"><summary>Extrusionstypen</summary><div class="side-content"><div id="legend"></div><button id="resetColors" type="button">Standardfarben wiederherstellen</button></div></details>
+<details class="side-group" data-side-section="Schnittansicht"><summary>Schnittansicht</summary><div class="side-content">
 <label><span>Schnitt aktivieren</span><input type="checkbox" id="cutEnabled"></label>
 <label for="cutAxis">Schnittebene</label>
 <select id="cutAxis"><option value="x">X – vertikal</option><option value="y">Y – vertikal</option><option value="z">Z – horizontal</option></select>
 <input id="cutPosition" type="range" min="0" max="1000" step="1" value="500" aria-label="Position der Schnittebene">
 <div class="stats" id="cutValue">Schnitt aus</div>
 <label><span>Richtung umkehren</span><input type="checkbox" id="cutInvert"></label>
-</section>
-<section><h2>Diagnose</h2>
+</div></details>
+<details class="side-group" data-side-section="Diagnose"><summary>Diagnose</summary><div class="side-content">
 <label><span>Auffälligkeiten markieren</span><input type="checkbox" id="diagnosticsToggle"></label>
+<label><span>Nicht gerenderte Extrusionen</span><input type="checkbox" id="rawOmitted"></label>
+<div id="rawInfo" class="stats">Originalbewegungen im G-Code prüfen</div>
 <div id="diagnosticsSummary" class="stats">Kein G-Code geladen</div>
 <div id="diagnosticsList" class="inspector-list"></div>
-</section>
-<section><h2>Originalvergleich</h2>
+</div></details>
+<details class="side-group" data-side-section="Originalvergleich"><summary>Originalvergleich</summary><div class="side-content">
 <label><span>Differenzansicht</span><input type="checkbox" id="compareToggle"></label>
 <div id="comparisonSummary" class="stats">Benötigt Original- und SilkSteel-Datei</div>
-</section>
-<section><h2>Darstellung</h2><div class="feature-row"><input type="checkbox" id="showHops" checked aria-label="Z-Hops anzeigen"><input type="color" id="hopColor" value="#ff4655" title="Z-Hop-Farbe ändern" aria-label="Z-Hop-Farbe wählen"><span>Z-Hops anzeigen</span></div><label><span>Gitternetz</span><input type="checkbox" id="gridToggle" checked></label>
+</div></details>
+<details class="side-group" data-side-section="Darstellung"><summary>Darstellung</summary><div class="side-content"><div class="feature-row"><input type="checkbox" id="showHops" checked aria-label="Z-Hops anzeigen"><input type="color" id="hopColor" value="#ff4655" title="Z-Hop-Farbe ändern" aria-label="Z-Hop-Farbe wählen"><span>Z-Hops anzeigen</span></div><label><span>Gitternetz</span><input type="checkbox" id="gridToggle" checked></label>
 <label><span>Unterliegende Schichten transparent</span><input type="checkbox" id="ghost" checked></label>
-</section>
+</div></details>
 <p class="muted" style="margin-top:auto;font-size:11px">Variable 3D-Strangprofile: abgeflacht auf Material, zunehmend rund bei größerem Z-Abstand oder ohne Untergrund. Die extrudierte Materialmenge bleibt erhalten. Idealisierte Geometrie, keine Schmelzsimulation.</p>
 </aside>
-<main id="viewport"><div id="layerRail" aria-label="Layer auswählen"><span class="layer-title" id="layerText">Layer —</span><button id="layerNext" title="Nächster Layer" aria-label="Nächster Layer">＋</button><input id="layer" type="range" min="0" max="0" value="0" step="1" orient="vertical" aria-label="Aktueller Layer"><button id="layerPrev" title="Vorheriger Layer" aria-label="Vorheriger Layer">−</button><span id="layerZ">Z —</span></div><div id="progress">Initialisierung der 3D-Vorschau…</div><div id="toolbar"><button id="resetView">Ansicht zurücksetzen</button></div><div id="pickInfo"></div><div id="help">Ziehen: Drehen · Rechtsklick: Verschieben · Rad: Zoom · Klick: Bahn-Details · Rot: SilkSteel-Z-Hops</div></main>
+<main id="viewport"><div id="layerRail" aria-label="Layer auswählen"><span class="layer-title" id="layerText">Layer —</span><button id="layerNext" title="Nächster Layer" aria-label="Nächster Layer">＋</button><input id="layer" type="range" min="0" max="0" value="0" step="1" orient="vertical" aria-label="Aktueller Layer"><button id="layerPrev" title="Vorheriger Layer" aria-label="Vorheriger Layer">−</button><span id="layerZ">Z —</span></div><div id="progress">Initialisierung der 3D-Vorschau…</div><div id="toolbar"><button id="resetView">Ansicht zurücksetzen</button></div><div id="pickInfo"></div>
+<div id="sourceDrawer" role="dialog" aria-label="G-Code-Inspector" aria-modal="false">
+  <div class="source-head"><h3>G-Code-Inspector</h3><button id="sourceClose" title="Schließen" type="button">✕</button></div>
+  <div id="sourceStatus">Bahn anklicken, um den G-Code zu öffnen.</div>
+  <div class="source-controls"><label for="sourceLine">Zeile</label><input id="sourceLine" type="number" min="1" step="1" value="1">
+    <button id="sourceGo" type="button">Springen</button><button id="sourceCopy" type="button">Kopieren</button>
+  </div>
+  <div id="sourceLines" role="region" aria-label="G-Code-Zeilen"></div>
+</div><div id="help">Ziehen: Drehen · Rechtsklick: Verschieben · Rad: Zoom · Klick: Bahn-Details · Rot: SilkSteel-Z-Hops</div></main>
 </div>
 <footer id="playbackDock">
   <div class="timeline-header">
