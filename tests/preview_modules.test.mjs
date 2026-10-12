@@ -8,7 +8,7 @@ async function load(file){
     const code=readFileSync(join(root,"preview",file));
     return import("data:text/javascript;base64,"+code.toString("base64"));
 }
-const {computeJoin,joinContinuity,buildJoinAttributes}=await load("extrusion_joins.js");
+const {computeJoin,joinContinuity,buildJoinAttributes,sharedSplitSection}=await load("extrusion_joins.js");
 const {makeJunctionGeometry,junctionVertexShader}=await load("bead_junctions.js");
 const {analysePrint}=await load("diagnostics.js");
 const {compareLayerVolumes}=await load("comparison.js");
@@ -57,6 +57,30 @@ const varied=[
 assert.equal(computeJoin(i=>varied[i]||null,0,0,true),null);
 assert.equal(buildJoinAttributes([0],i=>varied[i]||null,0).fallbacks.length,1);
 assert.equal(buildJoinAttributes([0],reader,0).fallbacks.length,0);
+
+// Sparse support probing splits a single G1 into different-width pieces.
+// Both ends MUST use one common cross section, even in closed-bead mode.
+const split=[
+    {...bead([0,0,.35],[1,0,.35],0,0,.05),line:123,w:.6,h:.2},
+    {...bead([1,0,.35],[2,0,.35],0,.05,.1),line:123,w:.4,h:.3}
+];
+const splitReader=i=>split[i]||null;
+const sharedA=sharedSplitSection(splitReader,0,true);
+const sharedB=sharedSplitSection(splitReader,1,false);
+assert(sharedA && sharedB);
+assert.deepEqual(sharedA,sharedB);
+assert(sharedA[0]>sharedA[1]);
+const splitAttribute=buildJoinAttributes([0,1],splitReader,0);
+assert(Math.abs(splitAttribute.sizesEnd[0]-splitAttribute.sizesStart[2])<1e-6);
+assert(Math.abs(splitAttribute.sizesEnd[1]-splitAttribute.sizesStart[3])<1e-6);
+assert.equal(splitAttribute.fallbacks.length,0);
+const area=(p)=>p.w*p.h-(1-Math.PI/4)*p.h**2;
+assert(Math.abs(area({w:sharedA[0],h:sharedA[1]})-(area(split[0])+area(split[1]))*.5)<1e-6);
+assert(viewer.includes("sharedSplitSection(joinRead,items[j],false)"));
+// Do not taper unrelated G-code moves merely because they touch in XY.
+assert.equal(sharedSplitSection(i=>[
+    {...split[0],line:123},{...split[1],line:124}
+][i]||null,0,true),null);
 
 // A physical continuation with a different feature must not be welded.
 const mixed=[
