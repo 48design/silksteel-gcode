@@ -386,7 +386,21 @@ function createLayer(index) {
                 starts.set(p.a,j*3);ends.set(p.b,j*3);
                 sizes.set([p.w,p.h],j*2);
             }
+            // Safety first: each section is guaranteed closed and independent.
+            // The optional miter path has previously caused whole faces to vanish.
             const join=buildJoinAttributes(items,joinRead,role);
+            if(!$("seamlessJoins").checked){
+                for(let j=0;j<n;j++){
+                    const p=readSegment(items[j]);
+                    const dx=p.b[0]-p.a[0],dy=p.b[1]-p.a[1],l=Math.hypot(dx,dy)||1;
+                    const nx=-dy/l,ny=dx/l;
+                    join.joinsStart.set([nx,ny,0],j*3);
+                    join.joinsEnd.set([nx,ny,0],j*3);
+                    join.sizesStart.set([p.w,p.h],j*2);
+                    join.sizesEnd.set([p.w,p.h],j*2);
+                }
+                join.fallbacks.length=0;
+            }
             const geometry=base.clone();
             geometry.setAttribute("iJoinStart",new THREE.InstancedBufferAttribute(join.joinsStart,3));
             geometry.setAttribute("iJoinEnd",new THREE.InstancedBufferAttribute(join.joinsEnd,3));
@@ -1177,6 +1191,12 @@ $("ghost").addEventListener("change",updateVisibility);
 $("showHops").addEventListener("change",updateVisibility);
 $("gridToggle").addEventListener("change",()=>{grid.visible=$("gridToggle").checked;});
 $("resetView").addEventListener("click",fit);
+$("seamlessJoins").addEventListener("change",()=>{
+    if(!model)return;
+    for(const group of cache.values()){scene.remove(group);disposeGroup(group);}
+    cache.clear();
+    updateVisibility();
+});
 for(const id of ["cutEnabled","cutInvert","cutAxis","cutPosition"]){
     $(id).addEventListener("input",refreshCut);
 }
