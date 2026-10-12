@@ -682,12 +682,12 @@ function createRawOverlay(index){
     const indices=[],positions=[],colors=[];
     for(let j=layer.rawStart;j<layer.rawStart+layer.rawCount;j++){
         const record=readRaw(j);
-        if(record.kind===0 && !$("rawAll").checked)continue;
+        if((record.kind===0 || record.kind===4) && !$("rawAll").checked)continue;
         indices.push(j);
         positions.push(record.a[0],record.a[2],record.a[1],
                        record.b[0],record.b[2],record.b[1]);
         const c=record.kind===1?[1,.30,.18]:record.kind===2?[1,.38,.85]:
-            record.kind===3?[.72,.55,1]:[.20,.85,.95];
+            record.kind===3?[.72,.55,1]:record.kind===4?[.50,.88,1]:[.20,.85,.95];
         colors.push(...c,...c);
     }
     const geo=new THREE.BufferGeometry();
@@ -716,11 +716,12 @@ async function loadRawMoves(){
     if(bytes.byteLength!==model.rawCount*RAW_SIZE)
         throw new Error("Rohbahnformat ist unvollständig.");
     rawData=new DataView(bytes);
-    const count=[0,0,0,0];
+    const count=[0,0,0,0,0];
     for(let i=0;i<model.rawCount;i++)
         count[rawData.getUint32(i*RAW_SIZE+24,true)]++;
-    $("rawInfo").textContent=count[0]+" gerendert · "+count[1]+" ausgelassen · "+count[2]+
-        " Bögen (gerade Referenz) · "+count[3]+" vertikale Extrusionen. "+
+    $("rawInfo").textContent=(count[0]+count[4])+" gerendert · "+count[1]+
+        " ausgelassen/teilweise · "+count[4]+" echte Bögen · "+count[2]+
+        " approximierte Bögen · "+count[3]+" vertikale Extrusionen. "+
         "Rohbahnen anklicken → G-Code-Zeile.";
     updateRawOverlay();
 }
@@ -1109,7 +1110,9 @@ async function loadModel(index) {
     $("fileName").textContent=model.filename;
     $("stats").textContent=model.count.toLocaleString("de-DE")+" Extrusionssegmente · "+model.layers.length+" Layer · Filament Ø "+model.filament.toFixed(2)+" mm"+
         (model.omittedCount?" · "+model.omittedCount+" nicht gerenderte Bewegungen":"")+
-        (model.ignored_arcs?" · Achtung: "+model.ignored_arcs+" Bögen nicht dargestellt":"");
+        (model.partialCount?" · "+model.partialCount+" teilweise unvollständige Bahnen":"")+
+        (model.arcCount?" · "+model.arcCount+" Bögen gerendert":"")+
+        (model.ignored_arcs?" · Achtung: "+model.ignored_arcs+" Bögen als gerade Näherung":"");
     if($("rawOmitted").checked)loadRawMoves().catch(showError);
     slider.max=String(model.layers.length-1);
     selectedLayer=Math.max(0,model.layers.length-1);
@@ -1213,7 +1216,7 @@ function selectSegment(event) {
                 i=>rawData.getFloat32(i*RAW_SIZE+36,true));
         for(let i=layer.rawStart;i<Math.min(layer.rawStart+layer.rawCount,rawEnd);i++){
             const p=readRaw(i);
-            if(p.kind===0 && !$("rawAll").checked)continue;
+            if((p.kind===0 || p.kind===4) && !$("rawAll").checked)continue;
             const distance=test(p);
             if(distance<best){best=distance;pick=p;isRaw=true;}
         }
