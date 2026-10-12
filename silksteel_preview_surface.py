@@ -89,6 +89,14 @@ class DepositedSurface:
             heights.append(self._effective_height(
                 x, y, z, area, nominal, first_layer, layer_z))
 
+        # The receiver grid is only 0.4 mm wide. At crossing infill paths a
+        # center probe may alternate between a supported cell and empty space,
+        # producing abrupt bead-width jumps every ~0.45 mm. Reject isolated
+        # support spikes first, then transition continuously between sustained
+        # supported/free runs. The section area stays strictly A=E/length.
+        if len(heights) >= 5 and max(heights) - min(heights) > 0.012:
+            heights = self._stabilize_heights(heights)
+
         # Group similar cross-sections to keep the GPU instance count small.
         tolerance = max(0.014, min(0.035, nominal * 0.13))
         ranges: list[tuple[float, float, float, float]] = []
@@ -103,6 +111,29 @@ class DepositedSurface:
             if i < samples:
                 begin, total = i, heights[i]
         return ranges
+
+    @staticmethod
+    def _stabilize_heights(heights: list[float]) -> list[float]:
+        """Denoise sparse support probes without modifying deposited area.
+
+        A five-point median ignores one-cell occupancy spikes. A compact
+        normalized triangular filter softens actual support boundaries over
+        around two millimetres, avoiding discontinuous stadium radii and
+        excessive independent cap meshes. Endpoints are edge-replicated.
+        """
+        n = len(heights)
+        if n < 5:
+            return heights[:]
+        median = []
+        for i in range(n):
+            window = sorted(heights[max(0, i - 2):min(n, i + 3)])
+            median.append(window[len(window) // 2])
+        weights = (1, 2, 3, 2, 1)
+        return [
+            sum(median[min(n - 1, max(0, i + j - 2))] * weight
+                for j, weight in enumerate(weights)) / 9.0
+            for i in range(n)
+        ]
 
     def deposit(
         self, start: tuple[float, float, float], end: tuple[float, float, float],
