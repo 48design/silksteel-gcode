@@ -53,7 +53,7 @@ class PreviewGeometryTests(unittest.TestCase):
                     self.assertAlmostEqual(total_length, math.pi*5,delta=.035)
                     self.assertTrue(any(row[0]!=row[3] and row[1]!=row[4] for row in rows))
                     raw=target.with_suffix(".raw.bin").read_bytes()
-                    self.assertEqual(RAW_PACK.unpack_from(raw,0)[6],0)
+                    self.assertEqual(RAW_PACK.unpack_from(raw,0)[6],4)
                     filament_area=math.pi*(meta["filament"]/2)**2
                     estimated_e=sum(
                         (row[6]*row[7]-(1-math.pi/4)*row[7]**2)
@@ -77,6 +77,32 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(full[1],20*math.pi,places=4)
         self.assertGreater(len(full[0]),60)
         self.assertIsNone(interpolate_arc(base,ending,{},False))
+
+    def test_slicer_modal_arc_commands_and_fallback_chords(self):
+        from silksteel_preview import RAW_PACK
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            source=root/"modal-arcs.gcode"
+            target=root/"modal-arcs.bin"
+            source.write_text("\n".join([
+                "; layer_height = 0.2",
+                "G90", "M83", "G90.1", "G17", "G0 X10 Y0 Z0.2",
+                "G3 X0 Y10 I0 J0 E0.5 F1200",
+                "G91.1",
+                "G2 X10 Y0 I0 J-10 E0.5",
+                "G3 X12 Y10 E0.5",
+                "G1 X20 Y10 E0.5",
+            ]) + "\n", encoding="utf-8")
+            meta=convert(source,target)
+            self.assertEqual(meta["arcCount"],2)
+            self.assertEqual(meta["ignored_arcs"],1)
+            self.assertGreater(meta["count"],40)
+            self.assertEqual(meta["rawCount"],4)
+            raw=target.with_suffix(".raw.bin").read_bytes()
+            kinds=[RAW_PACK.unpack_from(raw,i)[6]
+                   for i in range(0,len(raw),RAW_PACK.size)]
+            self.assertEqual(kinds,[4,4,2,0])
+            self.assertEqual(meta["omittedCount"],0)
 
     def test_arc_center_modes_and_plane_selection(self):
         from silksteel_preview_arcs import interpolate_arc
