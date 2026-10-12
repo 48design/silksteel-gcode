@@ -132,6 +132,13 @@ const page=readFileSync(join(root,"preview","index.html"),"utf-8");
 assert.equal((page.match(/<details class="side-group"/g)||[]).length,8);
 assert(page.includes('id="sourceDrawer"'));
 assert(viewer.includes("openSourceLine(pick.line)"));
+// Regression: a float32 record can end *after* float64 metadata duration,
+// so the final G1 must not be hidden when playback reaches 100%.
+const float64Duration=10000.0004;
+const float32End=Math.fround(float64Duration);
+assert(float32End>float64Duration);
+assert(viewer.includes("currentTime>=model.duration-0.0001?model.count"));
+assert(viewer.includes("currentTime>=model.duration-0.0001?model.rawCount"));
 assert(viewer.includes("loadRawMoves()"));
 
 function packed(records){
