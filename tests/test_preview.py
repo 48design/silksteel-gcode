@@ -424,6 +424,36 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertIn('id="hopColor"', markup)
 
 
+    def test_sparse_infill_one_cell_support_spikes_do_not_fragment_bead(self):
+        from silksteel_preview_surface import DepositedSurface
+        field = DepositedSurface()
+        # The receiver grid can report false contact in a single cell when
+        # two thin infill tracks cross. A solitary .2-mm-high probe must not
+        # turn a free, circular track into a sudden over-wide flat rectangle.
+        diameter = .44
+        raw = [diameter] * 9
+        raw[4] = .2
+        stable = field._stabilize_heights(raw)
+        self.assertEqual(len(stable), len(raw))
+        self.assertTrue(all(abs(v-diameter) < 1e-10 for v in stable))
+        self.assertEqual(raw[4], .2)
+
+    def test_stable_supported_to_free_infill_transition_is_continuous(self):
+        from silksteel_preview_surface import DepositedSurface
+        field = DepositedSurface()
+        raw = [.2]*9+[.44]*9
+        stable = field._stabilize_heights(raw)
+        self.assertAlmostEqual(stable[0], .2)
+        self.assertAlmostEqual(stable[-1], .44)
+        self.assertTrue(all(stable[i] <= stable[i+1]+1e-8
+                            for i in range(len(stable)-1)))
+        self.assertLess(max(stable[i+1]-stable[i] for i in range(len(stable)-1)), .09)
+        # Changing visual cross-sectional shape never alters physical E.
+        area=.11
+        widths=[field.width_for_area(area,h) for h in stable]
+        for w,h in zip(widths,stable):
+            self.assertAlmostEqual(w*h-(1-math.pi/4)*h*h,area,places=8)
+
     def test_free_vs_supported_cross_sections_conserve_material(self):
         from silksteel_preview_surface import DepositedSurface
         field = DepositedSurface()
