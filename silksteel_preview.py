@@ -9,7 +9,7 @@ import os
 import shutil
 import traceback
 import uuid
-from urllib.parse import unquote
+from urllib.parse import unquote, parse_qs, urlsplit
 
 from silksteel_preview_surface import DepositedSurface
 from pathlib import Path
@@ -24,6 +24,8 @@ TOKEN = re.compile(r"([A-Z])([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)")
 FLOAT = re.compile(r"([-+]?\d*\.?\d+)")
 PACK = struct.Struct("<8fIIff")  # XYZ endpoints, bead dimensions, role, line, start/end seconds
 HOP_PACK = struct.Struct("<6fIIff")  # XYZ endpoints, hop kind, line, start/end seconds
+RAW_PACK = struct.Struct("<6fIIff")  # Positive-E moves including skipped viewer geometry
+SOURCE_INDEX_STEP = 1024
 
 ROLES = ("Standard", "Smoothificator", "Bricklayers base", "Bricklayers shifted",
          "Non-planar infill", "Valley filling", "Bridge")
@@ -66,9 +68,11 @@ def write_colors(values: list[str]) -> None:
 
 
 def convert(source: Path, destination: Path, hop_destination: Path | None = None,
-            progress=None) -> dict:
+            progress=None, raw_destination: Path | None = None,
+            source_offsets: list[int] | None = None) -> dict:
     """Stream G-code into 48-byte timed segments and separate hop records."""
     hop_destination = hop_destination or destination.with_suffix(".hops.bin")
+    raw_destination = raw_destination or destination.with_suffix(".raw.bin")
     pos = [0.0, 0.0, 0.0]
     e_pos = 0.0
     xyz_absolute, e_absolute = True, True
@@ -78,7 +82,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     brick_base_pass = False
     layer = None
     layers = []
-    count = ignored_arcs = hop_count = 0
+    count = ignored_arcs = hop_count = raw_count = omitted_count = 0
     feedrate = 1800.0
     elapsed = 0.0
     hop_active = False
@@ -101,10 +105,14 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
         layers.append(layer)
         brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
 
-    with (source.open("r", encoding="utf-8", errors="replace") as src,
-          destination.open("wb") as dst, hop_destination.open("wb") as hops):
-        for line_no, raw in enumerate(src, 1):
-            parsed_chars += len(raw)
+    with (source.open("rb") as src,
+          destination.open("wb") as dst, hop_destination.open("wb") as hops,
+          raw_destination.open("wb") as raw_tracks):
+        for line_no, raw_bytes in enumerate(src, 1):
+            if source_offsets is not None and (line_no - 1) % SOURCE_INDEX_STEP == 0:
+                source_offsets.append(parsed_chars)
+            parsed_chars += len(raw_bytes)
+            raw = raw_bytes.decode("utf-8", errors="replace")
             if progress is not None and line_no % 20000 == 0:
                 progress(line_no, min(99, int(parsed_chars * 100 / source_size)))
             code, _, comment = raw.partition(";")
@@ -234,9 +242,17 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 elif hop_kind == 2 or delta_e > 0:
                     hop_active = False
 
+                if delta_e > 0 and distance > 1e-7 and all(map(math.isfinite, new_pos + pos)):
+                    raw_kind = 2 if cmd in ("G2", "G3") else 0
+                    if cmd in ("G0", "G1") and math.hypot(
+                        new_pos[0] - pos[0], new_pos[1] - pos[1]) <= 1e-7:
+                        raw_kind = 3
+                    raw_tracks.write(RAW_PACK.pack(
+                        *(pos + new_pos), raw_kind, line_no, started, elapsed))
+                    raw_count += 1
                 if cmd in ("G2", "G3"):
                     ignored_arcs += 1
-                elif cmd == "G1" and delta_e > 0 and all(map(math.isfinite, new_pos + pos)):
+                elif cmd in ("G0", "G1") and delta_e > 0 and all(map(math.isfinite, new_pos + pos)):
                     length = distance
                     if length > 1e-7 and math.hypot(new_pos[0]-pos[0], new_pos[1]-pos[1]) > 1e-7:
                         if layer is None:
@@ -290,6 +306,8 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                                 for i, coordinate in enumerate(point):
                                     min_xyz[i] = min(min_xyz[i], coordinate)
                                     max_xyz[i] = max(max_xyz[i], coordinate)
+                        else:
+                            omitted_count += 1
                 pos = new_pos
 
     if not count:
@@ -300,6 +318,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     if not explicit_layers and layers and layers[0]["number"] == -1:
         layers[0]["number"] = 0
     return {"filename": source.name, "url": "", "count": count, "hopCount": hop_count,
+            "rawCount": raw_count, "omittedCount": omitted_count,
             "duration": elapsed, "layers": layers,
             "bounds": [min_xyz, max_xyz], "filament": filament,
             "ignored_arcs": ignored_arcs}
