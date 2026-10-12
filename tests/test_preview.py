@@ -168,6 +168,46 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertTrue(all(.20 <= p[7] <= p[6] < 1.0 for p in selected))
         self.assertEqual(meta["omittedCount"],0)
 
+    def test_bricklayers_second_pass_after_zhop_keeps_long_extrusions(self):
+        from silksteel_preview import RAW_PACK
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/"bricklayers.gcode"
+            target=Path(directory)/"bricklayers.bin"
+            source.write_text("\n".join([
+                "; layer_height = 0.2",
+                ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+                "G90", "M82", "G92 E6.23022",
+                "G0 X143.289 Y118.298 Z0.2",
+                "G1 X143.868 Y118.348 E6.24389",
+                "G0 Z1.766 F8400 ; SilkSteel: ZHOP_LIFT",
+                "G0 X143.928 Y118.353 F8400 ; Return for Bricklayers pass 2",
+                "G0 Z0.350 ; Bricklayers base pass 2/2",
+                "G1 X143.928 Y103.919 E6.58332 F1200",
+                "G1 X144.094 Y103.519 E6.59350",
+                "G1 X144.396 Y103.361 E6.60151",
+                "G1 X144.494 Y103.353 E6.60382",
+                "G1 X165.506 Y103.353 E7.09795",
+                "G1 X165.906 Y103.519 E7.10813",
+            ])+"\n",encoding="utf-8")
+            result=convert(source,target)
+            blob=target.read_bytes()
+            rows=[PACK.unpack_from(blob,i) for i in range(0,len(blob),PACK.size)]
+            line=source.read_text(encoding="utf-8").splitlines().index(
+                "G1 X165.506 Y103.353 E7.09795")+1
+            path=[row for row in rows if row[9]==line]
+            self.assertTrue(path,"G1 after Z-hop is missing from preview binary")
+            self.assertAlmostEqual(sum(math.dist(p[:3],p[3:6]) for p in path),
+                                   21.012,places=3)
+            self.assertEqual(result["omittedCount"],0)
+            self.assertEqual(result["partialCount"],0)
+            self.assertTrue(all(0.2<=p[7]<=p[6]<1.0 for p in path))
+            raw=target.with_suffix(".raw.bin").read_bytes()
+            self.assertTrue(any(
+                RAW_PACK.unpack_from(raw,i)[7]==line and
+                RAW_PACK.unpack_from(raw,i)[6]==0
+                for i in range(0,len(raw),RAW_PACK.size)
+            ))
+
     def test_closed_path_fallback_is_enabled_by_default(self):
         root=Path(__file__).resolve().parents[1]
         markup=(root/"preview"/"index.html").read_text(encoding="utf-8")
