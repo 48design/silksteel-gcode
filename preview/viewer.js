@@ -1214,6 +1214,34 @@ function showError(error) {
     console.error(error);
 }
 const mouse=new THREE.Vector2();
+function auditGPUInstance(index, expected) {
+    let found=false,drawn=false,correct=false;
+    let reason="Instanz nicht in aktiven Layer-Meshes";
+    for(const group of activeLayers){
+        for(const mesh of group.children){
+            if(mesh.userData.junction || !mesh.userData.indices)continue;
+            const ids=mesh.userData.indices;
+            const local=withinPrefix(ids,index);
+            if(local>=ids.length || ids[local]!==index)continue;
+            found=true;
+            const starts=mesh.geometry.attributes.iStart.array;
+            const ends=mesh.geometry.attributes.iStop.array;
+            const sizes=mesh.geometry.attributes.iSize.array;
+            const j=local*3,k=local*2;
+            const close=(a,b)=>Math.abs(a-b)<0.00006;
+            correct=expected.a.every((v,i)=>close(v,starts[j+i])) &&
+                expected.b.every((v,i)=>close(v,ends[j+i])) &&
+                close(expected.w,sizes[k])&&close(expected.h,sizes[k+1]);
+            drawn=mesh.visible && local<mesh.geometry.instanceCount && !!group.parent;
+            reason=!correct?"GPU-Attribute weichen vom Binärsegment ab":
+                !drawn?"Instanz durch Layer-/Playback-Filter ausgeblendet":
+                "GPU-Instanz aktiv (Verdeckung durch Geometrie möglich)";
+            break;
+        }
+        if(found)break;
+    }
+    return {found,drawn,correct,reason};
+}
 function selectSegment(event) {
     if(!model||!data)return;
     const bounds=renderer.domElement.getBoundingClientRect();
@@ -1238,14 +1266,14 @@ function selectSegment(event) {
             const p=readRaw(i);
             if((p.kind===0 || p.kind===4) && !$("rawAll").checked)continue;
             const distance=test(p);
-            if(distance<best){best=distance;pick=p;isRaw=true;}
+            if(distance<best){best=distance;pick=p;pick.rawIndex=i;isRaw=true;}
         }
     }
     for(let i=layer.start;i<Math.min(layer.start+layer.count,visibleCount);i++){
         const p=readSegment(i);
         if(!visibleRoles.has(p.role))continue;
         const distance=test(p);
-        if(distance<best){best=distance;pick=p;isRaw=false;}
+        if(distance<best){best=distance;pick=p;pick.segmentIndex=i;isRaw=false;}
     }
     if(lastPick){scene.remove(lastPick);lastPick.geometry.dispose();lastPick.material.dispose();lastPick=null;}
     if(!pick){$("pickInfo").style.display="none";return;}
@@ -1271,6 +1299,16 @@ function selectSegment(event) {
             extruded.toFixed(5)+" mm";
     }
     $("pickInfo").append(title,body);
+    if(!isRaw){
+        const audit=auditGPUInstance(pick.segmentIndex,pick);
+        const status=document.createElement("div");
+        status.style.marginTop="6px";
+        status.style.color=audit.found&&audit.drawn&&audit.correct?"#9ed8ad":"#ffac8c";
+        status.textContent="BIN #"+pick.segmentIndex+" → "+
+            (audit.found?"GPU-Instanz gefunden":"KEINE GPU-Instanz")+
+            " · "+audit.reason;
+        $("pickInfo").append(status);
+    }
     openSourceLine(pick.line).catch(showError);
 }
 let down;
