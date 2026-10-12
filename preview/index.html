@@ -134,7 +134,9 @@ body.dragging #dropOverlay{display:flex}
 </div></details>
 <details class="side-group" data-side-section="Diagnose"><summary>Diagnose</summary><div class="side-content">
 <label><span>Auffälligkeiten markieren</span><input type="checkbox" id="diagnosticsToggle"></label>
-<label><span>Nicht gerenderte Extrusionen</span><input type="checkbox" id="rawOmitted"></label>
+<label><span>G-Code-Rohbahnen prüfen</span><input type="checkbox" id="rawOmitted"></label>
+<label><span>Auch gerenderte Rohbahnen</span><input type="checkbox" id="rawAll"></label>
+<div class="stats">Rot: ausgelassen · Cyan: im Preview verarbeitet · Pink: G2/G3-Bogen (gerade Referenz)</div>
 <div id="rawInfo" class="stats">Originalbewegungen im G-Code prüfen</div>
 <div id="diagnosticsSummary" class="stats">Kein G-Code geladen</div>
 <div id="diagnosticsList" class="inspector-list"></div>
