@@ -132,6 +132,10 @@ const page=readFileSync(join(root,"preview","index.html"),"utf-8");
 assert.equal((page.match(/<details class="side-group"/g)||[]).length,8);
 assert(page.includes('id="sourceDrawer"'));
 assert(viewer.includes("openSourceLine(pick.line)"));
+assert(viewer.includes("function auditGPUInstance(index, expected)"));
+assert(viewer.includes("local<mesh.geometry.instanceCount"));
+assert(viewer.includes("pick.segmentIndex=i"));
+assert(viewer.includes("GPU-Instanz gefunden"));
 // Regression: a float32 record can end *after* float64 metadata duration,
 // so the final G1 must not be hidden when playback reaches 100%.
 const float64Duration=10000.0006;
