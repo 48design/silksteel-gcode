@@ -269,7 +269,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                             clockwise=(cmd == "G2"), plane=arc_plane,
                             absolute_center=arc_center_absolute)
                             if cmd in ("G2", "G3") else None)
-                if cmd in ("G2", "G3"):
+                if cmd in ("G2", "G3") and delta_e > 0:
                     if arc_path is None:
                         ignored_arcs += 1
                     else:
