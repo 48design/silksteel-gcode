@@ -99,6 +99,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
         nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley, brick_base_pass
         layer_no = number
         layer = {"number": number, "start": count, "count": 0,
+                 "rawStart": raw_count, "rawCount": 0,
                  "hopStart": hop_count, "hopCount": 0,
                  "z": layer_z, "height": layer_height if number else (first_height or layer_height),
                  "timeStart": elapsed, "timeEnd": elapsed}
@@ -242,14 +243,9 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 elif hop_kind == 2 or delta_e > 0:
                     hop_active = False
 
-                if delta_e > 0 and distance > 1e-7 and all(map(math.isfinite, new_pos + pos)):
-                    raw_kind = 2 if cmd in ("G2", "G3") else 0
-                    if cmd in ("G0", "G1") and math.hypot(
-                        new_pos[0] - pos[0], new_pos[1] - pos[1]) <= 1e-7:
-                        raw_kind = 3
-                    raw_tracks.write(RAW_PACK.pack(
-                        *(pos + new_pos), raw_kind, line_no, started, elapsed))
-                    raw_count += 1
+                raw_kind = 2 if cmd in ("G2", "G3") else 3 if (
+                    math.hypot(new_pos[0] - pos[0], new_pos[1] - pos[1]) <= 1e-7
+                ) else 1
                 if cmd in ("G2", "G3"):
                     ignored_arcs += 1
                 elif cmd in ("G0", "G1") and delta_e > 0 and all(map(math.isfinite, new_pos + pos)):
@@ -301,6 +297,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                                 ))
                                 layer["count"] += 1
                                 count += 1
+                            raw_kind = 0
                             surface.deposit(tuple(pos), tuple(new_pos), segments)
                             for point in (pos, new_pos):
                                 for i, coordinate in enumerate(point):
@@ -308,6 +305,13 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                                     max_xyz[i] = max(max_xyz[i], coordinate)
                         else:
                             omitted_count += 1
+                if delta_e > 0 and distance > 1e-7 and all(map(math.isfinite, new_pos + pos)):
+                    if layer is None:
+                        begin_layer(0)
+                    raw_tracks.write(RAW_PACK.pack(
+                        *(pos + new_pos), raw_kind, line_no, started, elapsed))
+                    layer["rawCount"] += 1
+                    raw_count += 1
                 pos = new_pos
 
     if not count:
