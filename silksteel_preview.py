@@ -379,7 +379,8 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         if accepted:
                             surface.deposit(tuple(part_start), tuple(part_end), accepted)
                     if rendered_parts > 0:
-                        raw_kind = 0
+                        raw_kind = (4 if cmd in ("G2", "G3") and arc_path is not None
+                                    else 2 if cmd in ("G2", "G3") else 0)
                         if skipped_parts:
                             raw_kind = 1
                             partial_count += 1
