@@ -397,5 +397,65 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertTrue(all(p[7] <= p[6]+1e-5 for p in upper))
 
 
+    def test_source_windows_use_sparse_offsets_without_loading_full_file(self):
+        from silksteel_preview import source_context, SOURCE_INDEX_STEP
+        with tempfile.TemporaryDirectory() as tmp:
+            file = Path(tmp) / "big.gcode"
+            lines = [f"G1 X{i} Y0 E{i/1000:.3f} ; line {i}" for i in range(2500)]
+            payload = "\n".join(lines) + "\n"
+            file.write_text(payload, encoding="utf-8")
+            offsets, size = [], 0
+            for index, line in enumerate(lines, 1):
+                if (index - 1) % SOURCE_INDEX_STEP == 0:
+                    offsets.append(size)
+                size += len((line + "\n").encode("utf-8"))
+            result = source_context(file, offsets, 2010, 3)
+            self.assertEqual([row["line"] for row in result],
+                             list(range(2007, 2014)))
+            self.assertEqual(result[3]["text"], lines[2009])
+            self.assertEqual(source_context(file, offsets, 1, 1)[0]["line"], 1)
+
+    def test_missing_positive_extrusion_is_flagged_in_raw_track(self):
+        from silksteel_preview import RAW_PACK
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, target = root/"missing.gcode", root/"missing.bin"
+            source.write_text("\n".join([
+                ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+                "G90", "M83", "G0 X0 Y0 Z0.2 F1200",
+                "G1 X10 Y0 E0.25",
+                "G1 X20 Y0 E300",
+                "G0 X25 Y0 E0.25",
+                "G1 X25 Y0 Z0.5 E0.1",
+            ]) + "\n", encoding="utf-8")
+            meta = convert(source, target)
+            raw_bytes = target.with_suffix(".raw.bin").read_bytes()
+            raw = [RAW_PACK.unpack_from(raw_bytes,i)
+                   for i in range(0,len(raw_bytes),RAW_PACK.size)]
+            self.assertEqual(meta["rawCount"],4)
+            self.assertEqual(meta["layers"][0]["rawCount"],4)
+            self.assertEqual([row[6] for row in raw],[0,1,0,3])
+            self.assertEqual([row[7] for row in raw],[6,7,8,9])
+            self.assertEqual(meta["omittedCount"],1)
+            self.assertEqual(meta["count"],2)
+
+    def test_sidebar_groups_and_source_inspector_in_viewer(self):
+        root=Path(__file__).resolve().parents[1]
+        markup=(root/"preview"/"index.html").read_text(encoding="utf-8")
+        script=(root/"preview"/"viewer.js").read_text(encoding="utf-8")
+        backend=(root/"silksteel_preview.py").read_text(encoding="utf-8")
+        self.assertEqual(markup.count('<details class="side-group"'),8)
+        for name in ("sourceDrawer","sourceLines","sourceLine","sourceGo",
+                     "sourceClose","rawOmitted","rawInfo"):
+            self.assertIn('id="'+name+'"',markup)
+        self.assertIn('openSourceLine(pick.line)',script)
+        self.assertIn('function createRawOverlay(',script)
+        self.assertIn('silksteel.sidebar.',script)
+        self.assertIn('if path == "/source":',backend)
+        self.assertIn('source_context(*entry, line, context)',backend)
+        self.assertIn('"/gcode_inspector.js"',backend)
+
+
+
 if __name__ == "__main__":
     unittest.main()
