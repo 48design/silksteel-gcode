@@ -435,7 +435,7 @@ class PreviewGeometryTests(unittest.TestCase):
             self.assertEqual(meta["rawCount"],4)
             self.assertEqual(meta["layers"][0]["rawCount"],4)
             self.assertEqual([row[6] for row in raw],[0,1,0,3])
-            self.assertEqual([row[7] for row in raw],[6,7,8,9])
+            self.assertEqual([row[7] for row in raw],[8,9,10,11])
             self.assertEqual(meta["omittedCount"],1)
             self.assertEqual(meta["count"],2)
 
