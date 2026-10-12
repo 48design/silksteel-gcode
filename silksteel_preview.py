@@ -264,7 +264,6 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                     e_pos = params["E"] if e_absolute else e_pos + params["E"]
                 if "F" in params and math.isfinite(params["F"]) and params["F"] > 0:
                     feedrate = params["F"]
-                chord_length = math.dist(pos, new_pos)
                 arc_path = (interpolate_arc(pos, new_pos, params,
                             clockwise=(cmd == "G2"), plane=arc_plane,
                             absolute_center=arc_center_absolute)
