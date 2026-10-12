@@ -446,7 +446,7 @@ class PreviewGeometryTests(unittest.TestCase):
         backend=(root/"silksteel_preview.py").read_text(encoding="utf-8")
         self.assertEqual(markup.count('<details class="side-group"'),8)
         for name in ("sourceDrawer","sourceLines","sourceLine","sourceGo",
-                     "sourceClose","rawOmitted","rawInfo"):
+                     "sourceClose","rawOmitted","rawAll","rawInfo"):
             self.assertIn('id="'+name+'"',markup)
         self.assertIn('openSourceLine(pick.line)',script)
         self.assertIn('function createRawOverlay(',script)
