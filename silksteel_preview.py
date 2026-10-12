@@ -324,6 +324,30 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             "ignored_arcs": ignored_arcs}
 
 
+def source_context(source: Path, offsets: list[int], line: int,
+                   context: int = 10) -> list[dict]:
+    """Read a small numbered source window without loading a giant G-code file."""
+    start = max(1, line - context)
+    end = line + context
+    if not offsets:
+        return []
+    block = (start - 1) // SOURCE_INDEX_STEP
+    block = min(block, len(offsets) - 1)
+    current = block * SOURCE_INDEX_STEP + 1
+    result = []
+    with source.open("rb") as stream:
+        stream.seek(offsets[block])
+        while current <= end:
+            raw = stream.readline()
+            if not raw:
+                break
+            if current >= start:
+                text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                result.append({"line": current, "text": text[:2048]})
+            current += 1
+    return result
+
+
 def serve(processed: Path | None = None, original: Path | None = None,
           display_name: str | None = None, original_display_name: str | None = None) -> None:
     """Open the browser before parsing; make failures observable to the user."""
@@ -334,6 +358,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
         state = {"status": "loading", "message": "G-Code-Analyse wird gestartet…",
                  "progress": 0, "lines": 0}
         models = []
+        sources_by_url: dict[str, tuple[Path, list[int]]] = {}
         ready = threading.Event()
 
         class Handler(BaseHTTPRequestHandler):
@@ -407,7 +432,40 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     pass
 
             def do_GET(self):
-                path = self.path.split("?", 1)[0]
+                parsed = urlsplit(self.path)
+                path = parsed.path
+                if path == "/source":
+                    query = parse_qs(parsed.query)
+                    source_id = query.get("model", [""])[0]
+                    entry = sources_by_url.get(source_id)
+                    if not entry:
+                        self.send_error(404, "G-code source not found")
+                        return
+                    try:
+                        line = int(query.get("line", ["1"])[0])
+                        context = max(0, min(35, int(query.get("context", ["10"])[0])))
+                        if line < 1:
+                            raise ValueError("Invalid G-code line")
+                    except ValueError:
+                        self.send_error(400, "Invalid source position")
+                        return
+                    try:
+                        rows = source_context(*entry, line, context)
+                        response = json.dumps({"line": line, "rows": rows},
+                                              ensure_ascii=False).encode("utf-8")
+                    except OSError as exc:
+                        self.send_error(404, str(exc))
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(response)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
                 if path == "/ping":
                     heartbeat["at"] = time.monotonic()
                     payload, mime = b"ok", "text/plain"
@@ -424,7 +482,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     mime = ("text/html; charset=utf-8" if path == "/"
                             else "text/javascript; charset=utf-8")
                 elif state["status"] == "ready" and any(
-                    path in (m["url"], m["hopUrl"]) for m in models
+                    path in (m["url"], m["hopUrl"], m["rawUrl"]) for m in models
                 ):
                     target = root / path.lstrip("/")
                     self.send_response(200)
@@ -463,11 +521,14 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 def update(lines, percent):
                     state["lines"] = lines
                     state["progress"] = percent
-                model = convert(upload, target, progress=update)
+                offsets = []
+                model = convert(upload, target, progress=update, source_offsets=offsets)
                 model["name"] = display
                 model["filename"] = display
                 model["url"] = "/" + target.name
                 model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
+                model["rawUrl"] = "/" + target.with_suffix(".raw.bin").name
+                sources_by_url[model["url"]] = (upload, offsets)
                 models.append(model)
                 state.update(status="ready", message="Vorschau bereit", progress=100)
                 print(f"SilkSteel Preview: loaded {display}", flush=True)
@@ -475,7 +536,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 traceback.print_exc()
                 state.update(status="error", message=f"{type(exc).__name__}: {exc}")
             finally:
-                upload.unlink(missing_ok=True)
+                # Keep source available to the G-code inspector until server exit.
                 ready.set()
 
         def prepare_files():
@@ -493,10 +554,13 @@ def serve(processed: Path | None = None, original: Path | None = None,
                         state["progress"] = int((index + percent / 100) * 100 / len(sources))
 
                     target = root / (label.lower() + ".bin")
-                    model = convert(source, target, progress=update)
+                    offsets = []
+                    model = convert(source, target, progress=update, source_offsets=offsets)
                     model["name"], model["url"] = label, "/" + target.name
                     model["filename"] = display
                     model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
+                    model["rawUrl"] = "/" + target.with_suffix(".raw.bin").name
+                    sources_by_url[model["url"]] = (source, offsets)
                     models.append(model)
                 state.update(status="ready", message="Vorschau bereit", progress=100)
                 print("SilkSteel Preview: finished parsing", flush=True)
