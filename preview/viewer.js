@@ -2,6 +2,7 @@ import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 import {buildJoinAttributes} from "./extrusion_joins.js";
 import {makeJunctionGeometry,junctionVertexShader} from "./bead_junctions.js";
+import {nearestSourceRecord,rawClass} from "./gcode_inspector.js";
 import {analysePrint} from "./diagnostics.js";
 import {closestLayer, compareLayerVolumes} from "./comparison.js";
 import {buildCutContours} from "./section.js";
@@ -673,6 +674,146 @@ function refreshComparison(){
         " mm³ · Δ "+(result.deltaVolume>=0?"+":"")+result.deltaVolume.toFixed(1)+
         " mm³\nGrün: mehr Material · Rot: weniger · Cyan: Originalpfade\n"+
         "Räumlicher Vergleich in 0,65-mm-Zellen (Näherung).";
+}
+
+// Source diagnostics remain on-demand to keep multi-million-line files compact.
+function createRawOverlay(index){
+    const layer=model.layers[index];
+    const indices=[],positions=[],colors=[];
+    for(let j=layer.rawStart;j<layer.rawStart+layer.rawCount;j++){
+        const record=readRaw(j);
+        if(record.kind===0)continue;
+        indices.push(j);
+        positions.push(record.a[0],record.a[2],record.a[1],
+                       record.b[0],record.b[2],record.b[1]);
+        const c=record.kind===1?[1,.30,.18]:record.kind===2?[1,.38,.85]:[.25,.9,1];
+        colors.push(...c,...c);
+    }
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute("position",new THREE.Float32BufferAttribute(positions,3));
+    geo.setAttribute("color",new THREE.Float32BufferAttribute(colors,3));
+    const overlay=new THREE.LineSegments(geo,new THREE.LineBasicMaterial({
+        vertexColors:true,depthTest:false,depthWrite:false,transparent:true,opacity:.95,
+        clippingPlanes:clipPlanes
+    }));
+    overlay.frustumCulled=false;overlay.renderOrder=27;
+    overlay.userData.indices=Uint32Array.from(indices);
+    return overlay;
+}
+async function loadRawMoves(){
+    if(!model||rawData)return;
+    if(!model.rawUrl){
+        $("rawInfo").textContent="Rohbewegungen erfordern eine neu erzeugte Vorschau.";
+        return;
+    }
+    const serial=++rawRequest,expected=model;
+    $("rawInfo").textContent="Analysiere Original-Extrusionsbewegungen…";
+    const response=await fetch(model.rawUrl);
+    if(!response.ok)throw new Error("HTTP "+response.status+" beim Laden der Rohbahnen");
+    const bytes=await response.arrayBuffer();
+    if(serial!==rawRequest||model!==expected)return;
+    if(bytes.byteLength!==model.rawCount*RAW_SIZE)
+        throw new Error("Rohbahnformat ist unvollständig.");
+    rawData=new DataView(bytes);
+    const count=[0,0,0,0];
+    for(let i=0;i<model.rawCount;i++)
+        count[rawData.getUint32(i*RAW_SIZE+24,true)]++;
+    $("rawInfo").textContent=count[1]+" nicht gerendert · "+count[2]+
+        " Bögen (als gerade Referenz) · "+count[3]+" vertikale Extrusionen. "+
+        "Farbige Linien anklicken, um den G-Code zu prüfen.";
+    updateRawOverlay();
+}
+function updateRawOverlay(){
+    const enabled=$("rawOmitted").checked&&!!rawData&&!!model;
+    const keep=new Set();
+    if(enabled){
+        const below=Number($("below").value);
+        const minLayer=below<0?0:Math.max(0,visualLayer-below);
+        const finished=completedBefore(model.rawCount,currentTime,
+            i=>rawData.getFloat32(i*RAW_SIZE+36,true));
+        for(let i=minLayer;i<=visualLayer;i++){
+            let overlay=rawLayerCache.get(i);
+            if(!overlay){overlay=createRawOverlay(i);rawLayerCache.set(i,overlay);}
+            keep.add(i);
+            if(!overlay.parent)scene.add(overlay);
+            overlay.geometry.setDrawRange(0,2*withinPrefix(overlay.userData.indices,finished));
+        }
+    }
+    for(const [index,overlay] of rawLayerCache){
+        if(!keep.has(index)){
+            scene.remove(overlay);
+            if(!enabled||rawLayerCache.size>24){
+                overlay.geometry.dispose();overlay.material.dispose();rawLayerCache.delete(index);
+            }
+        }
+    }
+}
+let sourceRequest=0;
+async function openSourceLine(line){
+    if(!model || !Number.isSafeInteger(line) || line<1)return;
+    const request=++sourceRequest;
+    selectedSourceLine=line;
+    $("sourceDrawer").classList.add("visible");
+    $("sourceLine").value=String(line);
+    $("sourceStatus").textContent=model.filename+" · Zeile "+line+" wird geladen…";
+    const response=await fetch("/source?model="+encodeURIComponent(model.url)+
+        "&line="+line+"&context=16",{cache:"no-store"});
+    if(!response.ok)throw new Error("G-Code konnte nicht geladen werden (HTTP "+response.status+")");
+    const source=await response.json();
+    if(request!==sourceRequest)return;
+    const content=$("sourceLines");content.replaceChildren();
+    let chosen=null;
+    for(const row of source.rows){
+        const el=document.createElement("div");
+        el.className="source-line"+(row.line===line?" active":"");
+        const num=document.createElement("span");
+        num.className="line-num";num.textContent=row.line;
+        const text=document.createElement("span");text.textContent=row.text;
+        el.append(num,text);
+        el.addEventListener("click",()=>navigateSourceLine(row.line));
+        content.append(el);
+        if(row.line===line)chosen=el;
+    }
+    $("sourceStatus").textContent=model.filename+" · Zeile "+line+
+        " · "+source.rows.length+" Zeilen · Quelle: "+model.name;
+    if(chosen)chosen.scrollIntoView({block:"center",behavior:"instant"});
+}
+function navigateSourceLine(line){
+    openSourceLine(line).catch(showError);
+    if(!model||!data)return;
+    const segment=nearestSourceRecord(data,SEGMENT_SIZE,36,model.count,line);
+    const source=segment>=0?readSegment(segment):null;
+    const raw=rawData?nearestSourceRecord(rawData,RAW_SIZE,28,model.rawCount,line):-1;
+    const omitted=raw>=0?readRaw(raw):null;
+    const point=(omitted&&omitted.line===line && omitted.kind!==0)?omitted:source;
+    if(!point)return;
+    setPlaying(false);
+    if(playbackMode==="layer")selectedLayer=layerAtTime(point.end);
+    seek(Math.min(model.duration,point.end+0.00001));
+}
+$("sourceClose").addEventListener("click",()=>$("sourceDrawer").classList.remove("visible"));
+$("sourceGo").addEventListener("click",()=>navigateSourceLine(Number($("sourceLine").value)));
+$("sourceLine").addEventListener("keydown",event=>{
+    if(event.key==="Enter")navigateSourceLine(Number($("sourceLine").value));
+});
+$("sourceCopy").addEventListener("click",async()=>{
+    const lines=[...$("sourceLines").querySelectorAll(".source-line")].map(
+        el=>el.querySelector(".line-num").textContent+"  "+el.lastElementChild.textContent).join("\n");
+    try{await navigator.clipboard.writeText(lines);}catch(error){showError(error);}
+});
+$("rawOmitted").addEventListener("change",()=>{
+    if($("rawOmitted").checked)loadRawMoves().catch(showError);
+    else updateRawOverlay();
+});
+for(const group of document.querySelectorAll("details[data-side-section]")){
+    const key="silksteel.sidebar."+group.dataset.sideSection;
+    try{
+        const stored=localStorage.getItem(key);
+        if(stored!==null)group.open=stored==="1";
+    }catch{}
+    group.addEventListener("toggle",()=>{
+        try{localStorage.setItem(key,group.open?"1":"0");}catch{}
+    });
 }
 
 function formatTimelineTime(seconds) {
