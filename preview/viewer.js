@@ -730,8 +730,9 @@ function updateRawOverlay(){
     if(enabled){
         const below=Number($("below").value);
         const minLayer=below<0?0:Math.max(0,visualLayer-below);
-        const finished=completedBefore(model.rawCount,currentTime,
-            i=>rawData.getFloat32(i*RAW_SIZE+36,true));
+        const finished=currentTime>=model.duration-0.0001?model.rawCount:
+            completedBefore(model.rawCount,currentTime,
+                i=>rawData.getFloat32(i*RAW_SIZE+36,true));
         for(let i=minLayer;i<=visualLayer;i++){
             let overlay=rawLayerCache.get(i);
             if(!overlay){overlay=createRawOverlay(i);rawLayerCache.set(i,overlay);}
@@ -993,7 +994,10 @@ function seek(seconds) {
 }
 function updateVisibility() {
     if(!model || !data)return;
-    const finished=completedBefore(model.count,currentTime,endAt);
+    // Binary timestamps are float32, while metadata.duration is float64.
+    // Always include the COMPLETE final toolpath at the end of playback.
+    const finished=currentTime>=model.duration-0.0001?model.count:
+        completedBefore(model.count,currentTime,endAt);
     const current=visualLayer;
     visibleCount=finished;
     slider.value=String(current);
@@ -1034,7 +1038,8 @@ function updateVisibility() {
             }
         }
     }
-    const hopsFinished=completedBefore(model.hopCount,currentTime,hopEndAt);
+    const hopsFinished=currentTime>=model.duration-0.0001?model.hopCount:
+        completedBefore(model.hopCount,currentTime,hopEndAt);
     const showHops=$("showHops").checked;
     for(let i=start;i<=current;i++){
         const info=model.layers[i];
@@ -1203,8 +1208,9 @@ function selectSegment(event) {
         return ((x-mouse.x)*bounds.width/2)**2+((y-mouse.y)*bounds.height/2)**2;
     };
     if($("rawOmitted").checked && rawData){
-        const rawEnd=completedBefore(model.rawCount,currentTime,
-            i=>rawData.getFloat32(i*RAW_SIZE+36,true));
+        const rawEnd=currentTime>=model.duration-0.0001?model.rawCount:
+            completedBefore(model.rawCount,currentTime,
+                i=>rawData.getFloat32(i*RAW_SIZE+36,true));
         for(let i=layer.rawStart;i<Math.min(layer.rawStart+layer.rawCount,rawEnd);i++){
             const p=readRaw(i);
             if(p.kind===0 && !$("rawAll").checked)continue;
