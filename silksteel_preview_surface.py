@@ -55,10 +55,12 @@ class DepositedSurface:
         if support is None:
             return diameter
         gap = max(0.0, z - support)
-        # A raised non-planar path has extra clearance even when coarse XY
-        # occupancy accidentally reports a neighboring same-layer strand.
-        if layer_z is not None:
-            gap = max(gap, nominal + max(0.0, z - layer_z))
+        # The measured gap already includes any real Z lift. Adding the
+        # offset above the slicer's layer Z AGAIN doubles the clearance:
+        # e.g. Bricklayers pass 2 at Z=.350 over Z=.200 material has a
+        # .150-mm gap, not .150 + .150 = .300 mm. The old formula turned
+        # ordinary supported beads into round cylinders buried in previous
+        # material, so valid long G1 tracks appeared to be missing.
         return min(diameter, max(minimum_height, gap))
 
     def sections(
