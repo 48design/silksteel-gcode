@@ -805,14 +805,36 @@ $("rawOmitted").addEventListener("change",()=>{
     if($("rawOmitted").checked)loadRawMoves().catch(showError);
     else updateRawOverlay();
 });
-for(const group of document.querySelectorAll("details[data-side-section]")){
+const sideGroups=[...document.querySelectorAll("details[data-side-section]")];
+for(const group of sideGroups){
     const key="silksteel.sidebar."+group.dataset.sideSection;
     try{
-        const stored=localStorage.getItem(key);
-        if(stored!==null)group.open=stored==="1";
+        const saved=layout.sidebar?.[group.dataset.sideSection];
+        const fallback=localStorage.getItem(key);
+        if(typeof saved==="boolean")group.open=saved;
+        else if(fallback!==null)group.open=fallback==="1";
     }catch{}
+}
+let sidebarSaving=false;
+async function saveSidebarState(){
+    if(sidebarSaving)return;
+    sidebarSaving=true;
+    try{
+        const state=Object.fromEntries(sideGroups.map(group=>
+            [group.dataset.sideSection,group.open]));
+        const response=await fetch("/settings/sidebar",{
+            method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify(state)
+        });
+        if(!response.ok)console.warn("Sidebar-Einstellungen konnten nicht gespeichert werden.");
+    }catch(error){console.warn("Sidebar-Einstellungen:",error);}
+    finally{sidebarSaving=false;}
+}
+for(const group of sideGroups){
     group.addEventListener("toggle",()=>{
-        try{localStorage.setItem(key,group.open?"1":"0");}catch{}
+        try{localStorage.setItem("silksteel.sidebar."+group.dataset.sideSection,
+            group.open?"1":"0");}catch{}
+        saveSidebarState();
     });
 }
 
