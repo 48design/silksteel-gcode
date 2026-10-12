@@ -12,6 +12,7 @@ import uuid
 from urllib.parse import unquote, parse_qs, urlsplit
 
 from silksteel_preview_surface import DepositedSurface
+from silksteel_preview_arcs import interpolate_arc
 from pathlib import Path
 import re
 import struct
@@ -111,13 +112,14 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     pos = [0.0, 0.0, 0.0]
     e_pos = 0.0
     xyz_absolute, e_absolute = True, True
+    arc_center_absolute, arc_plane = False, "G17"
     filament, layer_height, first_height = 1.75, 0.2, None
     layer_z = 0.0
     layer_no = -1
     brick_base_pass = False
     layer = None
     layers = []
-    count = ignored_arcs = hop_count = raw_count = omitted_count = 0
+    count = ignored_arcs = arc_count = hop_count = raw_count = omitted_count = 0
     feedrate = 1800.0
     elapsed = 0.0
     hop_active = False
@@ -222,8 +224,9 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             cmd = words[0]
             # Accept G00/G01, and packed "G1X1Y2" syntax.
             if cmd not in ("G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03",
-                           "G90", "G91", "M82", "M83", "G92", "G4", "G04"):
-                m = re.match(r"^(G0?[01234]|G9[012]|M8[23])(?=[A-Z])", cmd)
+                           "G90", "G91", "G90.1", "G91.1", "G17", "G18", "G19",
+                           "M82", "M83", "G92", "G4", "G04"):
+                m = re.match(r"^(G0?[01234]|G1[789]|G9[012]|M8[23])(?=[A-Z])", cmd)
                 if not m:
                     continue
                 cmd = m.group(1)
@@ -235,6 +238,12 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 xyz_absolute = True
             elif cmd == "G91":
                 xyz_absolute = False
+            elif cmd == "G90.1":
+                arc_center_absolute = True
+            elif cmd == "G91.1":
+                arc_center_absolute = False
+            elif cmd in ("G17", "G18", "G19"):
+                arc_plane = cmd
             elif cmd == "M82":
                 e_absolute = True
             elif cmd == "M83":
@@ -255,7 +264,19 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                     e_pos = params["E"] if e_absolute else e_pos + params["E"]
                 if "F" in params and math.isfinite(params["F"]) and params["F"] > 0:
                     feedrate = params["F"]
-                distance = math.dist(pos, new_pos)
+                chord_length = math.dist(pos, new_pos)
+                arc_path = (interpolate_arc(pos, new_pos, params,
+                            clockwise=(cmd == "G2"), plane=arc_plane,
+                            absolute_center=arc_center_absolute)
+                            if cmd in ("G2", "G3") else None)
+                if cmd in ("G2", "G3"):
+                    if arc_path is None:
+                        ignored_arcs += 1
+                    else:
+                        arc_count += 1
+                path = arc_path[0] if arc_path is not None else [pos, new_pos]
+                path_lengths = [math.dist(a, b) for a, b in zip(path, path[1:])]
+                distance = sum(path_lengths)
                 motion_seconds = (distance if distance > 1e-7 else abs(delta_e)) * 60.0 / feedrate
                 started = elapsed
                 elapsed += motion_seconds if math.isfinite(motion_seconds) else 0.0
@@ -278,69 +299,89 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 elif hop_kind == 2 or delta_e > 0:
                     hop_active = False
 
-                raw_kind = 2 if cmd in ("G2", "G3") else 3 if (
-                    math.hypot(new_pos[0] - pos[0], new_pos[1] - pos[1]) <= 1e-7
-                ) else 1
-                if cmd in ("G2", "G3"):
-                    ignored_arcs += 1
-                elif cmd in ("G0", "G1") and delta_e > 0 and all(map(math.isfinite, new_pos + pos)):
-                    length = distance
-                    if length > 1e-7 and math.hypot(new_pos[0]-pos[0], new_pos[1]-pos[1]) > 1e-7:
-                        if layer is None:
-                            begin_layer(0)
-                        if not explicit_layers and new_pos[2] > layer_z + layer_height * 0.5 and count:
-                            begin_layer(layer_no + 1)
-                        if not explicit_layers:
-                            layer_z = max(layer_z, new_pos[2])
-                            layer["z"] = layer_z
-                        nominal_h = smooth_height if smooth and smooth_height else layer["height"]
-                        if brick_base_pass:
-                            nominal_h *= 0.75
-                        nominal_h = max(0.01, nominal_h)
-                        area = (delta_e * math.pi * (filament * 0.5) ** 2) / length
-                        if valley:
-                            role = 5
-                        elif brick_role is not None:
-                            role = brick_role
-                        elif smooth:
-                            role = 1
-                        elif role_type.startswith("BRIDGE") or role_type.startswith("INTERNAL BRIDGE"):
-                            role = 6
-                        elif "INFILL" in role_type and "Z" in params and abs(new_pos[2] - layer["z"]) > 0.005:
-                            role = 4
-                        else:
-                            role = 0
-                        # Determine support along the *entire* raw move before
-                        # recording any part of it, avoiding artificial self-support.
-                        segments = surface.sections(
-                            tuple(pos), tuple(new_pos), area, nominal_h,
+                raw_kind = (2 if cmd in ("G2", "G3") and arc_path is None else
+                            3 if math.hypot(new_pos[0] - pos[0],
+                                            new_pos[1] - pos[1]) <= 1e-7 and
+                                 arc_path is None else 1)
+                if delta_e > 0 and distance > 1e-7 and all(
+                    math.isfinite(value) for value in new_pos + pos
+                ):
+                    if layer is None:
+                        begin_layer(0)
+                    if not explicit_layers and new_pos[2] > layer_z + layer_height * 0.5 and count:
+                        begin_layer(layer_no + 1)
+                    if not explicit_layers:
+                        layer_z = max(layer_z, new_pos[2])
+                        layer["z"] = layer_z
+                    # Keep E / physical path length constant across an arc.
+                    # Only XY-traversing subsegments need a bead cross section.
+                    extrusion_area = delta_e * math.pi * (filament * 0.5) ** 2 / distance
+                    nominal_h = smooth_height if smooth and smooth_height else layer["height"]
+                    if brick_base_pass:
+                        nominal_h *= 0.75
+                    nominal_h = max(0.01, nominal_h)
+                    if valley:
+                        role = 5
+                    elif brick_role is not None:
+                        role = brick_role
+                    elif smooth:
+                        role = 1
+                    elif role_type.startswith("BRIDGE") or role_type.startswith("INTERNAL BRIDGE"):
+                        role = 6
+                    elif "INFILL" in role_type and "Z" in params and abs(new_pos[2] - layer["z"]) > 0.005:
+                        role = 4
+                    else:
+                        role = 0
+                    rendered_parts = 0
+                    elapsed_distance = 0.0
+                    for (part_start, part_end), part_length in zip(
+                        zip(path, path[1:]), path_lengths
+                    ):
+                        segment_begin = started + motion_seconds * elapsed_distance / distance
+                        elapsed_distance += part_length
+                        segment_end = started + motion_seconds * elapsed_distance / distance
+                        if part_length <= 1e-7 or math.hypot(
+                            part_end[0] - part_start[0], part_end[1] - part_start[1]
+                        ) <= 1e-7:
+                            continue
+                        sections = surface.sections(
+                            tuple(part_start), tuple(part_end), extrusion_area, nominal_h,
                             first_height or layer_height, layer_z=layer["z"]
                         )
-                        if segments and all(
-                            math.isfinite(w) and math.isfinite(h) and h > 0 and
-                            h <= w <= 40 for _, _, w, h in segments
-                        ):
-                            dx = [new_pos[i] - pos[i] for i in range(3)]
-                            for t0, t1, width, height in segments:
-                                a_pos = [pos[i] + dx[i] * t0 for i in range(3)]
-                                b_pos = [pos[i] + dx[i] * t1 for i in range(3)]
-                                start_t = started + (elapsed - started) * t0
-                                end_t = started + (elapsed - started) * t1
-                                dst.write(PACK.pack(
-                                    *(a_pos + b_pos + [width, height]),
-                                    role, line_no, start_t, end_t
-                                ))
-                                layer["count"] += 1
-                                count += 1
-                            raw_kind = 0
-                            surface.deposit(tuple(pos), tuple(new_pos), segments)
-                            for point in (pos, new_pos):
-                                for i, coordinate in enumerate(point):
+                        # Reject only the invalid SUBSECTION, never its valid
+                        # neighbors or an entire otherwise valid G-code move.
+                        accepted = []
+                        for t0, t1, width, height in sections:
+                            if not (math.isfinite(width) and math.isfinite(height) and
+                                    0 < height <= width <= 40):
+                                continue
+                            a_pos = [part_start[i] + (part_end[i] - part_start[i]) * t0
+                                     for i in range(3)]
+                            b_pos = [part_start[i] + (part_end[i] - part_start[i]) * t1
+                                     for i in range(3)]
+                            t_start = segment_begin + (segment_end - segment_begin) * t0
+                            t_end = segment_begin + (segment_end - segment_begin) * t1
+                            dst.write(PACK.pack(
+                                *(a_pos + b_pos + [width, height]),
+                                role, line_no, t_start, t_end
+                            ))
+                            layer["count"] += 1
+                            count += 1
+                            rendered_parts += 1
+                            accepted.append((t0, t1, width, height))
+                            for p in (a_pos, b_pos):
+                                for i, coordinate in enumerate(p):
                                     min_xyz[i] = min(min_xyz[i], coordinate)
                                     max_xyz[i] = max(max_xyz[i], coordinate)
-                        else:
-                            omitted_count += 1
-                if delta_e > 0 and distance > 1e-7 and all(map(math.isfinite, new_pos + pos)):
+                        if accepted:
+                            surface.deposit(tuple(part_start), tuple(part_end), accepted)
+                    if rendered_parts > 0:
+                        raw_kind = 0
+                    else:
+                        omitted_count += 1
+                if delta_e > 0 and distance > 1e-7 and all(
+                    math.isfinite(value) for value in new_pos + pos
+                ):
                     if layer is None:
                         begin_layer(0)
                     raw_tracks.write(RAW_PACK.pack(
@@ -357,6 +398,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     if not explicit_layers and layers and layers[0]["number"] == -1:
         layers[0]["number"] = 0
     return {"filename": source.name, "url": "", "count": count, "hopCount": hop_count,
+            "arcCount": arc_count,
             "rawCount": raw_count, "omittedCount": omitted_count,
             "duration": elapsed, "layers": layers,
             "bounds": [min_xyz, max_xyz], "filament": filament,
