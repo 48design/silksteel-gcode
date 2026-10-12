@@ -119,7 +119,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     brick_base_pass = False
     layer = None
     layers = []
-    count = ignored_arcs = arc_count = hop_count = raw_count = omitted_count = 0
+    count = ignored_arcs = arc_count = hop_count = raw_count = omitted_count = partial_count = 0
     feedrate = 1800.0
     elapsed = 0.0
     hop_active = False
@@ -333,6 +333,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                     else:
                         role = 0
                     rendered_parts = 0
+                    skipped_parts = 0
                     elapsed_distance = 0.0
                     for (part_start, part_end), part_length in zip(
                         zip(path, path[1:]), path_lengths
@@ -343,6 +344,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         if part_length <= 1e-7 or math.hypot(
                             part_end[0] - part_start[0], part_end[1] - part_start[1]
                         ) <= 1e-7:
+                            skipped_parts += 1
                             continue
                         sections = surface.sections(
                             tuple(part_start), tuple(part_end), extrusion_area, nominal_h,
@@ -354,6 +356,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         for t0, t1, width, height in sections:
                             if not (math.isfinite(width) and math.isfinite(height) and
                                     0 < height <= width <= 40):
+                                skipped_parts += 1
                                 continue
                             a_pos = [part_start[i] + (part_end[i] - part_start[i]) * t0
                                      for i in range(3)]
@@ -377,6 +380,9 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                             surface.deposit(tuple(part_start), tuple(part_end), accepted)
                     if rendered_parts > 0:
                         raw_kind = 0
+                        if skipped_parts:
+                            raw_kind = 1
+                            partial_count += 1
                     else:
                         omitted_count += 1
                 if delta_e > 0 and distance > 1e-7 and all(
@@ -400,6 +406,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     return {"filename": source.name, "url": "", "count": count, "hopCount": hop_count,
             "arcCount": arc_count,
             "rawCount": raw_count, "omittedCount": omitted_count,
+            "partialCount": partial_count,
             "duration": elapsed, "layers": layers,
             "bounds": [min_xyz, max_xyz], "filament": filament,
             "ignored_arcs": ignored_arcs}
