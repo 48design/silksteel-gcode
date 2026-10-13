@@ -137,6 +137,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
 
     def begin_layer(number: int) -> None:
         nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley, brick_base_pass
+        surface.finish_strand()
         layer_no = number
         layer = {"number": number, "start": count, "count": 0,
                  "rawStart": raw_count, "rawCount": 0,
@@ -238,6 +239,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             cmd = {"G00": "G0", "G01": "G1", "G02": "G2", "G03": "G3", "G04": "G4"}.get(cmd, cmd)
             params = {k: float(v) for k, v in TOKEN.findall(code.upper()) if k not in ("G", "M")}
             if cmd == "G4":
+                surface.finish_strand()
                 before = elapsed
                 elapsed += max(0.0, params.get("P", 0.0)) / 1000.0 + max(0.0, params.get("S", 0.0))
                 if elapsed > before:
@@ -285,6 +287,11 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 path = arc_path[0] if arc_path is not None else [pos, new_pos]
                 path_lengths = [math.dist(a, b) for a, b in zip(path, path[1:])]
                 distance = sum(path_lengths)
+                if delta_e <= 0 and (distance > 1e-7 or delta_e < -1e-7):
+                    # Travels/retractions break the physically continuous
+                    # strand, exposing its deposited footprint as support
+                    # for the next independent extrusion.
+                    surface.finish_strand()
                 motion_seconds = (distance if distance > 1e-7 else abs(delta_e)) * 60.0 / feedrate
                 started = elapsed
                 elapsed += motion_seconds if math.isfinite(motion_seconds) else 0.0
@@ -343,6 +350,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         role = 4
                     else:
                         role = 0
+                    surface.begin_strand(tuple(pos), role)
                     rendered_parts = 0
                     skipped_parts = 0
                     elapsed_distance = 0.0
@@ -396,6 +404,10 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                                     max_xyz[i] = max(max_xyz[i], coordinate)
                         if accepted:
                             surface.deposit(tuple(part_start), tuple(part_end), accepted)
+                    if rendered_parts > 0 and not skipped_parts:
+                        surface.advance_strand(tuple(new_pos))
+                    else:
+                        surface.finish_strand()
                     if rendered_parts > 0:
                         raw_kind = (4 if cmd in ("G2", "G3") and arc_path is not None
                                     else 2 if cmd in ("G2", "G3") else 0)
@@ -415,6 +427,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                     raw_count += 1
                 pos = new_pos
 
+    surface.finish_strand()
     if not count:
         raise ValueError(f"No extruding G1 XY/XYZ movements found in {source.name}")
     for index, item in enumerate(layers):
