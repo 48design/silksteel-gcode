@@ -312,6 +312,57 @@ class PreviewGeometryTests(unittest.TestCase):
             self.assertAlmostEqual(rows[1][-2], hops[-1][-1], places=4)
             self.assertAlmostEqual(meta["duration"], 3.07, places=2)
 
+    def test_timed_source_index_includes_travel_dwell_and_layer_end(self):
+        from silksteel_preview import MOVE_PACK
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"motions.gcode"
+            binary=Path(tmp)/"motions.bin"
+            lines=[
+                "; layer_height = 0.2",
+                ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
+                "G90", "M83", "G0 X0 Y0 Z0.2 F1200",
+                "G1 X10 Y0 E0.3 F600",
+                "G0 X20 Y0 F1200",
+                "G4 P500",
+                "G1 X30 Y0 E0.3 F600",
+                ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2",
+                "G0 Z0.4 F1200",
+                "G1 X35 Y0 E0.3 F600",
+            ]
+            path.write_text("\n".join(lines)+"\n",encoding="utf-8")
+            meta=convert(path,binary)
+            payload=binary.with_suffix(".moves.bin").read_bytes()
+            self.assertEqual(len(payload),meta["moveCount"]*MOVE_PACK.size)
+            records=[MOVE_PACK.unpack_from(payload,i)
+                     for i in range(0,len(payload),MOVE_PACK.size)]
+            self.assertEqual([p[2] for p in records],[7,8,9,10,11,14,15])
+            self.assertTrue(all(start<end for start,end,_ in records))
+            self.assertTrue(all(records[i][1]<=records[i+1][0]+.001
+                                for i in range(len(records)-1)))
+            self.assertEqual(meta["layers"][0]["moveStart"],0)
+            self.assertEqual(meta["layers"][0]["moveCount"],5)
+            self.assertEqual(meta["layers"][1]["moveStart"],5)
+            self.assertEqual(meta["layers"][1]["moveCount"],2)
+            self.assertEqual(records[4][2],11)
+            self.assertEqual(records[-1][2],15)
+            self.assertAlmostEqual(records[3][1]-records[3][0],.5,places=4)
+
+    def test_completed_layer_browsing_and_dual_source_highlighting(self):
+        root=Path(__file__).resolve().parents[1]
+        markup=(root/"preview"/"index.html").read_text(encoding="utf-8")
+        viewer=(root/"preview"/"viewer.js").read_text(encoding="utf-8")
+        backend=(root/"silksteel_preview.py").read_text(encoding="utf-8")
+        self.assertIn('<option value="1" selected>Aktuelle + darunter</option>',markup)
+        self.assertIn('id="playingSource"',markup)
+        self.assertIn('id="selectedSource"',markup)
+        self.assertIn(".source-line.active.playing",markup)
+        self.assertIn("browsingLayer=true;",viewer)
+        self.assertIn("browsingLayer=false;",viewer)
+        self.assertIn("sourceLineAtTime(moveData,model.moveCount,currentTime)",viewer)
+        self.assertIn("sourceLineAtLayerEnd(moveData,model.moveCount",viewer)
+        self.assertIn('"moveUrl"',backend)
+        self.assertIn("MOVE_PACK = struct.Struct",backend)
+
     def test_g4_pause_adds_timeline_time_without_extrusion(self):
         meta, rows = self.parse([
             "G90", "M83", "G0 X0 Y0 Z0.2 F600",
