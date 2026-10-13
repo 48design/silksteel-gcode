@@ -10,11 +10,16 @@ const normalOf=p=>{
 };
 function boundary(read,id,atEnd,first,last,connected){
     const p=read(id),normal=normalOf(p);
-    const local={join:[normal[0],normal[1],0],size:[p.w,p.h],connected:false};
+    const local={join:[normal[0],normal[1],0],size:[p.w,p.h],
+        point:atEnd?p.b:p.a,connected:false};
     const neighbor=atEnd?id+1:id-1;
     if(!connected||neighbor<first||neighbor>=last)return local;
     const pair=joinContinuity(read,id,atEnd);
     if(!pair)return local;
+    // Source endpoints can differ by <0.012 mm due to G-code rounding.
+    // Snap both GPU rings to the same midpoint; otherwise an otherwise
+    // connected loft can contain tiny cracks despite identical normals.
+    const point=pair.a.b.map((v,i)=>(v+pair.b.a[i])*.5);
     // Same-line support subdivision must have a shared cross section even
     // if the source width/height changes too much for a normal miter.
     const split=sharedSplitSection(read,id,atEnd);
@@ -22,11 +27,11 @@ function boundary(read,id,atEnd,first,last,connected){
         const n1=normalOf(pair.a),n2=normalOf(pair.b);
         const sx=n1[0]+n2[0],sy=n1[1]+n2[1],len=Math.hypot(sx,sy);
         if(len<1e-5)return local;
-        return {join:[sx/len,sy/len,0],size:split,connected:true};
+        return {join:[sx/len,sy/len,0],size:split,point,connected:true};
     }
     const miter=computeJoin(read,id,p.role,atEnd);
     if(!miter)return local;
-    return {join:[...miter.miter,0],size:miter.size,connected:true};
+    return {join:[...miter.miter,0],size:miter.size,point,connected:true};
 }
 export function loftBoundary(read,id,atEnd,first,last,seamless=true){
     return boundary(read,id,atEnd,first,last,seamless);
@@ -44,7 +49,7 @@ export function planLoft(indices,read,first,last,seamless=true){
         const id=indices[i],p=read(id);
         const left=boundary(read,id,false,first,last,seamless);
         const right=boundary(read,id,true,first,last,seamless);
-        starts.set(p.a,i*3);ends.set(p.b,i*3);
+        starts.set(left.point,i*3);ends.set(right.point,i*3);
         sizes.set([p.w,p.h],i*2);
         joinsStart.set(left.join,i*3);
         joinsEnd.set(right.join,i*3);
