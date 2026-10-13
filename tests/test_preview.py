@@ -523,6 +523,55 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreater(field.width_for_area(area,.20),.20)
         self.assertLess(field.width_for_area(area,.60),.60)
 
+    def test_contiguous_ascent_does_not_support_itself_or_differ_from_descent(self):
+        from silksteel_preview_surface import DepositedSurface
+        area = .0365
+        def traverse(reverse: bool):
+            field = DepositedSurface()
+            points = [(i*.5, 0, 1.0+i*.12) for i in range(5)]
+            if reverse:
+                points.reverse()
+            heights = []
+            for a,b in zip(points,points[1:]):
+                field.begin_strand(a, 4)
+                sections=field.sections(a,b,area,.2,.2,speed=30)
+                heights.extend(h for _,_,_,h in sections)
+                field.deposit(a,b,sections)
+                field.advance_strand(b)
+                # The map used for support queries cannot see this strand.
+                self.assertFalse(field._tops)
+                self.assertTrue(field._pending)
+            pending=len(field._pending)
+            field.finish_strand()
+            self.assertFalse(field._pending)
+            self.assertGreaterEqual(len(field._tops),pending)
+            return heights
+        ascending=traverse(False)
+        descending=traverse(True)
+        free=DepositedSurface.gravity_height(area,30)
+        self.assertTrue(ascending and descending)
+        for h in ascending+descending:
+            self.assertAlmostEqual(h,free,places=5)
+
+    def test_separate_strands_gain_support_only_after_commit(self):
+        from silksteel_preview_surface import DepositedSurface
+        field=DepositedSurface()
+        area=.0365
+        base_start=(0.,0.,1.0)
+        base_end=(5.,0.,1.0)
+        field.begin_strand(base_start,4)
+        pieces=field.sections(base_start,base_end,area,.2,.2)
+        field.deposit(base_start,base_end,pieces)
+        field.advance_strand(base_end)
+        self.assertIsNone(field.support_top(2.5,0,1.18,.02))
+        field.finish_strand()
+        self.assertAlmostEqual(field.support_top(2.5,0,1.18,.02),1.0,places=3)
+        # A travel interrupts continuity and commits the prior strand.
+        field.begin_strand((0.,0.,1.18),4)
+        supported=field.sections((0.,0.,1.18),(5.,0.,1.18),area,.2,.2)
+        self.assertLess(supported[0][3],field.gravity_height(area,30))
+        field.finish_strand()
+
     def test_gravity_rate_speed_and_contact_at_nozzle_top(self):
         from silksteel_preview_surface import DepositedSurface
         field=DepositedSurface()
