@@ -345,6 +345,12 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         ) <= 1e-7:
                             skipped_parts += 1
                             continue
+                        # Grossly implausible source extrusion is left in the
+                        # diagnostic raw path instead of manufacturing a huge
+                        # 3D solid. This is far above ordinary FDM flow.
+                        if extrusion_area > 16.0:
+                            skipped_parts += 1
+                            continue
                         sections = surface.sections(
                             tuple(part_start), tuple(part_end), extrusion_area, nominal_h,
                             first_height or layer_height, layer_z=layer["z"],
