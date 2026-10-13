@@ -18,3 +18,19 @@ export function sourceLineAtLayerEnd(view,count,layer){
     if(last<start)return 0;
     return view.getUint32(last*MOVE_SIZE+8,true);
 }
+
+export function sourceMotionForLine(view,count,line){
+    if(!view||count<=0||line<1)return null;
+    let low=0,high=count;
+    while(low<high){
+        const mid=(low+high)>>>1;
+        if(view.getUint32(mid*MOVE_SIZE+8,true)<line)low=mid+1;
+        else high=mid;
+    }
+    const index=Math.min(count-1,low);
+    return {
+        line:view.getUint32(index*MOVE_SIZE+8,true),
+        start:view.getFloat32(index*MOVE_SIZE,true),
+        end:view.getFloat32(index*MOVE_SIZE+4,true)
+    };
+}
