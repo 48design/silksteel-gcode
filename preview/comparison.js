@@ -1,3 +1,4 @@
+import {profileArea} from "./bead_profile.js";
 // Coarse, explicitly approximate volumetric comparison for one visible layer.
 // Bounding memory to one layer keeps large G-code files usable.
 const STRIDE=48;
@@ -21,7 +22,7 @@ function sampleLayer(data,layer,{xy=.65,z=.20,maxSamples=60000}={}) {
         const width=data.getFloat32(o+24,true),height=data.getFloat32(o+28,true);
         const length=Math.hypot(b[0]-a[0],b[1]-a[1],b[2]-a[2]);
         if(length<1e-7)continue;
-        const area=width*height-(1-Math.PI/4)*height*height;
+        const area=profileArea(width,height);
         const vol=area*length;
         volume+=vol;
         if((i-start)%sampleEvery!==0)continue;
