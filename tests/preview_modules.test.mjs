@@ -195,7 +195,7 @@ assert(Math.abs(splitAttribute.sizesEnd[1]-splitAttribute.sizesStart[3])<1e-6);
 assert.equal(splitAttribute.fallbacks.length,0);
 const area=(p)=>profileArea(p.w,p.h);
 assert(Math.abs(area({w:sharedA[0],h:sharedA[1]})-(area(split[0])+area(split[1]))*.5)<1e-6);
-assert(viewer.includes('loftBoundary(joinRead,index,false'));
+assert(viewer.includes("const first=model.layers[visualLayer],boundary=loftBoundary("));
 // Do not taper unrelated G-code moves merely because they touch in XY.
 assert.equal(sharedSplitSection(i=>[
     {...split[0],line:123},{...split[1],line:124}
