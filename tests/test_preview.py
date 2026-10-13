@@ -209,14 +209,18 @@ class PreviewGeometryTests(unittest.TestCase):
                 for i in range(0,len(raw),RAW_PACK.size)
             ))
 
-    def test_closed_path_fallback_is_enabled_by_default(self):
+    def test_seamless_gpu_loft_enabled_by_default_with_legacy_debug_toggle(self):
         root=Path(__file__).resolve().parents[1]
         markup=(root/"preview"/"index.html").read_text(encoding="utf-8")
         viewer=(root/"preview"/"viewer.js").read_text(encoding="utf-8")
-        self.assertIn('id="seamlessJoins"',markup)
-        self.assertNotIn('id="seamlessJoins" checked',markup)
-        self.assertIn('if(!$("seamlessJoins").checked)',viewer)
-        self.assertIn('join.fallbacks.length=0',viewer)
+        self.assertIn('id="seamlessJoins" checked',markup)
+        self.assertIn("GPU-Loft (nahtlos)",markup)
+        self.assertIn('const seamless=$("seamlessJoins").checked',viewer)
+        self.assertIn('const base=sectionMesh(4,"mantle")',viewer)
+        self.assertIn('const capBase=sectionMesh(4,"cap")',viewer)
+        self.assertIn('const headBase=sectionMesh(4,"closed")',viewer)
+        self.assertIn("mesh.frustumCulled=true",viewer)
+        self.assertIn("renderFrontierCap(last)",viewer)
 
     def test_more_extrusion_is_physically_wider(self):
         meta, rows = self.parse([
@@ -651,17 +655,20 @@ class PreviewGeometryTests(unittest.TestCase):
         viewer = (root / "preview" / "viewer.js").read_text(encoding="utf-8")
         html = (root / "preview" / "index.html").read_text(encoding="utf-8")
         backend = (root / "silksteel_preview.py").read_text(encoding="utf-8")
-        for module in ("extrusion_joins", "bead_junctions", "diagnostics", "comparison", "section"):
+        for module in ("loft_geometry", "diagnostics", "comparison", "section"):
             self.assertTrue((root / "preview" / (module + ".js")).is_file())
             self.assertIn('"' + module + '.js"', backend)
             self.assertIn('from "./' + module + '.js"', viewer)
+        self.assertIn('from "./extrusion_joins.js"', (root / "preview" / "loft_geometry.js").read_text(encoding="utf-8"))
         for control in ("cutEnabled", "cutAxis", "cutPosition", "cutInvert",
                         "diagnosticsToggle", "diagnosticsList", "compareToggle",
                         "comparisonSummary"):
             self.assertIn('id="' + control + '"', html)
             self.assertIn('"'+control+'"', viewer)
-        self.assertIn("buildJoinAttributes(items,joinRead,role)", viewer)
-        self.assertIn("makeJunctionGeometry(THREE,join.fallbacks)", viewer)
+        self.assertIn("planLoft(chunk.indices,cachedRead,first,last,seamless)", viewer)
+        self.assertIn("bindLoftAttributes(capGeometry,plan,plan.caps)", viewer)
+        self.assertIn("spatialChunks(first,last,cachedRead,40,6000)", viewer)
+        self.assertIn("capVertexShader", viewer)
         self.assertIn("vec3 p=basePoint + joinVector*lateral", viewer)
         self.assertNotIn("aCap>0.5 && join.z>0.5", viewer)
         self.assertIn("clipping_planes_pars_fragment", viewer)
