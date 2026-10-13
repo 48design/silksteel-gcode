@@ -306,7 +306,7 @@ function forgetLayers() {
     sectionKey="";
     diagnosticReport=null;
     comparisonSerial++;
-    headMesh.visible=false; hopTip.visible=false;
+    headMesh.visible=false; hopTip.visible=false;frontierCap.visible=false;
     if(lastPick){scene.remove(lastPick);lastPick.geometry.dispose();lastPick.material.dispose();lastPick=null;}
     $("pickInfo").style.display="none";
 }
@@ -470,22 +470,24 @@ function createHopLayer(index) {
 function disposeHopGroup(group) {
     group.geometry.dispose();group.material.dispose();
 }
-function renderTip(mesh, p, fraction) {
+function renderTip(mesh,p,fraction,index) {
     const stop=p.a.map((v,i)=>v+(p.b[i]-v)*fraction);
     const attrs=mesh.geometry.attributes;
     attrs.iStart.array.set(p.a);
     attrs.iStop.array.set(stop);
-    attrs.iStart.needsUpdate=true;
-    attrs.iStop.needsUpdate=true;
-    if(attrs.iSize){attrs.iSize.array.set([p.w,p.h]);attrs.iSize.needsUpdate=true;}
+    attrs.iStart.needsUpdate=true;attrs.iStop.needsUpdate=true;
+    attrs.iSize.array.set([p.w,p.h]);attrs.iSize.needsUpdate=true;
+    const info=model.layers[visualLayer];
+    const left=loftBoundary(joinRead,index,false,info.start,info.start+info.count,
+        $("seamlessJoins").checked);
     const dx=p.b[0]-p.a[0],dy=p.b[1]-p.a[1],l=Math.hypot(dx,dy)||1;
     const direction=[-dy/l,dx/l,0];
-    attrs.iJoinStart.array.set(direction);
+    attrs.iJoinStart.array.set(left.join);
     attrs.iJoinEnd.array.set(direction);
     attrs.iJoinStart.needsUpdate=attrs.iJoinEnd.needsUpdate=true;
-    for(const key of ["iSizeStart","iSizeEnd"]){
-        attrs[key].array.set([p.w,p.h]);attrs[key].needsUpdate=true;
-    }
+    attrs.iSizeStart.array.set(left.size);
+    attrs.iSizeEnd.array.set([p.w,p.h]);
+    attrs.iSizeStart.needsUpdate=attrs.iSizeEnd.needsUpdate=true;
     mesh.visible=true;
 }
 const headGeometry=headBase.clone();
@@ -499,6 +501,49 @@ headGeometry.setAttribute("iSize",new THREE.InstancedBufferAttribute(new Float32
 headGeometry.instanceCount=1;
 const headMesh=new THREE.Mesh(headGeometry,newMaterial(0,false));
 headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
+// A fully completed strand can still have an open endpoint during playback,
+// because the following loft segment has not been deposited yet. This one
+// transient cap closes only that advancing frontier, not every segment.
+const frontierGeometry=capBase.clone();
+for(const [name,size] of [
+    ["iStart",3],["iStop",3],["iSize",2],
+    ["iJoinStart",3],["iJoinEnd",3],
+    ["iSizeStart",2],["iSizeEnd",2],["iCapEnd",1]
+]){
+    frontierGeometry.setAttribute(name,new THREE.InstancedBufferAttribute(
+        new Float32Array(size),size));
+}
+frontierGeometry.attributes.iCapEnd.array[0]=1;
+frontierGeometry.instanceCount=1;
+const frontierCap=new THREE.Mesh(frontierGeometry,newMaterial(0,false,capVertexShader));
+frontierCap.visible=false;frontierCap.frustumCulled=false;
+scene.add(frontierCap);
+function renderFrontierCap(index){
+    const p=readSegment(index);
+    const layer=model.layers.find(l=>index>=l.start&&index<l.start+l.count);
+    if(!layer)return;
+    const ring=loftBoundary(joinRead,index,true,layer.start,layer.start+layer.count,
+        $("seamlessJoins").checked);
+    if(!ring.connected)return;
+    if(index<model.layers[visualLayer].start-
+        Math.max(0,Number($("below").value))*model.layers[visualLayer].count &&
+       Number($("below").value)>=0)return;
+    const attrs=frontierGeometry.attributes;
+    for(const [key,values] of [
+        ["iStart",p.a],["iStop",p.b],["iSize",[p.w,p.h]],
+        ["iJoinStart",ring.join],["iJoinEnd",ring.join],
+        ["iSizeStart",ring.size],["iSizeEnd",ring.size]
+    ]){
+        attrs[key].array.set(values);
+        attrs[key].needsUpdate=true;
+    }
+    frontierCap.material.uniforms.uColor.value.copy(rgb[p.role]);
+    frontierCap.material.uniforms.uAlpha.value=
+        layer.number!==model.layers[visualLayer].number && $("ghost").checked?.19:1;
+    frontierCap.material.transparent=frontierCap.material.uniforms.uAlpha.value<1;
+    frontierCap.material.depthWrite=!frontierCap.material.transparent;
+    frontierCap.visible=true;
+}
 const hopTipGeom=new THREE.BufferGeometry();
 hopTipGeom.setAttribute("position",new THREE.BufferAttribute(new Float32Array(6),3));
 const hopTip=new THREE.Line(hopTipGeom,new THREE.LineBasicMaterial({color:colors[7],depthTest:false,depthWrite:false,clippingPlanes:clipPlanes}));
@@ -1163,6 +1208,7 @@ function updateVisibility() {
         }
     }
     headMesh.visible=false;
+    frontierCap.visible=false;
     if(!browsingLayer && finished<model.count){
         const p=readSegment(finished);
         if(p.start<=currentTime&&currentTime<p.end&&visibleRoles.has(p.role)){
@@ -1170,8 +1216,17 @@ function updateVisibility() {
             if(alpha>0){
                 headMesh.material.uniforms.uColor.value.copy(rgb[p.role]);
                 headMesh.userData.role=p.role;
-                renderTip(headMesh,p,alpha);
+                renderTip(headMesh,p,alpha,finished);
             }
+        }
+    }
+    if(!browsingLayer&&!headMesh.visible&&finished>0){
+        const last=finished-1;
+        const layer=model.layers.find(l=>last>=l.start&&last<l.start+l.count);
+        if(layer && layer.number>=model.layers[start].number &&
+           layer.number<=model.layers[current].number &&
+           visibleRoles.has(readRole(last))){
+            renderFrontierCap(last);
         }
     }
     const hopsFinished=browsingLayer
