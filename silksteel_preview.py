@@ -26,6 +26,7 @@ FLOAT = re.compile(r"([-+]?\d*\.?\d+)")
 PACK = struct.Struct("<8fIIff")  # XYZ endpoints, bead dimensions, role, line, start/end seconds
 HOP_PACK = struct.Struct("<6fIIff")  # XYZ endpoints, hop kind, line, start/end seconds
 RAW_PACK = struct.Struct("<6fIIff")  # Positive-E moves including skipped viewer geometry
+MOVE_PACK = struct.Struct("<ffI")  # Every timed G0/G1/G2/G3/G4: begin/end seconds, source line
 SOURCE_INDEX_STEP = 1024
 
 ROLES = ("Standard", "Smoothificator", "Bricklayers base", "Bricklayers shifted",
@@ -105,10 +106,12 @@ def write_sidebar(state: dict[str, bool]) -> None:
 
 def convert(source: Path, destination: Path, hop_destination: Path | None = None,
             progress=None, raw_destination: Path | None = None,
-            source_offsets: list[int] | None = None) -> dict:
+            source_offsets: list[int] | None = None,
+            move_destination: Path | None = None) -> dict:
     """Stream G-code into 48-byte timed segments and separate hop records."""
     hop_destination = hop_destination or destination.with_suffix(".hops.bin")
     raw_destination = raw_destination or destination.with_suffix(".raw.bin")
+    move_destination = move_destination or destination.with_suffix(".moves.bin")
     pos = [0.0, 0.0, 0.0]
     e_pos = 0.0
     xyz_absolute, e_absolute = True, True
@@ -119,7 +122,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     brick_base_pass = False
     layer = None
     layers = []
-    count = ignored_arcs = arc_count = hop_count = raw_count = omitted_count = partial_count = 0
+    count = ignored_arcs = arc_count = hop_count = raw_count = move_count = omitted_count = partial_count = 0
     feedrate = 1800.0
     elapsed = 0.0
     hop_active = False
@@ -145,7 +148,8 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
 
     with (source.open("rb") as src,
           destination.open("wb") as dst, hop_destination.open("wb") as hops,
-          raw_destination.open("wb") as raw_tracks):
+          raw_destination.open("wb") as raw_tracks,
+          move_destination.open("wb") as move_tracks):
         for line_no, raw_bytes in enumerate(src, 1):
             if source_offsets is not None and (line_no - 1) % SOURCE_INDEX_STEP == 0:
                 source_offsets.append(parsed_chars)
@@ -233,7 +237,11 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             cmd = {"G00": "G0", "G01": "G1", "G02": "G2", "G03": "G3", "G04": "G4"}.get(cmd, cmd)
             params = {k: float(v) for k, v in TOKEN.findall(code.upper()) if k not in ("G", "M")}
             if cmd == "G4":
+                before = elapsed
                 elapsed += max(0.0, params.get("P", 0.0)) / 1000.0 + max(0.0, params.get("S", 0.0))
+                if elapsed > before:
+                    move_tracks.write(MOVE_PACK.pack(before, elapsed, line_no))
+                    move_count += 1
             elif cmd == "G90":
                 xyz_absolute = True
             elif cmd == "G91":
@@ -279,6 +287,9 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 motion_seconds = (distance if distance > 1e-7 else abs(delta_e)) * 60.0 / feedrate
                 started = elapsed
                 elapsed += motion_seconds if math.isfinite(motion_seconds) else 0.0
+                if elapsed > started:
+                    move_tracks.write(MOVE_PACK.pack(started, elapsed, line_no))
+                    move_count += 1
 
                 hop_kind = None
                 if "SILKSTEEL: ZHOP_LIFT" in up or "Z-HOP LIFT" in up:
@@ -412,7 +423,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
         layers[0]["number"] = 0
     return {"filename": source.name, "url": "", "count": count, "hopCount": hop_count,
             "arcCount": arc_count,
-            "rawCount": raw_count, "omittedCount": omitted_count,
+            "rawCount": raw_count, "moveCount": move_count, "omittedCount": omitted_count,
             "partialCount": partial_count,
             "duration": elapsed, "layers": layers,
             "bounds": [min_xyz, max_xyz], "filament": filament,
@@ -599,7 +610,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     mime = ("text/html; charset=utf-8" if path == "/"
                             else "text/javascript; charset=utf-8")
                 elif state["status"] == "ready" and any(
-                    path in (m["url"], m["hopUrl"], m["rawUrl"]) for m in models
+                    path in (m["url"], m["hopUrl"], m["rawUrl"], m["moveUrl"]) for m in models
                 ):
                     target = root / path.lstrip("/")
                     self.send_response(200)
@@ -645,6 +656,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 model["url"] = "/" + target.name
                 model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
                 model["rawUrl"] = "/" + target.with_suffix(".raw.bin").name
+                model["moveUrl"] = "/" + target.with_suffix(".moves.bin").name
                 sources_by_url[model["url"]] = (upload, offsets)
                 models.append(model)
                 state.update(status="ready", message="Vorschau bereit", progress=100)
@@ -677,6 +689,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     model["filename"] = display
                     model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
                     model["rawUrl"] = "/" + target.with_suffix(".raw.bin").name
+                    model["moveUrl"] = "/" + target.with_suffix(".moves.bin").name
                     sources_by_url[model["url"]] = (source, offsets)
                     models.append(model)
                 state.update(status="ready", message="Vorschau bereit", progress=100)
