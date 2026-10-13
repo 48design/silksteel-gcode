@@ -347,14 +347,15 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                             continue
                         sections = surface.sections(
                             tuple(part_start), tuple(part_end), extrusion_area, nominal_h,
-                            first_height or layer_height, layer_z=layer["z"]
+                            first_height or layer_height, layer_z=layer["z"],
+                            speed=feedrate / 60.0
                         )
                         # Reject only the invalid SUBSECTION, never its valid
                         # neighbors or an entire otherwise valid G-code move.
                         accepted = []
                         for t0, t1, width, height in sections:
                             if not (math.isfinite(width) and math.isfinite(height) and
-                                    0 < height <= width <= 40):
+                                    0 < height <= 40 and 0 < width <= 40):
                                 skipped_parts += 1
                                 continue
                             a_pos = [part_start[i] + (part_end[i] - part_start[i]) * t0
