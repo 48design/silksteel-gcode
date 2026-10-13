@@ -68,6 +68,7 @@ const modelSelect = $("model"), slider = $("layer");
 let model = null, data = null, hopData = null, cache = new Map(), hopCache = new Map(), lastPick = null;
 let activeLayers = [], currentTime = 0, visibleCount = 0, playing = false, previousFrame = 0;
 let rawData = null, rawLayerCache = new Map(), rawRequest = 0, selectedSourceLine = 0;
+let moveData = null, moveLoading = null, browsingLayer = false;
 const RAW_SIZE = 40;
 let playbackMode = "print", selectedLayer = 0, visualLayer = 0, markerKey = "", renderLayers = [];
 const TIMELINE_STEPS = 1000000;
@@ -280,6 +281,7 @@ function forgetLayers() {
     }
     rawLayerCache.clear();
     rawData=null;rawRequest++;selectedSourceLine=0;
+    moveData=null;moveLoading=null;browsingLayer=false;
     $("rawInfo").textContent="Originalbewegungen im G-Code prüfen";
     $("sourceDrawer").classList.remove("visible");
     disposeOverlay(diagnosticObjects);
@@ -538,7 +540,9 @@ function refreshSection(){
     const axis=$("cutAxis").value, idx=axis==="x"?0:axis==="y"?1:2;
     const min=model.bounds[0][idx],max=model.bounds[1][idx];
     const position=min+(max-min)*Number($("cutPosition").value)/1000;
-    const count=completedBefore(model.count,currentTime,endAt);
+    const count=browsingLayer
+        ? model.layers[visualLayer].start+model.layers[visualLayer].count
+        : completedBefore(model.count,currentTime,endAt);
     const below=Number($("below").value);
     const first=below<0?0:Math.max(0,visualLayer-below);
     const key=[axis,position.toFixed(4),first,visualLayer,count].join(":");
@@ -750,9 +754,11 @@ function updateRawOverlay(){
     if(enabled){
         const below=Number($("below").value);
         const minLayer=below<0?0:Math.max(0,visualLayer-below);
-        const finished=currentTime>=model.duration-0.0001?model.rawCount:
-            completedBefore(model.rawCount,currentTime,
-                i=>rawData.getFloat32(i*RAW_SIZE+36,true));
+        const finished=browsingLayer
+            ? model.layers[visualLayer].rawStart+model.layers[visualLayer].rawCount
+            : currentTime>=model.duration-0.0001?model.rawCount:
+                completedBefore(model.rawCount,currentTime,
+                    i=>rawData.getFloat32(i*RAW_SIZE+36,true));
         for(let i=minLayer;i<=visualLayer;i++){
             let overlay=rawLayerCache.get(i);
             if(!overlay){overlay=createRawOverlay(i);rawLayerCache.set(i,overlay);}
@@ -886,7 +892,7 @@ function formatTimelineTime(seconds) {
 function changeTimelineMode(mode) {
     if (!model || mode===playbackMode || (mode!=="print"&&mode!=="layer")) return;
     setPlaying(false);
-    selectedLayer=layerAtTime(currentTime);
+    selectedLayer=browsingLayer?selectedLayer:layerAtTime(currentTime);
     playbackMode=mode;
     if(mode==="layer") $("playSpeed").value="1";
     else $("playSpeed").value="100";
@@ -894,23 +900,22 @@ function changeTimelineMode(mode) {
     $("modeLayer").setAttribute("aria-pressed",String(mode==="layer"));
     $("timelineMarkers").classList.toggle("layer-mode",mode==="layer");
     markerKey="";
-    seek(mode==="layer" ? layerRange(selectedLayer)[0] : currentTime);
+    if(browsingLayer)chooseLayer(selectedLayer);
+    else seek(mode==="layer" ? layerRange(selectedLayer)[0] : currentTime);
 }
 function chooseLayer(index) {
     if(!model)return;
     setPlaying(false);
     selectedLayer=Math.max(0,Math.min(model.layers.length-1,index));
-    const [from,to]=layerRange(selectedLayer);
-    const last=model.layers[selectedLayer].start+model.layers[selectedLayer].count-1;
-    // In layer playback, selecting another layer prepares its first move;
-    // in full-print mode it shows that layer already deposited.
-    let time=playbackMode==="layer" ? from :
-        (last>=model.layers[selectedLayer].start?endAt(last):to);
-    time=Math.max(from,Math.min(to,time));
-    if(playbackMode==="print"&&selectedLayer<model.layers.length-1)
-        time=Math.max(from,Math.min(time,to-0.00002));
-    seek(time);
-    if(playbackMode==="layer"){markerKey="";updateTimelineMarkers();}
+    visualLayer=selectedLayer;
+    browsingLayer=true;
+    // Layer navigation is a completed-layer inspection operation, not a
+    // playback seek. The following layer must remain completely hidden even
+    // when its start timestamp equals this layer's end timestamp.
+    currentTime=Math.min(model.duration,model.layers[selectedLayer].timeEnd);
+    markerKey="";
+    updateTimelineUI();
+    updateVisibility();
 }
 function markerLabel(text,x,width,onClick) {
     const mark=document.createElement("button");
@@ -979,9 +984,7 @@ function updateTimelineMarkers() {
     }
     for(const point of labeled){
         markerLabel(point.name,point.x,width,()=>{
-            setPlaying(false);
-            selectedLayer=point.index;
-            seek(model.layers[point.index].timeStart);
+            chooseLayer(point.index);
         });
         const el=wrap.lastElementChild;
         if(point.index===visualLayer)el.classList.add("current");
@@ -1006,6 +1009,7 @@ function updateTimelineUI() {
 }
 function seek(seconds) {
     if(!model||!data)return;
+    browsingLayer=false;
     currentTime=Math.max(0,Math.min(model.duration,seconds));
     visualLayer=playbackMode==="layer"?selectedLayer:layerAtTime(currentTime);
     if(playbackMode==="print")selectedLayer=visualLayer;
@@ -1016,8 +1020,10 @@ function updateVisibility() {
     if(!model || !data)return;
     // Binary timestamps are float32, while metadata.duration is float64.
     // Always include the COMPLETE final toolpath at the end of playback.
-    const finished=currentTime>=model.duration-0.0001?model.count:
-        completedBefore(model.count,currentTime,endAt);
+    const finished=browsingLayer
+        ? model.layers[visualLayer].start+model.layers[visualLayer].count
+        : currentTime>=model.duration-0.0001?model.count:
+            completedBefore(model.count,currentTime,endAt);
     const current=visualLayer;
     visibleCount=finished;
     slider.value=String(current);
@@ -1047,7 +1053,7 @@ function updateVisibility() {
         }
     }
     headMesh.visible=false;
-    if(finished<model.count){
+    if(!browsingLayer && finished<model.count){
         const p=readSegment(finished);
         if(p.start<=currentTime&&currentTime<p.end&&visibleRoles.has(p.role)){
             const alpha=Math.max(0,Math.min(1,(currentTime-p.start)/(p.end-p.start)));
@@ -1058,8 +1064,10 @@ function updateVisibility() {
             }
         }
     }
-    const hopsFinished=currentTime>=model.duration-0.0001?model.hopCount:
-        completedBefore(model.hopCount,currentTime,hopEndAt);
+    const hopsFinished=browsingLayer
+        ? model.layers[visualLayer].hopStart+model.layers[visualLayer].hopCount
+        : currentTime>=model.duration-0.0001?model.hopCount:
+            completedBefore(model.hopCount,currentTime,hopEndAt);
     const showHops=$("showHops").checked;
     for(let i=start;i<=current;i++){
         const info=model.layers[i];
@@ -1078,7 +1086,7 @@ function updateVisibility() {
         }
     }
     hopTip.visible=false;
-    if(showHops&&hopsFinished<model.hopCount){
+    if(!browsingLayer&&showHops&&hopsFinished<model.hopCount){
         const hop=readHop(hopsFinished);
         if(hop.start<=currentTime&&currentTime<hop.end){
             const startIndex=model.layers.findIndex(l=>hopsFinished>=l.hopStart&&hopsFinished<l.hopStart+l.hopCount);
