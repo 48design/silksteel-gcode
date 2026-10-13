@@ -12,9 +12,14 @@ async function load(file){
     const profileUri="data:text/javascript;base64,"+
         Buffer.from(profile).toString("base64");
     code=code.replaceAll('"./bead_profile.js"',JSON.stringify(profileUri));
+    const joins=readFileSync(join(root,"preview","extrusion_joins.js"),"utf-8")
+        .replaceAll('"./bead_profile.js"',JSON.stringify(profileUri));
+    const joinsUri="data:text/javascript;base64,"+Buffer.from(joins).toString("base64");
+    code=code.replaceAll('"./extrusion_joins.js"',JSON.stringify(joinsUri));
     return import("data:text/javascript;base64,"+Buffer.from(code).toString("base64"));
 }
 const {computeJoin,joinContinuity,buildJoinAttributes,sharedSplitSection}=await load("extrusion_joins.js");
+const {loftBoundary,planLoft,spatialChunks}=await load("loft_geometry.js");
 const {makeJunctionGeometry,junctionVertexShader}=await load("bead_junctions.js");
 const {analysePrint}=await load("diagnostics.js");
 const {compareLayerVolumes}=await load("comparison.js");
@@ -78,9 +83,62 @@ assert.equal(computeJoin(i=>[
     bead([0,0,.2],[10,0,.2]),bead([10,0,.2],[10,10,.2],0,1,2)
 ][i]||null,0,0,true).miter.length,2);
 
+// GPU loft: shared rings, *only* true path-end caps and spatial chunks.
+const straight=[
+    {...bead([0,0,.2],[20,0,.2],0,0,1),line:1},
+    {...bead([20,0,.2],[42,0,.2],0,1,2),line:2},
+    {...bead([42,0,.2],[62,0,.2],0,2,3),line:3}
+];
+const straightRead=i=>straight[i]||null;
+const loft=planLoft([0,1,2],straightRead,0,3,true);
+assert.equal(loft.starts.length,9);
+assert.equal(loft.caps.length,2);                 // not 6 internal caps
+assert.deepEqual(loft.caps.map(x=>[x.index,x.end]),[[0,0],[2,1]]);
+assert(Math.abs(loft.joinsEnd[0]-loft.joinsStart[3])<1e-6);
+assert(Math.abs(loft.sizesEnd[0]-loft.sizesStart[2])<1e-6);
+assert.equal(loftBoundary(straightRead,0,true,0,3).connected,true);
+assert.equal(loftBoundary(straightRead,2,true,0,3).connected,false);
+const legacyLoft=planLoft([0,1,2],straightRead,0,3,false);
+assert.equal(legacyLoft.caps.length,6);           // debug fallback
+const corner=[
+    {...bead([0,0,.2],[10,0,.2],0,0,1),line:5},
+    {...bead([10,0,.2],[10,10,.2],0,1,2),line:6}
+];
+const joined=planLoft([0,1],i=>corner[i]||null,0,2,true);
+assert.equal(joined.caps.length,2);
+assert(Math.abs(joined.joinsEnd[0]-joined.joinsStart[3])<1e-6);
+assert(Math.abs(joined.joinsEnd[1]-joined.joinsStart[4])<1e-6);
+const reverse=[
+    {...bead([0,0,.2],[10,0,.2],0,0,1),line:5},
+    {...bead([10,0,.2],[0,0,.2],0,1,2),line:6}
+];
+assert.equal(planLoft([0,1],i=>reverse[i]||null,0,2,true).caps.length,4);
+const spatial=spatialChunks(0,3,straightRead,40,6000);
+assert.equal(spatial.length,2);
+assert.deepEqual(spatial.flatMap(c=>c.indices).sort((a,b)=>a-b),[0,1,2]);
+// Even when grouped in separate spatial chunks, adjoining rings agree.
+for(const batch of spatial){
+    const part=planLoft(batch.indices,straightRead,0,3,true);
+    if(batch.indices.includes(1))assert(!part.caps.some(c=>c.index===1));
+}
+const many=Array.from({length:9},(_,i)=>({
+    ...bead([i,0,.2],[i+1,0,.2],0,i,i+1),line:i+1
+}));
+const different=spatialChunks(0,many.length,i=>many[i],100,3);
+assert.deepEqual(different.map(c=>c.indices.length),[3,3,3]);
+assert(loft.bounds && loft.bounds.padding>0);
+
 // Playback must not expose a missing end cap when the next G1 is hidden.
 const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
 assert(viewer.includes("vec3 p=basePoint + joinVector*lateral"));
+assert(viewer.includes('const base=sectionMesh(4,"mantle")'));
+assert(viewer.includes('const capBase=sectionMesh(4,"cap")'));
+assert(viewer.includes('const headBase=sectionMesh(4,"closed")'));
+assert(viewer.includes("spatialChunks(first,last,cachedRead,40,6000)"));
+assert(viewer.includes("bindLoftAttributes(capGeometry,plan,plan.caps)"));
+assert(viewer.includes("mesh.frustumCulled=true"));
+assert(viewer.includes("frontierCap.visible=false"));
+assert(viewer.includes("renderFrontierCap(last)"));
 assert(!viewer.includes("aCap>0.5 && join.z>0.5"));
 const sharp=[
     bead([0,0,.2],[10,0,.2]),
@@ -120,7 +178,7 @@ assert(Math.abs(splitAttribute.sizesEnd[1]-splitAttribute.sizesStart[3])<1e-6);
 assert.equal(splitAttribute.fallbacks.length,0);
 const area=(p)=>profileArea(p.w,p.h);
 assert(Math.abs(area({w:sharedA[0],h:sharedA[1]})-(area(split[0])+area(split[1]))*.5)<1e-6);
-assert(viewer.includes("sharedSplitSection(joinRead,items[j],false)"));
+assert(viewer.includes('loftBoundary(joinRead,index,false'));
 // Do not taper unrelated G-code moves merely because they touch in XY.
 assert.equal(sharedSplitSection(i=>[
     {...split[0],line:123},{...split[1],line:124}
