@@ -21,7 +21,7 @@ const {compareLayerVolumes}=await load("comparison.js");
 const {buildCutContours}=await load("section.js");
 const {nearestSourceRecord,rawClass}=await load("gcode_inspector.js");
 const {profileArea,profileWidth,profileOutline,CORNER_LOSS}=await load("bead_profile.js");
-const {MOVE_SIZE,sourceLineAtTime,sourceLineAtLayerEnd}=await load("source_timeline.js");
+const {MOVE_SIZE,sourceLineAtTime,sourceLineAtLayerEnd,sourceMotionForLine}=await load("source_timeline.js");
 
 // Source cursor follows every timed G-code movement (including G0 and G4),
 // not just the subset of extrusion segments that have instanced geometry.
@@ -41,6 +41,10 @@ assert.equal(sourceLineAtLayerEnd(motions,5,{moveStart:0,moveCount:3}),105);
 assert.equal(sourceLineAtLayerEnd(motions,5,{moveStart:3,moveCount:2}),111);
 assert.equal(sourceLineAtLayerEnd(motions,5,{moveStart:5,moveCount:0}),0);
 assert.equal(sourceLineAtTime(null,0,0),0);
+assert.deepEqual(sourceMotionForLine(motions,5,105),{line:105,start:Math.fround(1.2),end:Math.fround(1.8)});
+assert.equal(sourceMotionForLine(motions,5,106).line,107);
+assert.equal(sourceMotionForLine(motions,5,999).line,111);
+assert.equal(sourceMotionForLine(motions,0,102),null);
 
 const bead=(a,b,role=0,start=0,end=1)=>({a,b,w:.46,h:.20,role,start,end});
 // One material-conserving rounded rectangle for all aspect ratios.
