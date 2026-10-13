@@ -14,8 +14,22 @@ const {analysePrint}=await load("diagnostics.js");
 const {compareLayerVolumes}=await load("comparison.js");
 const {buildCutContours}=await load("section.js");
 const {nearestSourceRecord,rawClass}=await load("gcode_inspector.js");
+const {profileArea,profileWidth,profileOutline,CORNER_LOSS}=await load("bead_profile.js");
 
 const bead=(a,b,role=0,start=0,end=1)=>({a,b,w:.46,h:.20,role,start,end});
+// One material-conserving rounded rectangle for all aspect ratios.
+for(const [width,height] of [[.55,.2],[.32,.32],[.16,.6],[.09,.9]]){
+    const a=profileArea(width,height);
+    assert(a>0);
+    assert(Math.abs(profileWidth(a,height)-width)<1e-10);
+    const corners=profileOutline(width,height);
+    assert.equal(corners.length,24);
+    const maxY=Math.max(...corners.map(p=>p[1]));
+    const minY=Math.min(...corners.map(p=>p[1]));
+    assert(Math.abs(maxY)<1e-10);          // nozzle-anchored TOP
+    assert(Math.abs(minY+height)<1e-10);   // gravity only toward -Z
+}
+assert(Math.abs(CORNER_LOSS-(4-Math.PI)*.16)<1e-12);
 const tracks=[
     bead([0,0,.2],[10,0,.2]),
     bead([10,0,.2],[20,0,.2],0,1,2),
@@ -74,7 +88,7 @@ const splitAttribute=buildJoinAttributes([0,1],splitReader,0);
 assert(Math.abs(splitAttribute.sizesEnd[0]-splitAttribute.sizesStart[2])<1e-6);
 assert(Math.abs(splitAttribute.sizesEnd[1]-splitAttribute.sizesStart[3])<1e-6);
 assert.equal(splitAttribute.fallbacks.length,0);
-const area=(p)=>p.w*p.h-(1-Math.PI/4)*p.h**2;
+const area=(p)=>profileArea(p.w,p.h);
 assert(Math.abs(area({w:sharedA[0],h:sharedA[1]})-(area(split[0])+area(split[1]))*.5)<1e-6);
 assert(viewer.includes("sharedSplitSection(joinRead,items[j],false)"));
 // Do not taper unrelated G-code moves merely because they touch in XY.
@@ -147,7 +161,7 @@ assert.equal(nearestSourceRecord(sourceView,48,36,4,40),3);
 assert.equal(nearestSourceRecord(sourceView,48,36,4,17),0);
 assert.equal(nearestSourceRecord(sourceView,48,36,4,1),0);
 assert.equal(nearestSourceRecord(sourceView,48,36,0,20),-1);
-assert(rawClass(1).includes("nicht als 3D-Strang"));
+assert(rawClass(1).includes("ausgelassen"));
 assert(rawClass(2).includes("G2/G3"));
 const rawLine=new DataView(new ArrayBuffer(40));
 rawLine.setUint32(28,369,true);
@@ -191,7 +205,7 @@ assert(result.findings[0].position.length===3);
 assert.equal(analysePrint(ordinary,new DataView(new ArrayBuffer(0)),[layer]).total,0);
 const compare=compareLayerVolumes(wide,layer,ordinary,layer);
 assert(compare.deltaVolume>0 && compare.diffs.length>0);
-assert(Math.abs(compare.originalVolume-(.46*.2-(1-Math.PI/4)*.2**2)*10)<1e-5);
+assert(Math.abs(compare.originalVolume-profileArea(.46,.2)*10)<1e-5);
 assert.equal(compareLayerVolumes(ordinary,layer,ordinary,layer).diffs.length,0);
 assert(buildCutContours(ordinary,[layer],"x",5,1).vertices.length>0);
 assert(buildCutContours(ordinary,[layer],"z",.1,1).vertices.length>0);
