@@ -155,55 +155,56 @@ $("hopColor").addEventListener("change",savePalette);
 // Unit cross section consists of TWO semicircles and horizontal top/bottom.
 // Width is NOT applied by scaling a circle: shader keeps the end radii = h/2.
 function sectionMesh() {
-    const vertices = [], indexes = [];
-    const append = (side, cos, sin, end, cap) => {
-        vertices.push(side, cos, sin, end, cap);
-        return vertices.length / 5 - 1;
+    const vertices=[],indices=[];
+    const append=(side,top,cos,sin,end,cap)=>{
+        vertices.push(side,top,cos,sin,end,cap);
+        return vertices.length/6-1;
     };
-    const sides = [];
-    const steps = 8;
-    for (let i = 0; i <= steps; i++) {
-        const a = -Math.PI / 2 + Math.PI * i / steps;
-        sides.push([1, Math.cos(a), Math.sin(a)]);
-    }
-    for (let i = 0; i <= steps; i++) {
-        const a = Math.PI / 2 + Math.PI * i / steps;
-        sides.push([-1, Math.cos(a), Math.sin(a)]);
-    }
-    const n = sides.length;
-    const rings = [[],[]], caps = [[],[]];
-    for (let end = 0; end < 2; end++) {
-        for (const [side,cos,sin] of sides) {
-            rings[end].push(append(side,cos,sin,end,0));
-            caps[end].push(append(side,cos,sin,end,1));
+    const corners=[];
+    for(const [sx,sy,from] of [[1,1,0],[-1,1,Math.PI/2],
+                                 [-1,-1,Math.PI],[1,-1,3*Math.PI/2]]){
+        for(let step=0;step<=5;step++){
+            const theta=from+step*Math.PI/10;
+            corners.push([sx,sy,Math.cos(theta),Math.sin(theta)]);
         }
     }
-    for (let i = 0; i < n; i++) {
-        const j = (i+1)%n;
-        indexes.push(rings[0][i],rings[1][i],rings[0][j],
+    const rings=[[],[]],caps=[[],[]],n=corners.length;
+    for(let end=0;end<2;end++){
+        for(const [side,top,cos,sin] of corners){
+            rings[end].push(append(side,top,cos,sin,end,0));
+            caps[end].push(append(side,top,cos,sin,end,1));
+        }
+    }
+    for(let i=0;i<n;i++){
+        const j=(i+1)%n;
+        indices.push(rings[0][i],rings[1][i],rings[0][j],
                      rings[1][i],rings[1][j],rings[0][j]);
     }
     for(let end=0;end<2;end++){
-        const center = append(0,0,0,end,2);
+        const center=append(0,0,0,0,end,2);
         for(let i=0;i<n;i++){
-            const j = (i+1)%n;
-            if(end===0) indexes.push(center,caps[end][i],caps[end][j]);
-            else indexes.push(center,caps[end][j],caps[end][i]);
+            const j=(i+1)%n;
+            if(end===0)indices.push(center,caps[end][i],caps[end][j]);
+            else indices.push(center,caps[end][j],caps[end][i]);
         }
     }
-    const geometry = new THREE.InstancedBufferGeometry();
-    const coords = new Float32Array(vertices);
-    for (let i=0; i<5; i++) {
-        const attribute = new THREE.Float32BufferAttribute(coords.filter((_, j) => j%5===i), 1);
-        geometry.setAttribute(["aSide","aCos","aSin","aEnd","aCap"][i],attribute);
+    const geometry=new THREE.InstancedBufferGeometry();
+    const data=new Float32Array(vertices);
+    for(let attr=0;attr<6;attr++){
+        const buf=new Float32Array(data.length/6);
+        for(let i=0;i<buf.length;i++)buf[i]=data[i*6+attr];
+        geometry.setAttribute(
+            ["aSide","aTop","aCos","aSin","aEnd","aCap"][attr],
+            new THREE.Float32BufferAttribute(buf,1)
+        );
     }
-    geometry.setIndex(indexes);
+    geometry.setIndex(indices);
     return geometry;
 }
 const base = sectionMesh();
 const vertexShader = `
 precision highp float;
-attribute float aSide, aCos, aSin, aEnd, aCap;
+attribute float aSide, aTop, aCos, aSin, aEnd, aCap;
 attribute vec3 iStart, iStop;
 attribute vec2 iSize;
 attribute vec3 iJoinStart, iJoinEnd;
@@ -219,13 +220,14 @@ void main(){
   vec3 perpendicular=len>0.0000001 ? vec3(-d.y/len,0.0,d.x/len) : vec3(1.0,0.0,0.0);
   vec3 joinVector=vec3(join.x,0.0,join.y);
   float h=mix(iSizeStart.y,iSizeEnd.y,aEnd);
-  float w=max(mix(iSizeStart.x,iSizeEnd.x,aEnd),h);
-  float lateral=aSide*(w-h)*0.5 + aCos*h*0.5;
+  float w=mix(iSizeStart.x,iSizeEnd.x,aEnd);
+  float radius=0.4*min(w,h);
+  float lateral=aSide*(w*0.5-radius)+aCos*radius;
+  float vertical=aTop*(h*0.5-radius)+aSin*radius;
   vec3 origin=mix(iStart,iStop,aEnd);
   vec3 basePoint=vec3(origin.x,origin.z-h*0.5,origin.y);
-  // Closed sections are mandatory: the next segment may not yet be visible
-  // during playback, and collapsing internal caps exposes open mesh holes.
-  vec3 p=basePoint + joinVector*lateral + vec3(0.0,h*0.5*aSin,0.0);
+  // The top stays at G-code nozzle Z; only the bottom stretches down.
+  vec3 p=basePoint + joinVector*lateral + vec3(0.0,vertical,0.0);
   vec3 tangent=normalize(vec3(d.x,d.z,d.y));
   vNormal=aCap>0.5 ? (aEnd>0.5 ? tangent : -tangent)
                       : normalize(joinVector*aCos+vec3(0.0,aSin,0.0));
