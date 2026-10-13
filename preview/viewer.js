@@ -108,6 +108,8 @@ function applyColor(index, hex) {
         if (current === index)
             headMesh.material.uniforms.uColor.value.copy(rgb[index]);
     }
+    if(frontierCap.visible && frontierCap.userData.role===index)
+        frontierCap.material.uniforms.uColor.value.copy(rgb[index]);
     if(index===7 && typeof hopTip!=="undefined"){
         for(const group of hopCache.values())group.material.color.set(hex);
         hopTip.material.color.set(hex);
@@ -157,8 +159,9 @@ $("hopColor").value=colors[7];
 $("hopColor").addEventListener("input",event=>applyColor(7,event.target.value));
 $("hopColor").addEventListener("change",savePalette);
 
-// Unit cross section consists of TWO semicircles and horizontal top/bottom.
-// Width is NOT applied by scaling a circle: shader keeps the end radii = h/2.
+// Parametric strongly rounded rectangle (r=0.4*min(width,height)).
+// Shared-profile GPU loft mantles contain no caps; caps are drawn only at
+// genuine strand boundaries. The temporary animation head is closed.
 function sectionMesh(steps=4,mode="mantle"){
     const vertices=[],indices=[];
     const append=(side,top,cos,sin,end,cap)=>{
@@ -595,6 +598,7 @@ function renderFrontierCap(index){
         attrs[key].array.set(values);
         attrs[key].needsUpdate=true;
     }
+    frontierCap.userData.role=p.role;
     frontierCap.material.uniforms.uColor.value.copy(rgb[p.role]);
     frontierCap.material.uniforms.uAlpha.value=
         (layer.number!==model.layers[visualLayer].number && $("ghost").checked)?0.19:1;
