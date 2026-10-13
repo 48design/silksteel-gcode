@@ -21,6 +21,26 @@ const {compareLayerVolumes}=await load("comparison.js");
 const {buildCutContours}=await load("section.js");
 const {nearestSourceRecord,rawClass}=await load("gcode_inspector.js");
 const {profileArea,profileWidth,profileOutline,CORNER_LOSS}=await load("bead_profile.js");
+const {MOVE_SIZE,sourceLineAtTime,sourceLineAtLayerEnd}=await load("source_timeline.js");
+
+// Source cursor follows every timed G-code movement (including G0 and G4),
+// not just the subset of extrusion segments that have instanced geometry.
+const motionBuffer=new ArrayBuffer(MOVE_SIZE*5),motions=new DataView(motionBuffer);
+const motionLines=[101,102,105,107,111],motionTimes=[0.2,1.2,1.8,2.3,3.6];
+for(let i=0;i<motionLines.length;i++){
+    motions.setFloat32(i*MOVE_SIZE,i?motionTimes[i-1]:0,true);
+    motions.setFloat32(i*MOVE_SIZE+4,motionTimes[i],true);
+    motions.setUint32(i*MOVE_SIZE+8,motionLines[i],true);
+}
+assert.equal(sourceLineAtTime(motions,5,.05),101);
+assert.equal(sourceLineAtTime(motions,5,.7),102);
+assert.equal(sourceLineAtTime(motions,5,1.5),105); // travel
+assert.equal(sourceLineAtTime(motions,5,2.1),107); // G4 dwell
+assert.equal(sourceLineAtTime(motions,5,3.6),111);
+assert.equal(sourceLineAtLayerEnd(motions,5,{moveStart:0,moveCount:3}),105);
+assert.equal(sourceLineAtLayerEnd(motions,5,{moveStart:3,moveCount:2}),111);
+assert.equal(sourceLineAtLayerEnd(motions,5,{moveStart:5,moveCount:0}),0);
+assert.equal(sourceLineAtTime(null,0,0),0);
 
 const bead=(a,b,role=0,start=0,end=1)=>({a,b,w:.46,h:.20,role,start,end});
 // One material-conserving rounded rectangle for all aspect ratios.
@@ -177,6 +197,20 @@ assert.equal((page.match(/<details class="side-group"/g)||[]).length,8);
 assert(page.includes('id="sourceDrawer"'));
 assert(viewer.includes("openSourceLine(pick.line)"));
 assert(viewer.includes("function auditGPUInstance(index, expected)"));
+assert(viewer.includes("syncSourceHighlights()"));
+assert(viewer.includes("sourceLineAtLayerEnd(moveData,model.moveCount"));
+assert(viewer.includes('row.classList.toggle("active",line===selectedSourceLine)'));
+assert(viewer.includes('row.classList.toggle("playing",line===next)'));
+assert(viewer.includes("browsingLayer=true"));
+assert(viewer.includes("browsingLayer=false"));
+assert(viewer.includes("model.layers[visualLayer].start+model.layers[visualLayer].count"));
+assert(viewer.includes("model.layers[visualLayer].hopStart+model.layers[visualLayer].hopCount"));
+const belowMarkup=readFileSync(join(root,"preview","index.html"),"utf-8");
+assert(belowMarkup.includes('<option value="1" selected>Aktuelle + darunter</option>'));
+assert(!belowMarkup.includes('<option value="3" selected>'));
+assert(belowMarkup.includes('id="selectedSource"'));
+assert(belowMarkup.includes('id="playingSource"'));
+assert(belowMarkup.includes(".source-line.playing"));
 assert(viewer.includes("local<mesh.geometry.instanceCount"));
 assert(viewer.includes("pick.segmentIndex=i"));
 assert(viewer.includes("GPU-Instanz gefunden"));
