@@ -137,7 +137,11 @@ const many=Array.from({length:9},(_,i)=>({
 }));
 const different=spatialChunks(0,many.length,i=>many[i],100,3);
 assert.deepEqual(different.map(c=>c.indices.length),[3,3,3]);
-assert(loft.bounds && loft.bounds.padding>0);
+assert(loft.bounds && loft.bounds.padding>=.46);
+const tallLoft=planLoft([0],i=>i===0?{
+    ...bead([0,0,1.2],[10,0,1.2],0,0,1),w:.12,h:.9,line:17
+}:null,0,1,true);
+assert(tallLoft.bounds.padding>=.9); // culling must include full downward stretch
 
 // Playback must not expose a missing end cap when the next G1 is hidden.
 const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
