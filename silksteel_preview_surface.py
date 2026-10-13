@@ -69,9 +69,10 @@ class DepositedSurface:
     def _effective_height(
         self, x: float, y: float, z: float, area: float, nominal: float,
         first_layer: float, layer_z: float | None = None,
-        speed: float = 30.0
+        speed: float = 30.0, desired_height: float | None = None
     ) -> float:
-        desired = self.gravity_height(area, speed)
+        desired = (self.gravity_height(area, speed) if desired_height is None
+                   else desired_height)
         # Physical first-layer bed support; do not invent support at every Z.
         support = self.support_top(
             x, y, z, max(0.015, min(0.04, nominal * 0.15))
@@ -108,13 +109,15 @@ class DepositedSurface:
             return []
         samples = max(1, min(8192, math.ceil(xy_length / self.sample_spacing)))
         heights = []
+        free_height = self.gravity_height(area, speed)
         for i in range(samples):
             t = (i + 0.5) / samples
             x = start[0] + (end[0] - start[0]) * t
             y = start[1] + (end[1] - start[1]) * t
             z = start[2] + (end[2] - start[2]) * t
             heights.append(self._effective_height(
-                x, y, z, area, nominal, first_layer, layer_z, speed))
+                x, y, z, area, nominal, first_layer, layer_z, speed,
+                free_height))
 
         # The receiver grid is only 0.4 mm wide. At crossing infill paths a
         # center probe may alternate between a supported cell and empty space,
