@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
-import {buildJoinAttributes,sharedSplitSection} from "./extrusion_joins.js";
-import {makeJunctionGeometry,junctionVertexShader} from "./bead_junctions.js";
+import {loftBoundary,planLoft,spatialChunks} from "./loft_geometry.js";
+
 import {profileArea} from "./bead_profile.js";
 import {nearestSourceRecord,rawClass} from "./gcode_inspector.js";
 import {MOVE_SIZE,sourceLineAtTime,sourceLineAtLayerEnd,sourceMotionForLine} from "./source_timeline.js";
@@ -275,9 +275,7 @@ const newMaterial = (role, faded, geometryShader=vertexShader) => new THREE.Shad
     clipping:true, clippingPlanes:clipPlanes,
     uniforms:{uColor:{value:rgb[role].clone()},uAlpha:{value:faded?.19:1}},
     transparent:!!faded,depthWrite:!faded,
-    polygonOffset:geometryShader===junctionVertexShader,
-    polygonOffsetFactor:geometryShader===junctionVertexShader?-1:0,
-    polygonOffsetUnits:geometryShader===junctionVertexShader?-1:0
+    polygonOffset:false
 });
 function disposeGroup(group) {
     group.traverse(o => {
@@ -389,66 +387,64 @@ function setPlaying(next) {
     if(!playing && referenceData)refreshComparison();
 }
 const joinRead = index => index>=0 && model && index<model.count ? readSegment(index) : null;
-function createLayer(index) {
-    const info = model.layers[index];
-    const buckets = Array.from({length:layout.roles.length},()=>[]);
-    for(let i=info.start;i<info.start+info.count;i++){
-        const role=readRole(i);
-        if(role>=buckets.length)throw new Error("Ungültiger Extrusionstyp "+role+" in Segment "+i);
-        buckets[role].push(i);
+function boundLoft(geometry,bounds){
+    if(!bounds)return;
+    const {lo,hi,padding}=bounds;
+    const center=new THREE.Vector3((lo[0]+hi[0])*.5,(lo[2]+hi[2])*.5,(lo[1]+hi[1])*.5);
+    const dx=(hi[0]-lo[0])*.5+padding;
+    const dy=(hi[2]-lo[2])*.5+padding;
+    const dz=(hi[1]-lo[1])*.5+padding;
+    geometry.boundingSphere=new THREE.Sphere(center,Math.hypot(dx,dy,dz));
+}
+function bindLoftAttributes(geometry,plan,capItems=null){
+    const vectors=[
+        ["iStart",plan.starts,3],["iStop",plan.ends,3],
+        ["iSize",plan.sizes,2],["iJoinStart",plan.joinsStart,3],
+        ["iJoinEnd",plan.joinsEnd,3],["iSizeStart",plan.sizesStart,2],
+        ["iSizeEnd",plan.sizesEnd,2]
+    ];
+    if(capItems){
+        for(const [key,values,stride] of vectors){
+            const selected=new Float32Array(capItems.length*stride);
+            for(let j=0;j<capItems.length;j++){
+                const source=capItems[j].local*stride;
+                selected.set(values.subarray(source,source+stride),j*stride);
+            }
+            geometry.setAttribute(key,new THREE.InstancedBufferAttribute(selected,stride));
+        }
+        geometry.setAttribute("iCapEnd",new THREE.InstancedBufferAttribute(
+            Float32Array.from(capItems.map(c=>c.end)),1));
+        geometry.instanceCount=capItems.length;
+    }else{
+        for(const [key,values,stride] of vectors)
+            geometry.setAttribute(key,new THREE.InstancedBufferAttribute(values,stride));
+        geometry.instanceCount=plan.starts.length/3;
     }
-    const group = new THREE.Group();
-    const maxInstances = 28000;
-    for(let role=0;role<buckets.length;role++){
-        const indices=buckets[role];
-        for(let offset=0;offset<indices.length;offset+=maxInstances){
-            const items=indices.slice(offset,offset+maxInstances), n=items.length;
-            const starts=new Float32Array(n*3),ends=new Float32Array(n*3),sizes=new Float32Array(n*2);
-            for(let j=0;j<n;j++){
-                const p=readSegment(items[j]);
-                starts.set(p.a,j*3);ends.set(p.b,j*3);
-                sizes.set([p.w,p.h],j*2);
-            }
-            // Safety first: each section is guaranteed closed and independent.
-            // The optional miter path has previously caused whole faces to vanish.
-            const join=buildJoinAttributes(items,joinRead,role);
-            if(!$("seamlessJoins").checked){
-                for(let j=0;j<n;j++){
-                    const p=readSegment(items[j]);
-                    const dx=p.b[0]-p.a[0],dy=p.b[1]-p.a[1],l=Math.hypot(dx,dy)||1;
-                    const nx=-dy/l,ny=dx/l;
-                    join.joinsStart.set([nx,ny,0],j*3);
-                    join.joinsEnd.set([nx,ny,0],j*3);
-                    join.sizesStart.set(
-                        sharedSplitSection(joinRead,items[j],false)||[p.w,p.h],j*2);
-                    join.sizesEnd.set(
-                        sharedSplitSection(joinRead,items[j],true)||[p.w,p.h],j*2);
-                }
-                join.fallbacks.length=0;
-            }
-            const geometry=base.clone();
-            geometry.setAttribute("iJoinStart",new THREE.InstancedBufferAttribute(join.joinsStart,3));
-            geometry.setAttribute("iJoinEnd",new THREE.InstancedBufferAttribute(join.joinsEnd,3));
-            geometry.setAttribute("iSizeStart",new THREE.InstancedBufferAttribute(join.sizesStart,2));
-            geometry.setAttribute("iSizeEnd",new THREE.InstancedBufferAttribute(join.sizesEnd,2));
-            geometry.setAttribute("iStart",new THREE.InstancedBufferAttribute(starts,3));
-            geometry.setAttribute("iStop",new THREE.InstancedBufferAttribute(ends,3));
-            geometry.setAttribute("iSize",new THREE.InstancedBufferAttribute(sizes,2));
-            geometry.instanceCount=n;
-            const mesh=new THREE.Mesh(geometry,newMaterial(role,false));
-            mesh.frustumCulled=false;
-            mesh.userData.role=role;
-            mesh.userData.indices=Uint32Array.from(items);
-            group.add(mesh);
-            if(join.fallbacks.length){
-                const patchGeometry=makeJunctionGeometry(THREE,join.fallbacks);
-                const patches=new THREE.Mesh(patchGeometry,newMaterial(role,false,junctionVertexShader));
-                patches.frustumCulled=false;
-                patches.userData.role=role;
-                patches.userData.junction=true;
-                patches.userData.indices=Uint32Array.from(join.fallbacks.map(item=>item.index));
-                group.add(patches);
-            }
+    boundLoft(geometry,plan.bounds);
+}
+function createLayer(index) {
+    const info=model.layers[index],group=new THREE.Group();
+    const first=info.start,last=first+info.count;
+    const chunks=spatialChunks(first,last,joinRead,40,6000);
+    const seamless=$("seamlessJoins").checked;
+    for(const chunk of chunks){
+        const plan=planLoft(chunk.indices,joinRead,first,last,seamless);
+        const geometry=base.clone();
+        bindLoftAttributes(geometry,plan);
+        const mesh=new THREE.Mesh(geometry,newMaterial(chunk.role,false));
+        mesh.frustumCulled=true;
+        mesh.userData.role=chunk.role;
+        mesh.userData.indices=Uint32Array.from(chunk.indices);
+        group.add(mesh);
+        if(plan.caps.length){
+            const capGeometry=capBase.clone();
+            bindLoftAttributes(capGeometry,plan,plan.caps);
+            const caps=new THREE.Mesh(capGeometry,newMaterial(chunk.role,false,capVertexShader));
+            caps.frustumCulled=true;
+            caps.userData.role=chunk.role;
+            caps.userData.cap=true;
+            caps.userData.indices=Uint32Array.from(plan.caps.map(item=>item.index));
+            group.add(caps);
         }
     }
     group.userData.layer=index;
@@ -1155,7 +1151,7 @@ function updateVisibility() {
             if(mesh.userData.faded!==faded){
                 mesh.material.dispose();
                 mesh.material=newMaterial(mesh.userData.role,faded,
-                    mesh.userData.junction?junctionVertexShader:vertexShader);
+                    mesh.userData.cap?capVertexShader:vertexShader);
                 mesh.userData.faded=faded;
             }
         }
@@ -1347,7 +1343,7 @@ function auditGPUInstance(index, expected) {
     let reason="Instanz nicht in aktiven Layer-Meshes";
     for(const group of activeLayers){
         for(const mesh of group.children){
-            if(mesh.userData.junction || !mesh.userData.indices)continue;
+            if(mesh.userData.cap || !mesh.userData.indices)continue;
             const ids=mesh.userData.indices;
             const local=withinPrefix(ids,index);
             if(local>=ids.length || ids[local]!==index)continue;
