@@ -4,6 +4,7 @@ import {buildJoinAttributes,sharedSplitSection} from "./extrusion_joins.js";
 import {makeJunctionGeometry,junctionVertexShader} from "./bead_junctions.js";
 import {profileArea} from "./bead_profile.js";
 import {nearestSourceRecord,rawClass} from "./gcode_inspector.js";
+import {MOVE_SIZE,sourceLineAtTime,sourceLineAtLayerEnd} from "./source_timeline.js";
 import {analysePrint} from "./diagnostics.js";
 import {closestLayer, compareLayerVolumes} from "./comparison.js";
 import {buildCutContours} from "./section.js";
@@ -69,6 +70,8 @@ let model = null, data = null, hopData = null, cache = new Map(), hopCache = new
 let activeLayers = [], currentTime = 0, visibleCount = 0, playing = false, previousFrame = 0;
 let rawData = null, rawLayerCache = new Map(), rawRequest = 0, selectedSourceLine = 0;
 let moveData = null, moveLoading = null, browsingLayer = false;
+let currentSourceLine=0, sourceWindowStart=0, sourceWindowEnd=0;
+let lastSourceAutoFetch=0, sourceSelectionTime=0;
 const RAW_SIZE = 40;
 let playbackMode = "print", selectedLayer = 0, visualLayer = 0, markerKey = "", renderLayers = [];
 const TIMELINE_STEPS = 1000000;
@@ -282,6 +285,10 @@ function forgetLayers() {
     rawLayerCache.clear();
     rawData=null;rawRequest++;selectedSourceLine=0;
     moveData=null;moveLoading=null;browsingLayer=false;
+    currentSourceLine=0;sourceWindowStart=sourceWindowEnd=0;
+    sourceRequest++;lastSourceAutoFetch=sourceSelectionTime=0;
+    $("selectedSource").classList.remove("visible");
+    $("playingSource").classList.remove("visible");
     $("rawInfo").textContent="Originalbewegungen im G-Code prüfen";
     $("sourceDrawer").classList.remove("visible");
     disposeOverlay(diagnosticObjects);
@@ -777,35 +784,118 @@ function updateRawOverlay(){
     }
 }
 let sourceRequest=0;
-async function openSourceLine(line){
+async function ensureMotionData(){
+    if(moveData || !model?.moveUrl || !model.moveCount)return;
+    if(moveLoading)return moveLoading;
+    const expected=model;
+    const request=(async()=>{
+        const response=await fetch(expected.moveUrl,{cache:"no-store"});
+        if(!response.ok)throw Error("G-Code-Zeitleiste HTTP "+response.status);
+        const bytes=await response.arrayBuffer();
+        if(bytes.byteLength!==expected.moveCount*MOVE_SIZE)
+            throw Error("G-Code-Zeitleiste unvollständig");
+        if(model===expected){
+            moveData=new DataView(bytes);
+            syncSourceHighlights();
+        }
+    })();
+    moveLoading=request;
+    try{await request;}
+    finally{if(moveLoading===request)moveLoading=null;}
+}
+function playedSourceLine(){
+    if(!model)return 0;
+    if(moveData){
+        if(browsingLayer){
+            const done=sourceLineAtLayerEnd(moveData,model.moveCount,model.layers[visualLayer]);
+            if(done)return done;
+        }
+        return sourceLineAtTime(moveData,model.moveCount,currentTime);
+    }
+    // Old cached previews can lack a motion file: fall back to deposition.
+    if(!data||!model.count)return 0;
+    const last=browsingLayer
+        ? model.layers[visualLayer].start+model.layers[visualLayer].count-1
+        : Math.min(model.count-1,Math.max(0,visibleCount-1));
+    return last>=0?readSegment(last).line:0;
+}
+function syncSourceHighlights(){
+    if(!$("sourceDrawer").classList.contains("visible") || !model)return;
+    const next=playedSourceLine();
+    const changed=next!==currentSourceLine;
+    currentSourceLine=next;
+    const playingBadge=$("playingSource"),selectedBadge=$("selectedSource");
+    playingBadge.classList.toggle("visible",next>0);
+    selectedBadge.classList.toggle("visible",selectedSourceLine>0);
+    if(next>0)playingBadge.textContent="▶ Wiedergabe · Zeile "+next;
+    if(selectedSourceLine>0)
+        selectedBadge.textContent="◆ Ausgewählt · Zeile "+selectedSourceLine;
+    let playingRow=null;
+    for(const row of $("sourceLines").children){
+        const line=Number(row.dataset.line);
+        row.classList.toggle("active",line===selectedSourceLine);
+        row.classList.toggle("playing",line===next);
+        if(line===next)playingRow=row;
+    }
+    if(changed && playingRow && playing){
+        playingRow.scrollIntoView({block:"nearest",behavior:"instant"});
+    }
+    const now=performance.now();
+    // Follow the actual G-code cursor during playback/layer browsing, but
+    // don't immediately steal the viewport when a user picks a distant line.
+    if(next && (next<sourceWindowStart || next>sourceWindowEnd) &&
+       now-lastSourceAutoFetch>300 &&
+       (playing||browsingLayer||now-sourceSelectionTime>1300)){
+        lastSourceAutoFetch=now;
+        openSourceLine(next,false).catch(showError);
+    }
+}
+async function openSourceLine(line,select=true){
     if(!model || !Number.isSafeInteger(line) || line<1)return;
-    const request=++sourceRequest;
-    selectedSourceLine=line;
+    const request=++sourceRequest,expected=model;
+    if(select){
+        selectedSourceLine=line;
+        sourceSelectionTime=performance.now();
+        $("sourceLine").value=String(line);
+    }
     $("sourceDrawer").classList.add("visible");
-    $("sourceLine").value=String(line);
-    $("sourceStatus").textContent=model.filename+" · Zeile "+line+" wird geladen…";
+    syncSourceHighlights();
+    ensureMotionData().catch(showError);
+    $("sourceStatus").textContent=model.filename+" · Lade G-Code bei Zeile "+line+"…";
     const response=await fetch("/source?model="+encodeURIComponent(model.url)+
-        "&line="+line+"&context=16",{cache:"no-store"});
+        "&line="+line+"&context=35",{cache:"no-store"});
     if(!response.ok)throw new Error("G-Code konnte nicht geladen werden (HTTP "+response.status+")");
     const source=await response.json();
-    if(request!==sourceRequest)return;
-    const content=$("sourceLines");content.replaceChildren();
+    if(request!==sourceRequest||model!==expected)return;
+    const content=$("sourceLines");
+    content.replaceChildren();
     let chosen=null;
+    sourceWindowStart=source.rows[0]?.line||0;
+    sourceWindowEnd=source.rows.at(-1)?.line||0;
     for(const row of source.rows){
         const el=document.createElement("div");
-        el.className="source-line"+(row.line===line?" active":"");
+        el.className="source-line";
+        el.dataset.line=String(row.line);
         const num=document.createElement("span");
         num.className="line-num";num.textContent=row.line;
-        const text=document.createElement("span");text.textContent=row.text;
-        el.append(num,text);
+        const txt=document.createElement("span");txt.textContent=row.text;
+        el.append(num,txt);
         el.addEventListener("click",()=>navigateSourceLine(row.line));
         content.append(el);
         if(row.line===line)chosen=el;
     }
-    $("sourceStatus").textContent=model.filename+" · Zeile "+line+
-        " · "+source.rows.length+" Zeilen · Quelle: "+model.name;
+    $("sourceStatus").textContent=model.filename+" · "+source.rows.length+
+        " Zeilen · Quelle: "+model.name;
+    syncSourceHighlights();
     if(chosen)chosen.scrollIntoView({block:"center",behavior:"instant"});
 }
+$("selectedSource").addEventListener("click",()=>{
+    if(selectedSourceLine)openSourceLine(selectedSourceLine,false).catch(showError);
+});
+$("playingSource").addEventListener("click",()=>{
+    const line=playedSourceLine();
+    if(line)openSourceLine(line,false).catch(showError);
+});
 function navigateSourceLine(line){
     openSourceLine(line).catch(showError);
     if(!model||!data)return;
@@ -819,7 +909,10 @@ function navigateSourceLine(line){
     if(playbackMode==="layer")selectedLayer=layerAtTime(point.end);
     seek(Math.min(model.duration,point.end+0.00001));
 }
-$("sourceClose").addEventListener("click",()=>$("sourceDrawer").classList.remove("visible"));
+$("sourceClose").addEventListener("click",()=>{
+    $("sourceDrawer").classList.remove("visible");
+    sourceRequest++;
+});
 $("sourceGo").addEventListener("click",()=>navigateSourceLine(Number($("sourceLine").value)));
 $("sourceLine").addEventListener("keydown",event=>{
     if(event.key==="Enter")navigateSourceLine(Number($("sourceLine").value));
@@ -1110,6 +1203,7 @@ function updateVisibility() {
     if($("compareToggle").checked && referenceData)refreshComparison();
     if($("cutEnabled").checked && !playing)scheduleSection();
     updateRawOverlay();
+    syncSourceHighlights();
 }
 function fit() {
     const [lo,hi] = model.bounds;
