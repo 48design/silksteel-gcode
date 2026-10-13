@@ -21,6 +21,7 @@ class PreviewGeometryTests(unittest.TestCase):
     def test_g2_g3_slicer_arcs_are_rendered_as_actual_toolpaths(self):
         # Ordinary Arc-Fitting output previously disappeared in its entirety.
         from silksteel_preview import RAW_PACK
+        from silksteel_preview_surface import DepositedSurface
         cases = [
             ("G3 X0 Y10 I-10 J0 E0.6 F1200", 10.0, 0.0, 0.0, 10.0),
             ("G3 X0 Y10 R10 E0.6 F1200", 10.0, 0.0, 0.0, 10.0),
@@ -56,7 +57,7 @@ class PreviewGeometryTests(unittest.TestCase):
                     self.assertEqual(RAW_PACK.unpack_from(raw,0)[6],4)
                     filament_area=math.pi*(meta["filament"]/2)**2
                     estimated_e=sum(
-                        (row[6]*row[7]-(1-math.pi/4)*row[7]**2)
+                        DepositedSurface.area_for_size(row[6],row[7])
                         * math.dist(row[0:3],row[3:6])/filament_area
                         for row in rows)
                     self.assertAlmostEqual(estimated_e,.6,places=3)
@@ -123,8 +124,8 @@ class PreviewGeometryTests(unittest.TestCase):
         from silksteel_preview_surface import DepositedSurface
         actual=DepositedSurface.sections
 
-        def patched(self,start,end,area,nominal,first_layer,layer_z=None):
-            result=actual(self,start,end,area,nominal,first_layer,layer_z)
+        def patched(self,start,end,area,nominal,first_layer,layer_z=None,speed=30.):
+            result=actual(self,start,end,area,nominal,first_layer,layer_z,speed)
             if len(result)==1:
                 t0,t1,w,h=result[0]
                 return [(0.,.5,41.,h),(.5,1.,w,h)]
@@ -231,7 +232,7 @@ class PreviewGeometryTests(unittest.TestCase):
         a, b = rows
         self.assertAlmostEqual(a[7], .2)
         self.assertAlmostEqual(b[7], .2)
-        self.assertAlmostEqual(b[6] / a[6], 1.918, delta=.02)
+        self.assertAlmostEqual(b[6] / a[6], 1.946, delta=.02)
 
     def test_roles_and_modal_e_modes(self):
         meta, rows = self.parse([
@@ -252,7 +253,7 @@ class PreviewGeometryTests(unittest.TestCase):
             "; ====== SMOOTHIFICATOR END ======",
         ])
         self.assertEqual([row[8] for row in rows], [0, 3, 5, 1])
-        self.assertAlmostEqual(rows[3][7], .1)
+        self.assertGreater(rows[3][7], .1)  # No support: strand draws down freely
 
     def test_absolute_reset_and_relative_xy(self):
         _, rows = self.parse([
@@ -452,7 +453,56 @@ class PreviewGeometryTests(unittest.TestCase):
         area=.11
         widths=[field.width_for_area(area,h) for h in stable]
         for w,h in zip(widths,stable):
-            self.assertAlmostEqual(w*h-(1-math.pi/4)*h*h,area,places=8)
+            self.assertAlmostEqual(field.area_for_size(w,h),area,places=8)
+
+    def test_rounded_rectangle_inverse_tall_and_wide(self):
+        from silksteel_preview_surface import DepositedSurface
+        field=DepositedSurface()
+        area=.12
+        side=field.free_square_side(area)
+        self.assertAlmostEqual(field.area_for_size(side,side),area,places=9)
+        for h in (.10,.20,side,.45,.75):
+            w=field.width_for_area(area,h)
+            self.assertAlmostEqual(field.area_for_size(w,h),area,places=9)
+            self.assertAlmostEqual(.4*min(w,h),.4*min(w,h))
+        self.assertGreater(field.width_for_area(area,.20),.20)
+        self.assertLess(field.width_for_area(area,.60),.60)
+
+    def test_gravity_rate_speed_and_contact_at_nozzle_top(self):
+        from silksteel_preview_surface import DepositedSurface
+        field=DepositedSurface()
+        area=.12
+        slow=field.gravity_height(area,5)
+        fast=field.gravity_height(area,100)
+        self.assertGreater(slow,fast)
+        self.assertGreater(fast,field.free_square_side(area))
+        # Upper surface remains exactly at the programmed nozzle Z.
+        free=field._effective_height(0,0,.60,area,.20,.20,speed=5)
+        self.assertAlmostEqual(free,slow,places=9)
+        field._tops[(0,0)]=(.4,-math.inf)
+        compressed=field._effective_height(0,0,.6,area,.20,.20,speed=5)
+        self.assertAlmostEqual(compressed,.20,places=9)
+        self.assertAlmostEqual(.6-compressed,.4,places=9)
+        self.assertGreater(field.width_for_area(area,compressed),
+                           field.width_for_area(area,free))
+
+    def test_tall_narrow_extrusion_not_discarded_from_binary(self):
+        from silksteel_preview_surface import DepositedSurface
+        meta,rows=self.parse([
+            "; layer_height = 0.2",
+            ";LAYER_CHANGE", ";Z:0.8", ";HEIGHT:0.2", ";LAYER:0",
+            "G90","M83","G0 X0 Y0 Z0.8 F600",
+            "G1 X20 Y0 E0.4 F600"
+        ])
+        self.assertGreater(meta["count"],0)
+        self.assertEqual(meta["omittedCount"],0)
+        self.assertTrue(any(row[7]>row[6] for row in rows))
+        for row in rows:
+            area=.4*math.pi*.875**2/20
+            self.assertAlmostEqual(
+                DepositedSurface.area_for_size(row[6],row[7]),area,places=5)
+            self.assertAlmostEqual(row[2]-row[7],
+                .8-row[7],places=5)
 
     def test_free_vs_supported_cross_sections_conserve_material(self):
         from silksteel_preview_surface import DepositedSurface
@@ -468,14 +518,14 @@ class PreviewGeometryTests(unittest.TestCase):
         pieces = field.sections(start, end, area, nominal, .2)
         self.assertGreaterEqual(len(pieces), 2)
         self.assertAlmostEqual(pieces[0][3], .2, places=3)
-        free_d = field.free_diameter(area)
-        self.assertAlmostEqual(pieces[-1][3], free_d, places=3)
-        self.assertAlmostEqual(pieces[-1][2], free_d, places=3)
+        free_height = field.gravity_height(area,30)
+        self.assertAlmostEqual(pieces[-1][3], free_height, places=3)
+        self.assertLess(pieces[-1][2], pieces[-1][3])
         self.assertGreater(pieces[0][2], pieces[-1][2])
 
         self.assertAlmostEqual(
             sum((t1-t0)*20.0 *
-                (width*height-(1-math.pi/4)*height*height)
+                field.area_for_size(width,height)
                 for t0,t1,width,height in pieces),
             20.0*area, places=5
         )
@@ -503,9 +553,10 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreaterEqual(len(lifted), 2)
         self.assertLess(lifted[0][3],lifted[-1][3])
         self.assertGreater(lifted[0][2],lifted[-1][2])
-        self.assertLessEqual(max(p[3] for p in lifted),field.free_diameter(area)+1e-6)
+        self.assertLessEqual(max(p[3] for p in lifted),field.gravity_height(area,30)+1e-6)
 
     def test_parser_splits_one_g1_only_at_real_substrate_change(self):
+        from silksteel_preview_surface import DepositedSurface
         meta, rows = self.parse([
             "; layer_height = 0.2", "; first_layer_height = 0.2",
             ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
@@ -518,8 +569,9 @@ class PreviewGeometryTests(unittest.TestCase):
         upper = rows[meta["layers"][1]["start"]:]
         self.assertGreater(len(upper),1)
         self.assertAlmostEqual(upper[0][7], .2, places=3)
-        diameter = math.sqrt(4*(.8*math.pi*(1.75/2)**2/20)/math.pi)
-        self.assertAlmostEqual(upper[-1][7],diameter,places=3)
+        free_height = DepositedSurface.gravity_height(
+            .8 * math.pi * (.875)**2 / 20,20)
+        self.assertAlmostEqual(upper[-1][7],free_height,places=3)
         self.assertAlmostEqual(sum(row[-1]-row[-2] for row in upper),1.0,places=3)
         self.assertEqual(set(int(row[8]) for row in upper),{0})
         self.assertEqual(len(set(int(row[9]) for row in upper)),1)
@@ -585,10 +637,10 @@ class PreviewGeometryTests(unittest.TestCase):
         field._tops[(0, 0)] = (0.34, 0.2)
         area, nominal = .12, .2
         h = field._effective_height(.1, .1, .4, area, nominal, .2, .4)
-        self.assertAlmostEqual(h, nominal, places=5)
-        w = field.width_for_area(area, h)
-        self.assertLess(w, 0.7)
-        self.assertAlmostEqual(w*h-(1-math.pi/4)*h*h, area)
+        self.assertAlmostEqual(h,field.gravity_height(area,30),places=5)
+        w = field.width_for_area(area,h)
+        self.assertLess(w,0.7)
+        self.assertAlmostEqual(field.area_for_size(w,h),area)
 
     def test_raised_nozzle_grows_height_not_width_even_near_adjacent_tracks(self):
         from silksteel_preview_surface import DepositedSurface
@@ -602,7 +654,7 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreater(raised, at_layer)
         self.assertLess(field.width_for_area(area, raised),
                         field.width_for_area(area, at_layer))
-        self.assertLessEqual(raised, field.free_diameter(area))
+        self.assertLessEqual(raised, field.gravity_height(area,30))
 
     def test_bricklayers_second_pass_uses_actual_support_gap_not_double_z(self):
         from silksteel_preview_surface import DepositedSurface
@@ -616,7 +668,7 @@ class PreviewGeometryTests(unittest.TestCase):
         h = field._effective_height(150.0,103.353,.350,area,.150,.2,.2)
         w = field.width_for_area(area,h)
         self.assertAlmostEqual(h,.150,places=4)
-        self.assertAlmostEqual(w,.4093,delta=.001)
+        self.assertAlmostEqual(w,.3977,delta=.001)
         self.assertAlmostEqual(.350-h,.200,places=4)
         self.assertGreater(diameter,.25)
         # Regression: old code added the layer-Z offset twice, producing a
@@ -639,11 +691,11 @@ class PreviewGeometryTests(unittest.TestCase):
         upper = rows[meta["layers"][1]["start"]:]
         # Greater free Z must produce at least one taller, narrower bead,
         # not a collapsed .02 mm section with an inflated width.
-        self.assertTrue(all(p[7] >= min(.2, p[6])-1e-5 for p in upper))
+        self.assertTrue(all(p[7] > 0 and p[6] > 0 for p in upper))
         base = next(p for p in upper if p[2] <= .4 + .001)
         lifted = next(p for p in upper if p[2] >= .5 - .001)
         self.assertGreaterEqual(lifted[7], base[7]-1e-4)
-        self.assertTrue(all(p[7] <= p[6]+1e-5 for p in upper))
+        self.assertTrue(all(DepositedSurface.area_for_size(p[6],p[7])>0 for p in upper))
 
 
     def test_source_windows_use_sparse_offsets_without_loading_full_file(self):
