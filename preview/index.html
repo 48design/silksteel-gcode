@@ -84,6 +84,10 @@ main{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height
 .source-line{display:flex;min-width:max-content;padding:1px 9px;cursor:pointer}
 .source-line:hover{background:#2c3b4c}
 .source-line.active{background:#265072;color:#fff}
+.source-line.playing{background:#614623;color:#fff;box-shadow:inset 3px 0 #ffcb75}
+.source-line.active.playing{background:linear-gradient(90deg,#5b4c35 0%,#265072 100%);box-shadow:inset 3px 0 #ffcb75,inset -3px 0 #83bcff}
+#selectedSource{display:none;align-items:center;justify-content:flex-start;gap:6px;padding:5px 9px;border-radius:6px;background:#265072;color:#d3ebff;border:1px solid #4679a1;text-align:left;font:12px Consolas,monospace}
+#selectedSource.visible{display:flex}
 .source-line .line-num{display:inline-block;width:7ch;min-width:7ch;text-align:right;color:#859bb5;padding-right:10px;user-select:none}
 .source-line.active .line-num{color:#c1e6ff}
 #sourceStatus{font-size:11px;color:#99acc4}
@@ -121,7 +125,7 @@ body.dragging #dropOverlay{display:flex}
 <p class="drop-hint">Oder eine .gcode / .gcode.pp direkt ins Fenster ziehen.</p>
 </div></details>
 <details class="side-group" data-side-section="G-Code-Version" open><summary>G-Code-Version</summary><div class="side-content"><select id="model"></select><div id="stats" class="stats"></div></div></details>
-<details class="side-group" data-side-section="Schichten"><summary>Schichten</summary><div class="side-content"><label for="below">Darunter anzeigen</label><select id="below"><option value="0">Nur aktuelle Schicht</option><option value="3" selected>3 Schichten</option><option value="12">12 Schichten</option><option value="-1">Alle Schichten (GPU-intensiv)</option></select>
+<details class="side-group" data-side-section="Schichten"><summary>Schichten</summary><div class="side-content"><label for="below">Darunter anzeigen</label><select id="below"><option value="0">Nur aktuelle Schicht</option><option value="1" selected>Aktuelle + darunter</option><option value="3">Aktuelle + 3 darunter</option><option value="12">12 Schichten</option><option value="-1">Alle Schichten (GPU-intensiv)</option></select>
 </div></details>
 <details class="side-group" data-side-section="Extrusionstypen"><summary>Extrusionstypen</summary><div class="side-content"><div id="legend"></div><button id="resetColors" type="button">Standardfarben wiederherstellen</button></div></details>
 <details class="side-group" data-side-section="Schnittansicht"><summary>Schnittansicht</summary><div class="side-content">
@@ -158,6 +162,7 @@ body.dragging #dropOverlay{display:flex}
   <div class="source-controls"><label for="sourceLine">Zeile</label><input id="sourceLine" type="number" min="1" step="1" value="1">
     <button id="sourceGo" type="button">Springen</button><button id="sourceCopy" type="button">Kopieren</button>
   </div>
+  <button type="button" id="selectedSource" title="Ausgewählte G-Code-Zeile anzeigen"></button>
   <div id="sourceLines" role="region" aria-label="G-Code-Zeilen"></div>
 </div><div id="help">Ziehen: Drehen · Rechtsklick: Verschieben · Rad: Zoom · Klick: Bahn-Details · Rot: SilkSteel-Z-Hops</div></main>
 </div>
