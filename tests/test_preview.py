@@ -209,6 +209,16 @@ class PreviewGeometryTests(unittest.TestCase):
                 for i in range(0,len(raw),RAW_PACK.size)
             ))
 
+    def test_z_hops_controls_live_with_extrusion_types(self):
+        markup=(Path(__file__).resolve().parents[1] / "preview" / "index.html").read_text(encoding="utf-8")
+        features=markup.index('data-side-section="Extrusionstypen"')
+        display=markup.index('data-side-section="Darstellung"')
+        hop=markup.index('id="showHops"')
+        self.assertLess(features,hop)
+        self.assertLess(hop,display)
+        self.assertEqual(markup.count('id="showHops"'),1)
+        self.assertEqual(markup.count('id="hopColor"'),1)
+
     def test_seamless_gpu_loft_enabled_by_default_with_legacy_debug_toggle(self):
         root=Path(__file__).resolve().parents[1]
         markup=(root/"preview"/"index.html").read_text(encoding="utf-8")
