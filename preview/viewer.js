@@ -534,13 +534,13 @@ function disposeHopGroup(group) {
 function renderTip(mesh,p,fraction,index) {
     const stop=p.a.map((v,i)=>v+(p.b[i]-v)*fraction);
     const attrs=mesh.geometry.attributes;
-    attrs.iStart.array.set(p.a);
+    const first=model.layers[visualLayer],boundary=loftBoundary(
+        joinRead,index,false,first.start,first.start+first.count,$("seamlessJoins").checked);
+    attrs.iStart.array.set(boundary.point);
     attrs.iStop.array.set(stop);
     attrs.iStart.needsUpdate=true;attrs.iStop.needsUpdate=true;
     attrs.iSize.array.set([p.w,p.h]);attrs.iSize.needsUpdate=true;
-    const info=model.layers[visualLayer];
-    const left=loftBoundary(joinRead,index,false,info.start,info.start+info.count,
-        $("seamlessJoins").checked);
+    const left=boundary;
     const dx=p.b[0]-p.a[0],dy=p.b[1]-p.a[1],l=Math.hypot(dx,dy)||1;
     const direction=[-dy/l,dx/l,0];
     attrs.iJoinStart.array.set(left.join);
@@ -588,7 +588,7 @@ function renderFrontierCap(index){
     if(!ring.connected)return;
     const attrs=frontierGeometry.attributes;
     for(const [key,values] of [
-        ["iStart",p.a],["iStop",p.b],["iSize",[p.w,p.h]],
+        ["iStart",p.a],["iStop",ring.point],["iSize",[p.w,p.h]],
         ["iJoinStart",ring.join],["iJoinEnd",ring.join],
         ["iSizeStart",ring.size],["iSizeEnd",ring.size]
     ]){
