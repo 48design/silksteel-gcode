@@ -81,11 +81,14 @@ class DepositedSurface:
         if support is None:
             return desired
         gap = z - support
-        if gap <= 0:
+        # An implausibly tiny gap in this low-resolution XY map is usually a
+        # nearby same-layer crossing, not a real supporting surface. Do not
+        # create metre-wide extrusion ribbons from this false contact.
+        if gap < max(0.075, nominal * 0.45):
             return desired
-        # Nozzle top remains at Z. Downward stretch stops at the actual
-        # support; subsequent material deformation increases bead width.
-        return min(desired, max(0.04, gap))
+        # Nozzle top remains at Z. Stretch stops exactly at the support;
+        # further compression increases width, not the deposited volume.
+        return min(desired, gap)
 
     def sections(
         self, start: tuple[float, float, float], end: tuple[float, float, float],
