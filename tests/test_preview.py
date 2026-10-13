@@ -523,6 +523,30 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreater(field.width_for_area(area,.20),.20)
         self.assertLess(field.width_for_area(area,.60),.60)
 
+    def test_converter_nonplanar_ascent_descent_same_extrusion_profile(self):
+        # The previous implementation deposited each G1 immediately. On an
+        # upward ramp the preceding lower segment became "substrate", causing
+        # wide triangular spikes; a reversed ramp remained narrow and smooth.
+        def build(reverse):
+            points=[(i*.5,0.,1.0+i*.12) for i in range(5)]
+            if reverse:
+                points.reverse()
+            lines=["; layer_height = 0.2", ";LAYER_CHANGE", ";Z:0.8",
+                   ";HEIGHT:0.2", ";TYPE:Internal infill", "G90", "M83",
+                   f"G0 X{points[0][0]:.3f} Y0 Z{points[0][2]:.3f} F1800"]
+            lines += [f"G1 X{x:.3f} Y0 Z{z:.3f} E0.0078 F1800"
+                      for x,_,z in points[1:]]
+            meta,rows=self.parse(lines)
+            self.assertEqual(meta["count"],4)
+            self.assertEqual({int(r[8]) for r in rows},{4})
+            return [(r[6],r[7]) for r in rows]
+        rising=build(False)
+        falling=build(True)
+        for (uw,uh),(dw,dh) in zip(rising,falling):
+            self.assertAlmostEqual(uw,dw,places=4)
+            self.assertAlmostEqual(uh,dh,places=4)
+            self.assertLess(uw,uh)  # free rounded rectangle grows downward
+
     def test_contiguous_ascent_does_not_support_itself_or_differ_from_descent(self):
         from silksteel_preview_surface import DepositedSurface
         area = .0365
