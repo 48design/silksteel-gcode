@@ -608,7 +608,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 elif path in ("/", "/viewer.js", "/extrusion_joins.js",
                               "/diagnostics.js", "/comparison.js", "/section.js",
                               "/bead_junctions.js", "/gcode_inspector.js",
-                              "/bead_profile.js", "/source_timeline.js"):
+                              "/bead_profile.js", "/source_timeline.js", "/loft_geometry.js"):
                     target = assets / ("index.html" if path == "/" else path.lstrip("/"))
                     payload = target.read_bytes()
                     mime = ("text/html; charset=utf-8" if path == "/"
