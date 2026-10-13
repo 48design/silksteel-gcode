@@ -159,7 +159,7 @@ $("hopColor").addEventListener("change",savePalette);
 
 // Unit cross section consists of TWO semicircles and horizontal top/bottom.
 // Width is NOT applied by scaling a circle: shader keeps the end radii = h/2.
-function sectionMesh() {
+function sectionMesh(steps=4,mode="mantle"){
     const vertices=[],indices=[];
     const append=(side,top,cos,sin,end,cap)=>{
         vertices.push(side,top,cos,sin,end,cap);
@@ -168,45 +168,53 @@ function sectionMesh() {
     const corners=[];
     for(const [sx,sy,from] of [[1,1,0],[-1,1,Math.PI/2],
                                  [-1,-1,Math.PI],[1,-1,3*Math.PI/2]]){
-        for(let step=0;step<=5;step++){
-            const theta=from+step*Math.PI/10;
-            corners.push([sx,sy,Math.cos(theta),Math.sin(theta)]);
+        for(let step=0;step<=steps;step++){
+            const angle=from+step*Math.PI/(2*steps);
+            corners.push([sx,sy,Math.cos(angle),Math.sin(angle)]);
         }
     }
-    const rings=[[],[]],caps=[[],[]],n=corners.length;
-    for(let end=0;end<2;end++){
-        for(const [side,top,cos,sin] of corners){
-            rings[end].push(append(side,top,cos,sin,end,0));
-            caps[end].push(append(side,top,cos,sin,end,1));
-        }
-    }
-    for(let i=0;i<n;i++){
-        const j=(i+1)%n;
-        indices.push(rings[0][i],rings[1][i],rings[0][j],
-                     rings[1][i],rings[1][j],rings[0][j]);
-    }
-    for(let end=0;end<2;end++){
-        const center=append(0,0,0,0,end,2);
+    const n=corners.length,rings=[];
+    const makeRing=(end,cap)=>{
+        const ring=[];
+        for(const [side,top,cos,sin] of corners)
+            ring.push(append(side,top,cos,sin,end,cap));
+        return ring;
+    };
+    if(mode!=="cap"){
+        rings.push(makeRing(0,0),makeRing(1,0));
         for(let i=0;i<n;i++){
             const j=(i+1)%n;
-            if(end===0)indices.push(center,caps[end][i],caps[end][j]);
-            else indices.push(center,caps[end][j],caps[end][i]);
+            indices.push(rings[0][i],rings[1][i],rings[0][j],
+                         rings[1][i],rings[1][j],rings[0][j]);
+        }
+    }
+    if(mode!=="mantle"){
+        for(const end of mode==="cap"?[0]:[0,1]){
+            const ring=makeRing(end,1),center=append(0,0,0,0,end,2);
+            for(let i=0;i<n;i++){
+                const j=(i+1)%n;
+                if(end===0)indices.push(center,ring[i],ring[j]);
+                else indices.push(center,ring[j],ring[i]);
+            }
         }
     }
     const geometry=new THREE.InstancedBufferGeometry();
-    const data=new Float32Array(vertices);
+    const coords=new Float32Array(vertices);
     for(let attr=0;attr<6;attr++){
-        const buf=new Float32Array(data.length/6);
-        for(let i=0;i<buf.length;i++)buf[i]=data[i*6+attr];
+        if(mode==="cap"&&attr===4)continue;
+        const values=new Float32Array(coords.length/6);
+        for(let i=0;i<values.length;i++)values[i]=coords[i*6+attr];
         geometry.setAttribute(
             ["aSide","aTop","aCos","aSin","aEnd","aCap"][attr],
-            new THREE.Float32BufferAttribute(buf,1)
+            new THREE.Float32BufferAttribute(values,1)
         );
     }
     geometry.setIndex(indices);
     return geometry;
 }
-const base = sectionMesh();
+const base=sectionMesh(4,"mantle");
+const capBase=sectionMesh(4,"cap");
+const headBase=sectionMesh(4,"closed");
 const vertexShader = `
 precision highp float;
 attribute float aSide, aTop, aCos, aSin, aEnd, aCap;
@@ -242,6 +250,9 @@ void main(){
   #include <clipping_planes_vertex>
 }
 `;
+// The cap uses the same transformed ring as its neighboring loft mantle.
+// iCapEnd selects the start/end ring per cap INSTANCE, not per base vertex.
+const capVertexShader=vertexShader.replaceAll("aEnd","iCapEnd");
 const fragmentShader = `
 precision highp float;
 uniform vec3 uColor;
@@ -481,7 +492,7 @@ function renderTip(mesh, p, fraction) {
     }
     mesh.visible=true;
 }
-const headGeometry=base.clone();
+const headGeometry=headBase.clone();
 headGeometry.setAttribute("iJoinStart",new THREE.InstancedBufferAttribute(new Float32Array(3),3));
 headGeometry.setAttribute("iJoinEnd",new THREE.InstancedBufferAttribute(new Float32Array(3),3));
 headGeometry.setAttribute("iSizeStart",new THREE.InstancedBufferAttribute(new Float32Array(2),2));
