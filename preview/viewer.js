@@ -425,10 +425,15 @@ function bindLoftAttributes(geometry,plan,capItems=null){
 function createLayer(index) {
     const info=model.layers[index],group=new THREE.Group();
     const first=info.start,last=first+info.count;
-    const chunks=spatialChunks(first,last,joinRead,40,6000);
+    const recordCache=new Array(info.count);
+    const cachedRead=id=>{
+        if(id<first||id>=last)return joinRead(id);
+        return recordCache[id-first] ||= readSegment(id);
+    };
+    const chunks=spatialChunks(first,last,cachedRead,40,6000);
     const seamless=$("seamlessJoins").checked;
     for(const chunk of chunks){
-        const plan=planLoft(chunk.indices,joinRead,first,last,seamless);
+        const plan=planLoft(chunk.indices,cachedRead,first,last,seamless);
         const geometry=base.clone();
         bindLoftAttributes(geometry,plan);
         const mesh=new THREE.Mesh(geometry,newMaterial(chunk.role,false));
@@ -525,9 +530,6 @@ function renderFrontierCap(index){
     const ring=loftBoundary(joinRead,index,true,layer.start,layer.start+layer.count,
         $("seamlessJoins").checked);
     if(!ring.connected)return;
-    if(index<model.layers[visualLayer].start-
-        Math.max(0,Number($("below").value))*model.layers[visualLayer].count &&
-       Number($("below").value)>=0)return;
     const attrs=frontierGeometry.attributes;
     for(const [key,values] of [
         ["iStart",p.a],["iStop",p.b],["iSize",[p.w,p.h]],
@@ -539,7 +541,7 @@ function renderFrontierCap(index){
     }
     frontierCap.material.uniforms.uColor.value.copy(rgb[p.role]);
     frontierCap.material.uniforms.uAlpha.value=
-        layer.number!==model.layers[visualLayer].number && $("ghost").checked?.19:1;
+        (layer.number!==model.layers[visualLayer].number && $("ghost").checked)?0.19:1;
     frontierCap.material.transparent=frontierCap.material.uniforms.uAlpha.value<1;
     frontierCap.material.depthWrite=!frontierCap.material.transparent;
     frontierCap.visible=true;
