@@ -335,7 +335,7 @@ class PreviewGeometryTests(unittest.TestCase):
             self.assertEqual(len(payload),meta["moveCount"]*MOVE_PACK.size)
             records=[MOVE_PACK.unpack_from(payload,i)
                      for i in range(0,len(payload),MOVE_PACK.size)]
-            self.assertEqual([p[2] for p in records],[7,8,9,10,11,14,15])
+            self.assertEqual([p[2] for p in records],[7,8,9,10,11,15,16])
             self.assertTrue(all(start<end for start,end,_ in records))
             self.assertTrue(all(records[i][1]<=records[i+1][0]+.001
                                 for i in range(len(records)-1)))
@@ -344,7 +344,7 @@ class PreviewGeometryTests(unittest.TestCase):
             self.assertEqual(meta["layers"][1]["moveStart"],5)
             self.assertEqual(meta["layers"][1]["moveCount"],2)
             self.assertEqual(records[4][2],11)
-            self.assertEqual(records[-1][2],15)
+            self.assertEqual(records[-1][2],16)
             self.assertAlmostEqual(records[3][1]-records[3][0],.5,places=4)
 
     def test_completed_layer_browsing_and_dual_source_highlighting(self):
