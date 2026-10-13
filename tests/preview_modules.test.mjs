@@ -5,8 +5,14 @@ import {dirname,join} from "node:path";
 
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
 async function load(file){
-    const code=readFileSync(join(root,"preview",file));
-    return import("data:text/javascript;base64,"+code.toString("base64"));
+    let code=readFileSync(join(root,"preview",file),"utf-8");
+    // Data-URL ES modules cannot resolve relative imports. Inline the shared
+    // profile module URI for isolated Node tests without package.json changes.
+    const profile=readFileSync(join(root,"preview","bead_profile.js"),"utf-8");
+    const profileUri="data:text/javascript;base64,"+
+        Buffer.from(profile).toString("base64");
+    code=code.replaceAll('"./bead_profile.js"',JSON.stringify(profileUri));
+    return import("data:text/javascript;base64,"+Buffer.from(code).toString("base64"));
 }
 const {computeJoin,joinContinuity,buildJoinAttributes,sharedSplitSection}=await load("extrusion_joins.js");
 const {makeJunctionGeometry,junctionVertexShader}=await load("bead_junctions.js");
