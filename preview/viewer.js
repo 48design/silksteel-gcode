@@ -215,6 +215,10 @@ function sectionMesh(steps=4,mode="mantle"){
 const base=sectionMesh(4,"mantle");
 const capBase=sectionMesh(4,"cap");
 const headBase=sectionMesh(4,"closed");
+// Low/high profile templates only contain shared vertices/indices. Per-instance
+// attributes are reused across LODs: no duplicate path data on the GPU.
+const mantleLods=[sectionMesh(2,"mantle"),base,sectionMesh(7,"mantle")];
+const capLods=[sectionMesh(2,"cap"),capBase,sectionMesh(7,"cap")];
 const vertexShader = `
 precision highp float;
 attribute float aSide, aTop, aCos, aSin, aEnd, aCap;
@@ -279,7 +283,11 @@ const newMaterial = (role, faded, geometryShader=vertexShader) => new THREE.Shad
 });
 function disposeGroup(group) {
     group.traverse(o => {
-        if(o.isMesh){o.geometry.dispose();o.material.dispose();}
+        if(o.isMesh){
+            for(const geometry of new Set(o.userData.lodVariants?.filter(Boolean)||
+                [o.geometry]))geometry.dispose();
+            o.material.dispose();
+        }
     });
 }
 function forgetLayers() {
@@ -422,6 +430,47 @@ function bindLoftAttributes(geometry,plan,capItems=null){
     }
     boundLoft(geometry,plan.bounds);
 }
+function makeLoftLod(mesh,level){
+    const templates=mesh.userData.cap?capLods:mantleLods;
+    const geometry=templates[level].clone();
+    for(const [name,attribute] of Object.entries(mesh.geometry.attributes)){
+        if(name.startsWith("i"))geometry.setAttribute(name,attribute);
+    }
+    geometry.instanceCount=mesh.geometry.instanceCount;
+    geometry.boundingSphere=mesh.geometry.boundingSphere?.clone()||null;
+    return geometry;
+}
+function updateLoftLods(){
+    if(!model||!data)return;
+    const height=renderer.domElement.clientHeight;
+    if(!height)return;
+    const f=height/(2*Math.tan(camera.fov*Math.PI/360));
+    for(const group of activeLayers){
+        for(const mesh of group.children){
+            if(!mesh.userData.lodVariants||!mesh.visible)continue;
+            const bounds=mesh.geometry.boundingSphere;
+            if(!bounds)continue;
+            const distance=Math.max(camera.near,
+                camera.position.distanceTo(bounds.center));
+            const pixelWidth=f*mesh.userData.lodWidth/distance;
+            // Hysteresis prevents constant buffer/VAO churn at thresholds.
+            const previous=mesh.userData.lodLevel;
+            const next=previous===0
+                ? (pixelWidth>1.7?1:0)
+                : previous===2?(pixelWidth<6.2?1:2)
+                : pixelWidth<1.1?0:pixelWidth>8.0?2:1;
+            if(next===previous)continue;
+            let variant=mesh.userData.lodVariants[next];
+            if(!variant){
+                variant=makeLoftLod(mesh,next);
+                mesh.userData.lodVariants[next]=variant;
+            }
+            variant.instanceCount=mesh.geometry.instanceCount;
+            mesh.geometry=variant;
+            mesh.userData.lodLevel=next;
+        }
+    }
+}
 function createLayer(index) {
     const info=model.layers[index],group=new THREE.Group();
     const first=info.start,last=first+info.count;
@@ -440,6 +489,10 @@ function createLayer(index) {
         mesh.frustumCulled=true;
         mesh.userData.role=chunk.role;
         mesh.userData.indices=Uint32Array.from(chunk.indices);
+        mesh.userData.lodVariants=[null,geometry,null];
+        mesh.userData.lodLevel=1;
+        mesh.userData.lodWidth=plan.sizes.length?
+            plan.sizes[Math.floor((plan.sizes.length/2)*.5)*2]:.45;
         group.add(mesh);
         if(plan.caps.length){
             const capGeometry=capBase.clone();
@@ -449,6 +502,9 @@ function createLayer(index) {
             caps.userData.role=chunk.role;
             caps.userData.cap=true;
             caps.userData.indices=Uint32Array.from(plan.caps.map(item=>item.index));
+            caps.userData.lodVariants=[null,capGeometry,null];
+            caps.userData.lodLevel=1;
+            caps.userData.lodWidth=mesh.userData.lodWidth;
             group.add(caps);
         }
     }
@@ -1505,8 +1561,13 @@ const timelineResize=new ResizeObserver(()=>{
     if(model)updateTimelineMarkers();
 });
 timelineResize.observe($("timelineMarkers"));
+let lastLodUpdate=0;
 renderer.setAnimationLoop(()=>{
     const now=performance.now();
+    if(now-lastLodUpdate>200){
+        updateLoftLods();
+        lastLodUpdate=now;
+    }
     if(playing&&model&&data){
         if(previousFrame){
             const [from,to]=activeRange();
