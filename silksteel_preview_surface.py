@@ -20,6 +20,36 @@ class DepositedSurface:
         self.inv = 1.0 / resolution
         self.sample_spacing = sample_spacing
         self._tops: dict[tuple[int, int], tuple[float, float]] = {}
+        # The active, connected extrusion is NOT part of its own substrate.
+        # Commit only when the strand ends (travel, retraction, feature or
+        # layer change). Otherwise ascending non-planar G1 moves see the
+        # previous lower G1 as support, while descending moves do not.
+        self._pending: dict[tuple[int, int], float] = {}
+        self._strand_end: tuple[float, float, float] | None = None
+        self._strand_role: int | None = None
+
+    def begin_strand(self, start: tuple[float, float, float], role: int) -> None:
+        if (self._strand_end is None or role != self._strand_role or
+                math.dist(start, self._strand_end) > 0.012):
+            self.finish_strand()
+        self._strand_end = start
+        self._strand_role = role
+
+    def advance_strand(self, end: tuple[float, float, float]) -> None:
+        if self._strand_end is not None:
+            self._strand_end = end
+
+    def finish_strand(self) -> None:
+        """Expose this strand as support only to later, distinct extrusions."""
+        for key, z in self._pending.items():
+            high, low = self._tops.get(key, (-math.inf, -math.inf))
+            if z > high + 0.025:
+                self._tops[key] = (z, high)
+            elif z < high - 0.025 and z > low + 0.025:
+                self._tops[key] = (high, z)
+        self._pending.clear()
+        self._strand_end = None
+        self._strand_role = None
 
     @staticmethod
     def area_for_size(width: float, height: float) -> float:
@@ -197,8 +227,11 @@ class DepositedSurface:
                                 ((gy + 0.5) * self.resolution - y) ** 2 > rr):
                             continue
                         key = (gx, gy)
-                        high, low = self._tops.get(key, (-math.inf, -math.inf))
-                        if z > high + 0.025:
-                            self._tops[key] = z, high
-                        elif z < high - 0.025 and z > low + 0.025:
-                            self._tops[key] = high, z
+                        if self._strand_end is not None:
+                            self._pending[key] = max(self._pending.get(key, -math.inf), z)
+                        else:
+                            high, low = self._tops.get(key, (-math.inf, -math.inf))
+                            if z > high + 0.025:
+                                self._tops[key] = z, high
+                            elif z < high - 0.025 and z > low + 0.025:
+                                self._tops[key] = high, z
