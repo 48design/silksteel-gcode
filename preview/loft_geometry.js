@@ -1,4 +1,5 @@
-import {computeJoin,sharedSplitSection,joinContinuity} from "./extrusion_joins.js";
+import {joinContinuity} from "./extrusion_joins.js";
+import {profileArea,profileWidth} from "./bead_profile.js";
 
 // A GPU loft is a sequence of two-ring mantle instances. Adjacent instances
 // must use the EXACT same ring transform, including at G1 subdivisions.
@@ -20,18 +21,30 @@ function boundary(read,id,atEnd,first,last,connected){
     // Snap both GPU rings to the same midpoint; otherwise an otherwise
     // connected loft can contain tiny cracks despite identical normals.
     const point=pair.a.b.map((v,i)=>(v+pair.b.a[i])*.5);
-    // Same-line support subdivision must have a shared cross section even
-    // if the source width/height changes too much for a normal miter.
-    const split=sharedSplitSection(read,id,atEnd);
-    if(split){
-        const n1=normalOf(pair.a),n2=normalOf(pair.b);
-        const sx=n1[0]+n2[0],sy=n1[1]+n2[1],len=Math.hypot(sx,sy);
-        if(len<1e-5)return local;
-        return {join:[sx/len,sy/len,0],size:split,point,connected:true};
-    }
-    const miter=computeJoin(read,id,p.role,atEnd);
-    if(!miter)return local;
-    return {join:[...miter.miter,0],size:miter.size,point,connected:true};
+    // A material strand remains ONE loft even if its contact height changes
+    // between G1 commands. The old computeJoin() rejected width/height deltas
+    // and generated a pair of caps; this produced the alternating triangles
+    // around consecutive Smoothificator commands 727881-727883.
+    if(pair.dot < -0.35)return local; // True near-reversal, not a normal turn.
+    const n1=normalOf(pair.a),n2=normalOf(pair.b);
+    const sx=n1[0]+n2[0],sy=n1[1]+n2[1],len=Math.hypot(sx,sy);
+    if(len<1e-5)return local;
+    // Share exactly the same cross-sectional area and dimensions on BOTH
+    // sides. Geometric-mean height avoids a drastic free/contact leap.
+    const h=Math.sqrt(Math.max(1e-9,pair.a.h*pair.b.h));
+    const area=(profileArea(pair.a.w,pair.a.h)+
+                profileArea(pair.b.w,pair.b.h))*.5;
+    const size=[profileWidth(area,h),h];
+    const tangentCos=Math.max(0.001,(sx*n2[0]+sy*n2[1])/len);
+    const ideal=1/tangentCos;
+    // At sharp bends a full geometric miter can form enormous wings.
+    // Limit lateral excursion to 25% of the shorter adjacent segment.
+    const reach=.25*Math.min(pair.l1,pair.l2);
+    const halfWidth=Math.max(1e-6,size[0]*.5);
+    const maxScale=Math.sqrt(1+(reach/halfWidth)**2);
+    const scale=Math.min(ideal,1.42,maxScale);
+    return {join:[sx/len*scale,sy/len*scale,0],
+        size,point,connected:true};
 }
 export function loftBoundary(read,id,atEnd,first,last,seamless=true){
     return boundary(read,id,atEnd,first,last,seamless);
