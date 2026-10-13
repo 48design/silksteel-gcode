@@ -475,6 +475,7 @@ function updateLoftLods(){
     }
 }
 function createLayer(index) {
+    const layerStarted=performance.now();
     const info=model.layers[index],group=new THREE.Group();
     const first=info.start,last=first+info.count;
     const recordCache=new Array(info.count);
@@ -512,6 +513,8 @@ function createLayer(index) {
         }
     }
     group.userData.layer=index;
+    const ms=performance.now()-layerStarted;
+    if(ms>40)console.debug(`[Viewer] Layer ${index}: ${info.count} segments, ${group.children.length} meshes, ${ms.toFixed(1)}ms`);
     return group;
 }
 function getLayer(index) {
@@ -1351,14 +1354,17 @@ function fit() {
     grid.scale.set(Math.max(1,size/300),1,Math.max(1,size/300));
 }
 async function loadModel(index) {
+    const loadStarted=performance.now();
     forgetLayers();
     model=layout.models[index];
     $("progress").hidden=false;
     $("progress").textContent="Lade "+model.name+" · "+model.count.toLocaleString("de-DE")+" Stränge…";
     const [response,hopResponse]=await Promise.all([fetch(model.url),fetch(model.hopUrl)]);
     if(!response.ok||!hopResponse.ok)throw Error("HTTP "+response.status+" / "+hopResponse.status);
-    data=new DataView(await response.arrayBuffer());
-    hopData=new DataView(await hopResponse.arrayBuffer());
+    const buffers=await Promise.all([response.arrayBuffer(),hopResponse.arrayBuffer()]);
+    data=new DataView(buffers[0]);
+    hopData=new DataView(buffers[1]);
+    const transferMs=performance.now()-loadStarted;
     if(data.byteLength!==model.count*SEGMENT_SIZE || hopData.byteLength!==model.hopCount*HOP_SIZE){
         throw new Error("G-Code-Vorschau: Ungültiges Binärformat oder Segmentgröße");
     }
@@ -1375,6 +1381,7 @@ async function loadModel(index) {
     fit();
     refreshCut();
     seek(model.duration);
+    console.info(`[Viewer] ${model.name}: transfer ${transferMs.toFixed(1)}ms; initial geometry ${(performance.now()-loadStarted-transferMs).toFixed(1)}ms; total ${(performance.now()-loadStarted).toFixed(1)}ms`);
     $("diagnosticsSummary").textContent="Diagnose bei Bedarf aktivieren";
     if($("diagnosticsToggle").checked)showDiagnostics();
     if($("compareToggle").checked)enableComparison();
