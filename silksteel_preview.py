@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -447,6 +448,75 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             "ignored_arcs": ignored_arcs}
 
 
+PREVIEW_CACHE_VERSION = 2
+
+
+def convert_cached(source: Path, destination: Path, progress=None,
+                   source_offsets: list[int] | None = None) -> dict:
+    """Reuse the exact viewer binary representation for unchanged G-code files."""
+    stat = source.stat()
+    identity = f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{PREVIEW_CACHE_VERSION}"
+    key = hashlib.sha256(os.fsencode(identity)).hexdigest()
+    base = (Path(os.environ["LOCALAPPDATA"]) if os.environ.get("LOCALAPPDATA")
+            else Path.home() / ".cache") / "SilkSteel" / "preview-cache"
+    entry = base / key
+    suffixes = (".bin", ".hops.bin", ".raw.bin", ".moves.bin")
+
+    def paths(root: Path) -> list[Path]:
+        return [root / ("data" + suffix) for suffix in suffixes]
+
+    started = time.perf_counter()
+    try:
+        metadata = json.loads((entry / "meta.json").read_text(encoding="utf-8"))
+        cached = paths(entry)
+        if any(not p.is_file() for p in cached):
+            raise OSError("Incomplete viewer cache")
+        for src, suffix in zip(cached, suffixes):
+            target = destination if suffix == ".bin" else destination.with_suffix(suffix)
+            try:
+                os.link(src, target)
+            except OSError:
+                shutil.copyfile(src, target)
+        if source_offsets is not None:
+            source_offsets.extend(metadata["offsets"])
+        print(f"SilkSteel Preview: cache HIT ({time.perf_counter()-started:.2f}s)", flush=True)
+        if progress:
+            progress(0, 100)
+        return metadata["model"]
+    except (OSError, ValueError, KeyError, TypeError):
+        for suffix in suffixes:
+            (destination if suffix == ".bin" else destination.with_suffix(suffix)).unlink(missing_ok=True)
+
+    base.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=key[:12] + "-", dir=base))
+    offsets: list[int] = []
+    try:
+        model = convert(source, paths(temporary)[0],
+                        hop_destination=paths(temporary)[1],
+                        raw_destination=paths(temporary)[2],
+                        move_destination=paths(temporary)[3],
+                        progress=progress, source_offsets=offsets)
+        (temporary / "meta.json").write_text(
+            json.dumps({"model": model, "offsets": offsets}), encoding="utf-8")
+        try:
+            temporary.rename(entry)
+        except FileExistsError:
+            pass
+        for src, suffix in zip(paths(temporary if temporary.exists() else entry), suffixes):
+            target = destination if suffix == ".bin" else destination.with_suffix(suffix)
+            try:
+                os.link(src, target)
+            except OSError:
+                shutil.copyfile(src, target)
+        if source_offsets is not None:
+            source_offsets.extend(offsets)
+        print(f"SilkSteel Preview: converted in {time.perf_counter()-started:.2f}s", flush=True)
+        return model
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
+
+
 def source_context(source: Path, offsets: list[int], line: int,
                    context: int = 10) -> list[dict]:
     """Read a small numbered source window without loading a giant G-code file."""
@@ -667,7 +737,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     state["lines"] = lines
                     state["progress"] = percent
                 offsets = []
-                model = convert(upload, target, progress=update, source_offsets=offsets)
+                model = convert_cached(upload, target, progress=update, source_offsets=offsets)
                 model["name"] = display
                 model["filename"] = display
                 model["url"] = "/" + target.name
@@ -701,7 +771,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
 
                     target = root / (label.lower() + ".bin")
                     offsets = []
-                    model = convert(source, target, progress=update, source_offsets=offsets)
+                    model = convert_cached(source, target, progress=update, source_offsets=offsets)
                     model["name"], model["url"] = label, "/" + target.name
                     model["filename"] = display
                     model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
