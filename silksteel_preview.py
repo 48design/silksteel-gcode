@@ -141,6 +141,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
         layer = {"number": number, "start": count, "count": 0,
                  "rawStart": raw_count, "rawCount": 0,
                  "hopStart": hop_count, "hopCount": 0,
+                 "moveStart": move_count, "moveCount": 0,
                  "z": layer_z, "height": layer_height if number else (first_height or layer_height),
                  "timeStart": elapsed, "timeEnd": elapsed}
         layers.append(layer)
@@ -419,6 +420,9 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     for index, item in enumerate(layers):
         item["timeEnd"] = (layers[index + 1]["timeStart"]
                            if index + 1 < len(layers) else elapsed)
+        item["moveCount"] = ((layers[index + 1]["moveStart"]
+                              if index + 1 < len(layers) else move_count)
+                             - item["moveStart"])
     if not explicit_layers and layers and layers[0]["number"] == -1:
         layers[0]["number"] = 0
     return {"filename": source.name, "url": "", "count": count, "hopCount": hop_count,
