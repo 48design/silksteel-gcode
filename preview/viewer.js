@@ -2,6 +2,7 @@ import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 import {buildJoinAttributes,sharedSplitSection} from "./extrusion_joins.js";
 import {makeJunctionGeometry,junctionVertexShader} from "./bead_junctions.js";
+import {profileArea} from "./bead_profile.js";
 import {nearestSourceRecord,rawClass} from "./gcode_inspector.js";
 import {analysePrint} from "./diagnostics.js";
 import {closestLayer, compareLayerVolumes} from "./comparison.js";
@@ -1294,10 +1295,10 @@ function selectSegment(event) {
     if(isRaw){
         body.textContent=rawClass(pick.kind)+" · Länge "+length.toFixed(2)+" mm";
     }else{
-        const area=pick.h*(pick.w-pick.h)+Math.PI*pick.h*pick.h/4;
+        const area=profileArea(pick.w,pick.h);
         const extruded=area*length/(Math.PI*(model.filament/2)**2);
-        const freeDiameter=Math.sqrt(4*area/Math.PI);
-        const form=pick.h>=freeDiameter*.985?"rund / frei":"abgeflacht / aufliegend";
+        const form=pick.h>pick.w*1.06?"vertikal gedehnt":
+            pick.w>pick.h*1.06?"abgeflacht / aufliegend":"annähernd quadratisch";
         body.textContent="Profil "+form+" · Breite "+pick.w.toFixed(3)+" mm · Höhe "+
             pick.h.toFixed(3)+" mm · Länge "+length.toFixed(2)+" mm · ΔE "+
             extruded.toFixed(5)+" mm";
