@@ -1,3 +1,4 @@
+import {profileArea,profileWidth} from "./bead_profile.js";
 // Shared-radius bead joins. Every extrusion remains closed at both ends,
 // including when its successor has not yet been printed by the playback.
 export function joinContinuity(read,index,atEnd) {
@@ -24,9 +25,8 @@ export function sharedSplitSection(read, index, atEnd) {
     const a=match.a,b=match.b;
     const h=(a.h+b.h)*.5;
     if(!(h>0))return null;
-    const k=1-Math.PI/4;
-    const area=((a.w*a.h-k*a.h*a.h)+(b.w*b.h-k*b.h*b.h))*.5;
-    return [Math.max(h,area/h+k*h),h];
+    const area=(profileArea(a.w,a.h)+profileArea(b.w,b.h))*.5;
+    return [profileWidth(area,h),h];
 }
 
 export function computeJoin(read,index,role,atEnd) {
