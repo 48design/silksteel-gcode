@@ -34,9 +34,9 @@ export function analysePrint(data,hops,layers,{maxPerType=40}={}) {
            length>Math.max(.1, nominal)){
             report("Z-Sprung",`Zeile ${line}: ΔZ ${(b[2]-a[2]).toFixed(2)} mm bei Extrusion`,i,center,time,2);
         }
-        if(Math.abs(w-h)<Math.max(.007,h*.015) && role!==6 &&
+        if(h>w*1.2 && role!==6 &&
            center[2]>nominal+.12 && length>1){
-            report("Freitragend",`Zeile ${line}: angenähert runder Strang ohne klare Auflage`,i,center,time);
+            report("Freitragend",`Zeile ${line}: vertikal gedehnter Strang ohne klare Auflage`,i,center,time);
         }
         if(previous && previous.role===role && distance(previous.b,a)<.02 &&
            Math.min(w,previous.w)>0 && Math.max(w,previous.w)/Math.min(w,previous.w)>2.3){
