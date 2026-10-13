@@ -108,6 +108,38 @@ const joined=planLoft([0,1],i=>corner[i]||null,0,2,true);
 assert.equal(joined.caps.length,2);
 assert(Math.abs(joined.joinsEnd[0]-joined.joinsStart[3])<1e-6);
 assert(Math.abs(joined.joinsEnd[1]-joined.joinsStart[4])<1e-6);
+// Real consecutive Smoothificator moves 727881–727883 have nearly
+// identical E-per-mm. A noisy supporting raster may give one neighboring
+// G1 a taller profile: this MUST NOT break continuity or create two caps.
+const smooth=[
+    {...bead([82.872,104.544,25.773],[82.236,104.324,25.773],1,0,.017),line:727881,w:.20,h:.24},
+    {...bead([82.236,104.324,25.773],[81.58,104.178,25.773],1,.017,.034),line:727882,w:.39,h:.0933},
+    {...bead([81.58,104.178,25.773],[80.912,104.108,25.773],1,.034,.051),line:727883,w:.20,h:.24}
+];
+const smoothRead=i=>smooth[i]||null;
+const smoothLoft=planLoft([0,1,2],smoothRead,0,3,true);
+assert.deepEqual(smoothLoft.caps.map(c=>[c.index,c.end]),[[0,0],[2,1]]);
+for(let i=0;i<2;i++){
+    for(let d=0;d<3;d++){
+        assert.equal(smoothLoft.joinsEnd[i*3+d],smoothLoft.joinsStart[(i+1)*3+d]);
+        assert.equal(smoothLoft.ends[i*3+d],smoothLoft.starts[(i+1)*3+d]);
+    }
+    for(let d=0;d<2;d++)
+        assert.equal(smoothLoft.sizesEnd[i*2+d],smoothLoft.sizesStart[(i+1)*2+d]);
+}
+// Each new shared profile has an area matching the two G-code profiles'
+// average, not a spike derived from only the wider side.
+const expectedSmoothArea=(profileArea(smooth[0].w,smooth[0].h)+
+    profileArea(smooth[1].w,smooth[1].h))/2;
+assert(Math.abs(profileArea(smoothLoft.sizesEnd[0],smoothLoft.sizesEnd[1])-
+    expectedSmoothArea)<1e-6);
+const curvature=[
+    {...bead([0,0,.3],[.20,0,.3],4,0,.01),w:.55,h:.12,line:1},
+    {...bead([.20,0,.3],[.20,.22,.3],4,.01,.02),w:.55,h:.12,line:2}
+];
+const turn=planLoft([0,1],i=>curvature[i]||null,0,2,true);
+assert.equal(turn.caps.length,2);
+assert(Math.hypot(turn.joinsEnd[0],turn.joinsEnd[1])<=1.42+1e-5);
 const reverse=[
     {...bead([0,0,.2],[10,0,.2],0,0,1),line:5},
     {...bead([10,0,.2],[0,0,.2],0,1,2),line:6}
