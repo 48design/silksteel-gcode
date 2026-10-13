@@ -67,7 +67,9 @@ export function planLoft(indices,read,first,last,seamless=true){
             left.size[1],right.size[1]);
     }
     return {starts,ends,sizes,joinsStart,joinsEnd,sizesStart,sizesEnd,caps,
-        bounds:n?{lo,hi,padding:padding*.65+.1}:null};
+        // The bead extends a full h BELOW nozzle Z, not h/2.
+        // Never shrink this padding: optimistic spheres may cull valid strands.
+        bounds:n?{lo,hi,padding:padding+.08}:null};
 }
 // Cells are deliberately 3D-position based, not sequenced by G-code role:
 // adjacent segments remain topologically joined even across chunk boundaries.
