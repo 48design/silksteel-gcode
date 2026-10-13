@@ -1,4 +1,5 @@
-// Approximate cross-section contours of deposited stadium beads.
+import {CORNER_FRACTION,profileOutline} from "./bead_profile.js";
+// Approximate cross-section contours of rounded-rectangle beads.
 // The GPU clipping plane reveals hidden geometry; these lines outline its cut.
 function bead(record,o) {
     const a=[0,4,8].map(d=>record.getFloat32(o+d,true));
@@ -19,16 +20,24 @@ export function buildCutContours(data,layers,axis,position,finished,{maxSegments
         const len=Math.hypot(dx,dy);
         if(len<.001)continue;
         if(axisIndex===2){
-            const center=(p.a[2]+p.b[2])*.5-p.h*.5;
-            const dz=position-center;
-            if(Math.abs(dz)>p.h*.5)continue;
-            const half=Math.max(0,(p.w-p.h)*.5+Math.sqrt(Math.max(0,(p.h*.5)**2-dz**2)));
-            const px=-dy/len*half,py=dx/len*half;
+            // The upper surface follows G-code Z, so a horizontal cut must
+            // evaluate the rounded-rectangle width at each endpoint.
+            const halfWidth=z=>{
+                const depth=z-position,r=CORNER_FRACTION*Math.min(p.w,p.h);
+                if(depth<0||depth>p.h)return 0;
+                const d=depth<r ? r-depth :
+                    depth>p.h-r ? depth-(p.h-r) : 0;
+                return p.w*.5-r+Math.sqrt(Math.max(0,r*r-d*d));
+            };
+            const left=halfWidth(p.a[2]),right=halfWidth(p.b[2]);
+            if(left<=0&&right<=0)continue;
+            const pa=[-dy/len*left,dx/len*left];
+            const pb=[-dy/len*right,dx/len*right];
             const verts=[
-                [p.a[0]+px,position,p.a[1]+py],
-                [p.b[0]+px,position,p.b[1]+py],
-                [p.b[0]-px,position,p.b[1]-py],
-                [p.a[0]-px,position,p.a[1]-py]
+                [p.a[0]+pa[0],position,p.a[1]+pa[1]],
+                [p.b[0]+pb[0],position,p.b[1]+pb[1]],
+                [p.b[0]-pb[0],position,p.b[1]-pb[1]],
+                [p.a[0]-pa[0],position,p.a[1]-pa[1]]
             ];
             for(let j=0;j<4;j++)push(verts[j],verts[(j+1)%4]);
             count++;continue;
@@ -41,23 +50,10 @@ export function buildCutContours(data,layers,axis,position,finished,{maxSegments
         const y=interpolate(p.a[1],p.b[1],t);
         const z=interpolate(p.a[2],p.b[2],t);
         const dir=Math.min(2.5,len/Math.abs(da));
-        const w=Math.max(p.h,p.w*dir),h=p.h;
-        const perimeter=[];
-        const n=16,inner=(w-h)*.5;
-        for(let j=0;j<=n;j++){
-            const theta=-Math.PI/2+j*Math.PI/n;
-            const lateral=inner+Math.cos(theta)*h*.5;
-            const vertical=Math.sin(theta)*h*.5-h*.5;
-            perimeter.push(axisIndex===0 ?
-                [position,z+vertical,y+lateral] : [x+lateral,z+vertical,position]);
-        }
-        for(let j=0;j<=n;j++){
-            const theta=Math.PI/2+j*Math.PI/n;
-            const lateral=-inner+Math.cos(theta)*h*.5;
-            const vertical=Math.sin(theta)*h*.5-h*.5;
-            perimeter.push(axisIndex===0 ?
-                [position,z+vertical,y+lateral] : [x+lateral,z+vertical,position]);
-        }
+        const w=p.w*dir,h=p.h;
+        const perimeter=profileOutline(w,h,5).map(([lateral,vertical])=>
+            axisIndex===0 ? [position,z+vertical,y+lateral] :
+                            [x+lateral,z+vertical,position]);
         for(let j=0;j<perimeter.length;j++)push(perimeter[j],perimeter[(j+1)%perimeter.length]);
         count++;
     }
