@@ -4,7 +4,7 @@ import {buildJoinAttributes,sharedSplitSection} from "./extrusion_joins.js";
 import {makeJunctionGeometry,junctionVertexShader} from "./bead_junctions.js";
 import {profileArea} from "./bead_profile.js";
 import {nearestSourceRecord,rawClass} from "./gcode_inspector.js";
-import {MOVE_SIZE,sourceLineAtTime,sourceLineAtLayerEnd} from "./source_timeline.js";
+import {MOVE_SIZE,sourceLineAtTime,sourceLineAtLayerEnd,sourceMotionForLine} from "./source_timeline.js";
 import {analysePrint} from "./diagnostics.js";
 import {closestLayer, compareLayerVolumes} from "./comparison.js";
 import {buildCutContours} from "./section.js";
@@ -899,6 +899,16 @@ $("playingSource").addEventListener("click",()=>{
 function navigateSourceLine(line){
     openSourceLine(line).catch(showError);
     if(!model||!data)return;
+    if(moveData){
+        const motion=sourceMotionForLine(moveData,model.moveCount,line);
+        if(motion){
+            setPlaying(false);
+            const at=motion.start+(motion.end-motion.start)*.999;
+            if(playbackMode==="layer")selectedLayer=layerAtTime(at);
+            seek(at);
+            return;
+        }
+    }
     const segment=nearestSourceRecord(data,SEGMENT_SIZE,36,model.count,line);
     const source=segment>=0?readSegment(segment):null;
     const raw=rawData?nearestSourceRecord(rawData,RAW_SIZE,28,model.rawCount,line):-1;
