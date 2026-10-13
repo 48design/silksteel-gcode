@@ -121,6 +121,17 @@ for(const batch of spatial){
     const part=planLoft(batch.indices,straightRead,0,3,true);
     if(batch.indices.includes(1))assert(!part.caps.some(c=>c.index===1));
 }
+// Rounded coordinates still form an exactly watertight shared GPU ring.
+const rounded=[
+    {...bead([0,0,.2],[10,0,.2],0,0,1),line:22},
+    {...bead([10.006,0,.2],[20,0,.2],0,1,2),line:23}
+];
+const snapped=planLoft([0,1],i=>rounded[i]||null,0,2,true);
+assert.equal(snapped.caps.length,2);
+assert.equal(snapped.ends[0],snapped.starts[3]);
+assert(Math.abs(snapped.ends[0]-10.003)<1e-5);
+for(let k=0;k<3;k++)assert.equal(snapped.joinsEnd[k],snapped.joinsStart[3+k]);
+for(let k=0;k<2;k++)assert.equal(snapped.sizesEnd[k],snapped.sizesStart[2+k]);
 const many=Array.from({length:9},(_,i)=>({
     ...bead([i,0,.2],[i+1,0,.2],0,i,i+1),line:i+1
 }));
@@ -137,6 +148,12 @@ assert(viewer.includes('const headBase=sectionMesh(4,"closed")'));
 assert(viewer.includes("spatialChunks(first,last,cachedRead,40,6000)"));
 assert(viewer.includes("bindLoftAttributes(capGeometry,plan,plan.caps)"));
 assert(viewer.includes("mesh.frustumCulled=true"));
+assert(viewer.includes("updateLoftLods();"));
+assert(viewer.includes("const mantleLods=[sectionMesh(2,"));
+assert(viewer.includes("const capLods=[sectionMesh(2,"));
+assert(viewer.includes("geometry.boundingSphere=new THREE.Sphere("));
+assert(viewer.includes("new Set(o.userData.lodVariants?.filter(Boolean)"));
+assert(viewer.includes("renderTip(headMesh,p,alpha,finished)"));
 assert(viewer.includes("frontierCap.visible=false"));
 assert(viewer.includes("renderFrontierCap(last)"));
 assert(!viewer.includes("aCap>0.5 && join.z>0.5"));
