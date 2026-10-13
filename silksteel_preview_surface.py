@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import math
 
+CORNER_FRACTION = 0.4
+CORNER_LOSS = (4.0 - math.pi) * CORNER_FRACTION ** 2
+
 
 class DepositedSurface:
     """Sparse local XY surface map, updated in deposition order."""
@@ -19,12 +22,38 @@ class DepositedSurface:
         self._tops: dict[tuple[int, int], tuple[float, float]] = {}
 
     @staticmethod
+    def area_for_size(width: float, height: float) -> float:
+        return width * height - CORNER_LOSS * min(width, height) ** 2
+
+    @staticmethod
     def width_for_area(area: float, height: float) -> float:
-        return area / height + (1.0 - math.pi / 4.0) * height
+        """Exact area for a rounded rectangle: r=0.4*min(w,h)."""
+        if area <= 0 or height <= 0:
+            return 0.0
+        wide = area / height + CORNER_LOSS * height
+        if wide >= height:
+            return wide
+        discriminant = max(0.0, height * height - 4.0 * CORNER_LOSS * area)
+        return 2.0 * area / (height + math.sqrt(discriminant))
+
+    @staticmethod
+    def free_square_side(area: float) -> float:
+        return math.sqrt(area / (1.0 - CORNER_LOSS))
 
     @staticmethod
     def free_diameter(area: float) -> float:
+        """Legacy reference diameter; not the extrusion profile shape."""
         return math.sqrt(4.0 * area / math.pi)
+
+    @classmethod
+    def gravity_height(cls, area: float, speed: float) -> float:
+        """Conservative heuristic using nozzle speed and volume flow."""
+        side = cls.free_square_side(area)
+        speed = max(0.2, speed)
+        flow = area * speed
+        stretch = min(0.9, 0.9 * (18.0 / (9.0 + speed)) *
+                      (3.0 / (3.0 + flow)))
+        return side * (1.0 + stretch)
 
     def support_top(self, x: float, y: float, z: float, clearance: float) -> float | None:
         levels = self._tops.get((math.floor(x * self.inv), math.floor(y * self.inv)))
@@ -39,34 +68,29 @@ class DepositedSurface:
 
     def _effective_height(
         self, x: float, y: float, z: float, area: float, nominal: float,
-        first_layer: float, layer_z: float | None = None
+        first_layer: float, layer_z: float | None = None,
+        speed: float = 30.0
     ) -> float:
-        diameter = self.free_diameter(area)
-        clearance = max(0.015, min(0.055, nominal * 0.25))
-        support = self.support_top(x, y, z, clearance)
-        # The build plate is the known support for the first actual layer.
+        desired = self.gravity_height(area, speed)
+        # Physical first-layer bed support; do not invent support at every Z.
+        support = self.support_top(
+            x, y, z, max(0.015, min(0.04, nominal * 0.15))
+        )
         if z <= first_layer + 0.025:
             support = max(support, 0.0) if support is not None else 0.0
-        # A near-coplanar path is NOT evidence of an additional squeezed
-        # layer. Sparse sampling can mistake adjacent tracks for support,
-        # producing a 0.02-mm "height" and absurdly wide plastic ribbons.
-        # Never squeeze the predicted strand below the programmed pass height.
-        minimum_height = min(nominal, diameter)
         if support is None:
-            return diameter
-        gap = max(0.0, z - support)
-        # The measured gap already includes any real Z lift. Adding the
-        # offset above the slicer's layer Z AGAIN doubles the clearance:
-        # e.g. Bricklayers pass 2 at Z=.350 over Z=.200 material has a
-        # .150-mm gap, not .150 + .150 = .300 mm. The old formula turned
-        # ordinary supported beads into round cylinders buried in previous
-        # material, so valid long G1 tracks appeared to be missing.
-        return min(diameter, max(minimum_height, gap))
+            return desired
+        gap = z - support
+        if gap <= 0:
+            return desired
+        # Nozzle top remains at Z. Downward stretch stops at the actual
+        # support; subsequent material deformation increases bead width.
+        return min(desired, max(0.04, gap))
 
     def sections(
         self, start: tuple[float, float, float], end: tuple[float, float, float],
         area: float, nominal: float, first_layer: float,
-        layer_z: float | None = None
+        layer_z: float | None = None, speed: float = 30.0
     ) -> list[tuple[float, float, float, float]]:
         """Return t0, t1, width, height. All pieces preserve A=volume/length.
 
@@ -87,7 +111,7 @@ class DepositedSurface:
             y = start[1] + (end[1] - start[1]) * t
             z = start[2] + (end[2] - start[2]) * t
             heights.append(self._effective_height(
-                x, y, z, area, nominal, first_layer, layer_z))
+                x, y, z, area, nominal, first_layer, layer_z, speed))
 
         # The receiver grid is only 0.4 mm wide. At crossing infill paths a
         # center probe may alternate between a supported cell and empty space,
