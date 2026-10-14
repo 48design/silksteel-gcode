@@ -397,7 +397,8 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                             first_height or layer_height,
                             layer_z=layer["z"] if explicit_layers or len(layers) > 1 else None,
                             speed=feedrate / 60.0, role=role,
-                            brick_pass=brick_pass_index
+                            brick_pass=brick_pass_index,
+                            bed_reference=explicit_layers and layer_no == 0
                         )
                         # Reject only the invalid SUBSECTION, never its valid
                         # neighbors or an entire otherwise valid G-code move.
@@ -461,7 +462,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             "ignored_arcs": ignored_arcs}
 
 
-PREVIEW_CACHE_VERSION = 3
+PREVIEW_CACHE_VERSION = 4
 
 
 def convert_cached(source: Path, destination: Path, progress=None,
