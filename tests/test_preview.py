@@ -121,17 +121,19 @@ class PreviewGeometryTests(unittest.TestCase):
 
     def test_invalid_subsection_cannot_hide_entire_valid_g1(self):
         from unittest.mock import patch
-        from silksteel_preview_surface import DepositedSurface
-        actual=DepositedSurface.sections
+        from silksteel_preview_ideal import IdealizedProfile
+        actual=IdealizedProfile.sections
 
-        def patched(self,start,end,area,nominal,first_layer,layer_z=None,speed=30.):
-            result=actual(self,start,end,area,nominal,first_layer,layer_z,speed)
+        def patched(start,end,area,nominal,first_layer,layer_z=None,speed=30.,
+                    *,role=0,brick_pass=0):
+            result=actual(start,end,area,nominal,first_layer,layer_z,speed,
+                          role=role,brick_pass=brick_pass)
             if len(result)==1:
                 t0,t1,w,h=result[0]
                 return [(0.,.5,41.,h),(.5,1.,w,h)]
             return result
 
-        with patch.object(DepositedSurface,"sections",patched):
+        with patch.object(IdealizedProfile,"sections",staticmethod(patched)):
             meta,rows=self.parse(["G90","M83","G0 X0 Y0 Z0.2",
                                    "G1 X10 Y0 E0.25"])
         self.assertEqual(meta["count"],1)
@@ -201,7 +203,8 @@ class PreviewGeometryTests(unittest.TestCase):
                                    21.012,places=3)
             self.assertEqual(result["omittedCount"],0)
             self.assertEqual(result["partialCount"],0)
-            self.assertTrue(all(0.2<=p[7]<=p[6]<1.0 for p in path))
+            # Second Bricklayers base pass has a known 0.75 × 0.2 mm height.
+            self.assertTrue(all(abs(p[7]-.15)<1e-6 and 0<p[6]<1.0 for p in path))
             raw=target.with_suffix(".raw.bin").read_bytes()
             self.assertTrue(any(
                 RAW_PACK.unpack_from(raw,i)[7]==line and
@@ -267,7 +270,7 @@ class PreviewGeometryTests(unittest.TestCase):
             "; ====== SMOOTHIFICATOR END ======",
         ])
         self.assertEqual([row[8] for row in rows], [0, 3, 5, 1])
-        self.assertGreater(rows[3][7], .1)  # No support: strand draws down freely
+        self.assertAlmostEqual(rows[3][7], .1)  # Explicit Smoothificator pass height
 
     def test_absolute_reset_and_relative_xy(self):
         _, rows = self.parse([
@@ -533,10 +536,10 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreater(field.width_for_area(area,.20),.20)
         self.assertLess(field.width_for_area(area,.60),.60)
 
-    def test_converter_nonplanar_ascent_descent_same_extrusion_profile(self):
-        # The previous implementation deposited each G1 immediately. On an
-        # upward ramp the preceding lower segment became "substrate", causing
-        # wide triangular spikes; a reversed ramp remained narrow and smooth.
+    def test_converter_nonplanar_height_tracks_commanded_z_offset(self):
+        # The viewer's analytic substrate is the slicer layer reference.
+        # Reversing the same path changes order, never the physical profile
+        # at a given location. No neighboring-strand raster is consulted.
         def build(reverse):
             points=[(i*.5,0.,1.0+i*.12) for i in range(5)]
             if reverse:
@@ -552,10 +555,13 @@ class PreviewGeometryTests(unittest.TestCase):
             return [(r[6],r[7]) for r in rows]
         rising=build(False)
         falling=build(True)
-        for (uw,uh),(dw,dh) in zip(rising,falling):
+        for (uw,uh),(dw,dh) in zip(rising,reversed(falling)):
             self.assertAlmostEqual(uw,dw,places=4)
             self.assertAlmostEqual(uh,dh,places=4)
-            self.assertLess(uw,uh)  # free rounded rectangle grows downward
+        self.assertTrue(all(rising[i][1]<rising[i+1][1]
+                            for i in range(len(rising)-1)))
+        self.assertTrue(all(rising[i][0]>rising[i+1][0]
+                            for i in range(len(rising)-1)))
 
     def test_contiguous_ascent_does_not_support_itself_or_differ_from_descent(self):
         from silksteel_preview_surface import DepositedSurface
@@ -624,7 +630,7 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreater(field.width_for_area(area,compressed),
                            field.width_for_area(area,free))
 
-    def test_tall_narrow_extrusion_not_discarded_from_binary(self):
+    def test_high_first_layer_uses_nominal_height_without_support_grid(self):
         from silksteel_preview_surface import DepositedSurface
         meta,rows=self.parse([
             "; layer_height = 0.2",
@@ -632,15 +638,14 @@ class PreviewGeometryTests(unittest.TestCase):
             "G90","M83","G0 X0 Y0 Z0.8 F600",
             "G1 X20 Y0 E0.4 F600"
         ])
-        self.assertGreater(meta["count"],0)
+        self.assertEqual(meta["count"],1)
         self.assertEqual(meta["omittedCount"],0)
-        self.assertTrue(any(row[7]>row[6] for row in rows))
+        area=.4*math.pi*.875**2/20
         for row in rows:
-            area=.4*math.pi*.875**2/20
+            self.assertAlmostEqual(row[7],.2,places=5)
             self.assertAlmostEqual(
                 DepositedSurface.area_for_size(row[6],row[7]),area,places=5)
-            self.assertAlmostEqual(row[2]-row[7],
-                .8-row[7],places=5)
+            self.assertAlmostEqual(row[2]-row[7],.6,places=5)
 
     def test_free_vs_supported_cross_sections_conserve_material(self):
         from silksteel_preview_surface import DepositedSurface
@@ -693,7 +698,7 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreater(lifted[0][2],lifted[-1][2])
         self.assertLessEqual(max(p[3] for p in lifted),field.gravity_height(area,30)+1e-6)
 
-    def test_parser_splits_one_g1_only_at_real_substrate_change(self):
+    def test_converter_keeps_one_segment_even_when_prior_path_ends(self):
         from silksteel_preview_surface import DepositedSurface
         meta, rows = self.parse([
             "; layer_height = 0.2", "; first_layer_height = 0.2",
@@ -704,17 +709,14 @@ class PreviewGeometryTests(unittest.TestCase):
             "G0 X0 Y0 Z0.4",
             "G1 X20 Y0 E0.8",
         ])
-        upper = rows[meta["layers"][1]["start"]:]
-        self.assertGreater(len(upper),1)
-        self.assertAlmostEqual(upper[0][7], .2, places=3)
-        free_height = DepositedSurface.gravity_height(
-            .8 * math.pi * (.875)**2 / 20,20)
-        self.assertAlmostEqual(upper[-1][7],free_height,places=3)
-        self.assertAlmostEqual(sum(row[-1]-row[-2] for row in upper),1.0,places=3)
-        self.assertEqual(set(int(row[8]) for row in upper),{0})
-        self.assertEqual(len(set(int(row[9]) for row in upper)),1)
+        upper=rows[meta["layers"][1]["start"]:]
+        self.assertEqual(len(upper),1)
+        self.assertAlmostEqual(upper[0][7],.2,places=5)
+        self.assertAlmostEqual(upper[0][6],DepositedSurface.width_for_area(
+            .8*math.pi*.875**2/20,.2),places=5)
+        self.assertAlmostEqual(upper[0][-1]-upper[0][-2],1.0,places=3)
 
-    def test_feature_color_survives_local_cross_section_splitting(self):
+    def test_feature_color_survives_analytic_extrusion_profile(self):
         meta, rows = self.parse([
             "; layer_height = 0.2",
             ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
@@ -726,12 +728,10 @@ class PreviewGeometryTests(unittest.TestCase):
             "G1 X20 Y0 E0.8",
             "; SilkSteel: VALLEY_FILL_END",
         ])
-        parts = rows[meta["layers"][1]["start"]:]
-        self.assertGreater(len(parts),1)
+        parts=rows[meta["layers"][1]["start"]:]
+        self.assertEqual(len(parts),1)
         self.assertEqual({int(row[8]) for row in parts},{5})
-        self.assertEqual(len({int(row[9]) for row in parts}),1)
         self.assertTrue(all(row[-1]>row[-2] for row in parts))
-
 
     def test_advanced_viewer_modules_and_local_routes_are_connected(self):
         root = Path(__file__).resolve().parents[1]
