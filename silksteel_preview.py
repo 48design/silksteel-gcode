@@ -12,7 +12,7 @@ import traceback
 import uuid
 from urllib.parse import unquote, parse_qs, urlsplit
 
-from silksteel_preview_surface import DepositedSurface
+from silksteel_preview_ideal import IdealizedProfile
 from silksteel_preview_arcs import interpolate_arc
 from pathlib import Path
 import re
@@ -121,13 +121,13 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     layer_z = 0.0
     layer_no = -1
     brick_base_pass = False
+    brick_pass_index = 0
     layer = None
     layers = []
     count = ignored_arcs = arc_count = hop_count = raw_count = move_count = omitted_count = partial_count = 0
     feedrate = 1800.0
     elapsed = 0.0
     hop_active = False
-    surface = DepositedSurface()
     role_type, brick_role, smooth, valley = "", None, False, False
     smooth_height = None
     min_xyz = [math.inf] * 3
@@ -137,8 +137,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     source_size = max(1, source.stat().st_size)
 
     def begin_layer(number: int) -> None:
-        nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley, brick_base_pass
-        surface.finish_strand()
+        nonlocal layer, layer_no, brick_role, smooth, smooth_height, valley, brick_base_pass, brick_pass_index
         layer_no = number
         layer = {"number": number, "start": count, "count": 0,
                  "rawStart": raw_count, "rawCount": 0,
@@ -148,6 +147,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                  "timeStart": elapsed, "timeEnd": elapsed}
         layers.append(layer)
         brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
+        brick_pass_index = 0
 
     with (source.open("rb") as src,
           destination.open("wb") as dst, hop_destination.open("wb") as hops,
@@ -207,6 +207,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 elif up.startswith("TYPE:"):
                     role_type = up[5:].strip()
                     brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
+                    brick_pass_index = 0
                 if "SMOOTHIFICATOR START:" in up:
                     smooth = True
                     m = re.search(r"AT\s+([\d.]+)MM EACH", up)
@@ -214,12 +215,14 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 elif "SMOOTHIFICATOR END" in up:
                     smooth, smooth_height = False, None
                 if "BRICKLAYERS SHIFTED BLOCK" in up:
-                    brick_role, brick_base_pass = 3, False
+                    brick_role, brick_base_pass, brick_pass_index = 3, False, 0
                 elif "BRICKLAYERS BASE PASS" in up or "BRICKLAYERS BASE BLOCK" in up:
                     brick_role = 2
                     brick_base_pass = "BASE PASS" in up
+                    pass_match = re.search(r"BASE PASS\\s+(\\d+)/", up) if brick_base_pass else None
+                    brick_pass_index = int(pass_match.group(1)) if pass_match else 0
                 elif "RESET Z" in up or "BRICKLAYERS CONTOUR E SYNC" in up:
-                    brick_role, brick_base_pass = None, False
+                    brick_role, brick_base_pass, brick_pass_index = None, False, 0
                 if "SILKSTEEL: VALLEY_FILL_START" in up:
                     valley = True
                 elif "SILKSTEEL: VALLEY_FILL_END" in up:
@@ -259,7 +262,6 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 params = {k: float(v) for k, v in TOKEN.findall(code.upper())
                           if k not in ("G", "M")}
             if cmd == "G4":
-                surface.finish_strand()
                 before = elapsed
                 elapsed += max(0.0, params.get("P", 0.0)) / 1000.0 + max(0.0, params.get("S", 0.0))
                 if elapsed > before:
@@ -312,11 +314,6 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                     path = arc_path[0]
                     path_lengths = [math.dist(a, b) for a, b in zip(path, path[1:])]
                     distance = sum(path_lengths)
-                if delta_e <= 0 and (distance > 1e-7 or delta_e < -1e-7):
-                    # Travels/retractions break the physically continuous
-                    # strand, exposing its deposited footprint as support
-                    # for the next independent extrusion.
-                    surface.finish_strand()
                 motion_seconds = (distance if distance > 1e-7 else abs(delta_e)) * 60.0 / feedrate
                 started = elapsed
                 elapsed += motion_seconds if math.isfinite(motion_seconds) else 0.0
@@ -375,7 +372,6 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         role = 4
                     else:
                         role = 0
-                    surface.begin_strand(tuple(pos), role)
                     rendered_parts = 0
                     skipped_parts = 0
                     elapsed_distance = 0.0
@@ -396,14 +392,15 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         if extrusion_area > 16.0:
                             skipped_parts += 1
                             continue
-                        sections = surface.sections(
+                        sections = IdealizedProfile.sections(
                             tuple(part_start), tuple(part_end), extrusion_area, nominal_h,
-                            first_height or layer_height, layer_z=layer["z"],
-                            speed=feedrate / 60.0
+                            first_height or layer_height,
+                            layer_z=layer["z"] if explicit_layers else None,
+                            speed=feedrate / 60.0, role=role,
+                            brick_pass=brick_pass_index
                         )
                         # Reject only the invalid SUBSECTION, never its valid
                         # neighbors or an entire otherwise valid G-code move.
-                        accepted = []
                         for t0, t1, width, height in sections:
                             if not (math.isfinite(width) and math.isfinite(height) and
                                     0 < height <= 40 and 0 < width <= 40):
@@ -422,17 +419,10 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                             layer["count"] += 1
                             count += 1
                             rendered_parts += 1
-                            accepted.append((t0, t1, width, height))
                             for p in (a_pos, b_pos):
                                 for i, coordinate in enumerate(p):
                                     min_xyz[i] = min(min_xyz[i], coordinate)
                                     max_xyz[i] = max(max_xyz[i], coordinate)
-                        if accepted:
-                            surface.deposit(tuple(part_start), tuple(part_end), accepted)
-                    if rendered_parts > 0 and not skipped_parts:
-                        surface.advance_strand(tuple(new_pos))
-                    else:
-                        surface.finish_strand()
                     if rendered_parts > 0:
                         raw_kind = (4 if cmd in ("G2", "G3") and arc_path is not None
                                     else 2 if cmd in ("G2", "G3") else 0)
@@ -452,7 +442,6 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                     raw_count += 1
                 pos = new_pos
 
-    surface.finish_strand()
     if not count:
         raise ValueError(f"No extruding G1 XY/XYZ movements found in {source.name}")
     for index, item in enumerate(layers):
@@ -472,7 +461,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             "ignored_arcs": ignored_arcs}
 
 
-PREVIEW_CACHE_VERSION = 2
+PREVIEW_CACHE_VERSION = 3
 
 
 def convert_cached(source: Path, destination: Path, progress=None,
