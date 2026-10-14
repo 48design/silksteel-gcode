@@ -9,6 +9,79 @@ from silksteel_preview_ideal import IdealizedProfile
 
 
 class AnalyticViewerTests(unittest.TestCase):
+    def test_actual_prime_line_uses_bed_gap_not_nominal_layer_thickness(self):
+        # Reproduces the G-code preamble: 30 mm filament in a 30 mm line,
+        # Z=0.8, before any ;LAYER_CHANGE. It was rendered as a 12 mm-wide
+        # sheet because the preview incorrectly assumed a 0.2 mm substrate.
+        lines = [
+            "G90", "M82", "G92 E0", "G92 X15 Y11",
+            "G1 X141.635 Y91.06 Z0.8 F6000",
+            "G1 X171.635 Y91.06 E30 F360",
+            "G92 E0", "G1 E-0.5 F2100",
+            "G1 X181.635 F6000",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G1 Z0.2 F8400", "G92 E0",
+            "G1 X144.305 Y103.919 F8400",
+            "G1 X165.695 Y103.919 E0.7 F1200",
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "prime.gcode"
+            target = root / "prime.bin"
+            source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            meta = convert(source, target)
+            binary = target.read_bytes()
+            rows = [PACK.unpack_from(binary,i)
+                    for i in range(0,len(binary),PACK.size)]
+        self.assertEqual(meta["count"], 2)
+        self.assertEqual([layer["number"] for layer in meta["layers"]],[-1,0])
+        priming, outline = rows
+        self.assertEqual(int(priming[9]),6)
+        self.assertAlmostEqual(priming[2], .8, places=6)
+        self.assertAlmostEqual(priming[7], .8, places=6)
+        self.assertAlmostEqual(priming[2]-priming[7], 0., places=6)
+        self.assertGreater(priming[6], 3.0)
+        self.assertLess(priming[6], 3.2)
+        expected_area = math.pi * (.875**2)
+        self.assertAlmostEqual(IdealizedProfile.area_for_size(priming[6],priming[7]),
+                               expected_area,places=5)
+        self.assertAlmostEqual(outline[7], .2,places=6)
+        self.assertEqual(meta["omittedCount"],0)
+
+    def test_first_explicit_layer_high_nozzle_uses_real_clearance_cap(self):
+        # A low-flow line at Z=.8 still floats above the bed: its available
+        # material cannot make a .8-mm-tall bead reaching all the way down.
+        area=.4*math.pi*(.875**2)/20
+        sections=IdealizedProfile.sections(
+            (0.,0.,.8),(20.,0.,.8),area,.2,.2,
+            layer_z=.8,role=0,bed_reference=True)
+        self.assertEqual(len(sections),1)
+        _,_,width,height=sections[0]
+        self.assertAlmostEqual(height,IdealizedProfile.free_square_side(area),places=7)
+        self.assertLess(height,.8)
+        self.assertAlmostEqual(IdealizedProfile.area_for_size(width,height),
+                               area,places=9)
+
+    def test_unmarked_second_layer_no_longer_uses_printbed_profile(self):
+        lines=[
+            "G90","M83","G0 Z0.8 X0 Y0",
+            "G1 X10 Y0 E4",
+            "G0 Z1.0",
+            "G1 X20 Y0 E0.4",
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            source=root/"unmarked.gcode"
+            target=root/"unmarked.bin"
+            source.write_text("\n".join(lines)+"\n",encoding="utf-8")
+            meta=convert(source,target)
+            data=target.read_bytes()
+            rows=[PACK.unpack_from(data,i)
+                  for i in range(0,len(data),PACK.size)]
+        self.assertEqual(len(rows),2)
+        self.assertEqual(len(meta["layers"]),2)
+        self.assertAlmostEqual(rows[1][7],.2,places=6)
+
     def test_profiles_preserve_volume_for_every_feature(self):
         area=.11
         cases=[
