@@ -240,8 +240,8 @@ uniform float uLayerZ, uNonPlanarBlend;
 varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vBeadColor;
-varying float vBeadHeight;
-varying float vViewDepth;
+uniform float uViewportHeight;
+varying float vLayerPixels;
 #include <clipping_planes_pars_vertex>
 void main(){
   vec3 d=iStop-iStart;
@@ -268,8 +268,8 @@ void main(){
   float raised=smoothstep(0.005,0.04,abs(zAtRing-uLayerZ));
   vBeadColor=mix(uColor,mix(uRegularColor,uColor,raised),uNonPlanarBlend);
   vec4 mvPosition=modelViewMatrix*vec4(p,1.0);
-  vBeadHeight=h;
-  vViewDepth=max(0.001,-mvPosition.z);
+  vLayerPixels=h*projectionMatrix[1][1]*uViewportHeight/
+               (2.0*max(0.001,-mvPosition.z));
   gl_Position=projectionMatrix*mvPosition;
   #include <clipping_planes_vertex>
 }
@@ -282,8 +282,7 @@ precision highp float;
 uniform float uAlpha;
 uniform float uMuted;
 uniform float uViewportHeight;
-varying float vBeadHeight;
-varying float vViewDepth;
+varying float vLayerPixels;
 varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vBeadColor;
@@ -300,9 +299,7 @@ void main(){
  float top=max(n.y,0.0);
  // Approximate layer-height footprint in screen pixels. Below ~2 px
  // alternating highlights become undersampled and cause visible moire.
- float layerPx=vBeadHeight*projectionMatrix[1][1]*uViewportHeight/
-               (2.0*vViewDepth);
- float detail=smoothstep(0.75,2.5,layerPx);
+ float detail=smoothstep(0.75,2.5,vLayerPixels);
  float darkShade=mix(0.67,0.40+0.48*diffuse+0.22*fill+0.13*top,detail);
  vec3 mutedColor=vec3(0.018,0.026,0.040)*darkShade;
  // Screen-space specular antialiasing: broaden the highlight when the
