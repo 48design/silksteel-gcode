@@ -369,6 +369,7 @@ function forgetLayers() {
     diagnosticReport=null;
     comparisonSerial++;
     headMesh.visible=false; hopTip.visible=false;frontierCap.visible=false;
+    nozzle.visible=false;
     if(lastPick){scene.remove(lastPick);lastPick.geometry.dispose();lastPick.material.dispose();lastPick=null;}
     $("pickInfo").style.display="none";
 }
@@ -620,6 +621,83 @@ headGeometry.setAttribute("iSize",new THREE.InstancedBufferAttribute(new Float32
 headGeometry.instanceCount=1;
 const headMesh=new THREE.Mesh(headGeometry,newMaterial(0,false));
 headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
+
+// A lightweight, translucent nozzle whose tip sits at the programmed G-code
+// XYZ position. Built once and moved, never regenerated during playback.
+function createNozzle(){
+    const group=new THREE.Group();
+    const steel=new THREE.MeshStandardMaterial({
+        color:0xd0deea,metalness:.42,roughness:.32,
+        transparent:true,opacity:.24,depthWrite:false,side:THREE.DoubleSide
+    });
+    const brass=new THREE.MeshStandardMaterial({
+        color:0xf0c88c,metalness:.55,roughness:.31,
+        transparent:true,opacity:.42,depthWrite:false,side:THREE.DoubleSide
+    });
+    const rim=new THREE.MeshStandardMaterial({
+        color:0xf8e5bd,metalness:.45,roughness:.22,
+        transparent:true,opacity:.60,depthWrite:false
+    });
+    const parts=[
+        [new THREE.CylinderGeometry(.84,.19,1.7,32,1,true),.85,brass],
+        [new THREE.CylinderGeometry(1.08,.88,.55,6),1.97,steel],
+        [new THREE.CylinderGeometry(.83,.83,.82,32,1,true),2.65,steel]
+    ];
+    for(const [geometry,height,material] of parts){
+        const mesh=new THREE.Mesh(geometry,material);
+        mesh.position.y=height;
+        mesh.renderOrder=25;
+        group.add(mesh);
+    }
+    const outlet=new THREE.Mesh(new THREE.TorusGeometry(.19,.045,8,28),rim);
+    outlet.rotation.x=Math.PI/2;
+    outlet.position.y=.035;
+    outlet.renderOrder=26;
+    group.add(outlet);
+    const opening=new THREE.Mesh(new THREE.CircleGeometry(.13,24),
+        new THREE.MeshBasicMaterial({
+            color:0x26333e,transparent:true,opacity:.65,depthWrite:false,
+            side:THREE.DoubleSide
+        }));
+    opening.rotation.x=-Math.PI/2;
+    opening.position.y=.007;
+    opening.renderOrder=26;
+    group.add(opening);
+    const light=new THREE.PointLight(0xffffff,8,8,2);
+    light.position.set(2.3,3.7,2.5);
+    group.add(light);
+    group.visible=false;
+    return group;
+}
+const nozzle=createNozzle();
+scene.add(nozzle);
+
+function positionNozzle(segment,progress){
+    const t=Math.max(0,Math.min(1,progress));
+    nozzle.position.set(
+        segment.a[0]+(segment.b[0]-segment.a[0])*t,
+        segment.a[2]+(segment.b[2]-segment.a[2])*t,
+        segment.a[1]+(segment.b[1]-segment.a[1])*t
+    );
+    nozzle.visible=true;
+}
+
+function updateNozzle(finished){
+    nozzle.visible=false;
+    if(!$("showNozzle").checked || !model || !data)return;
+    if(browsingLayer || currentTime>=model.duration-0.0001){
+        const layer=model.layers[visualLayer];
+        const count=Math.max(0,Math.min(layer.count,finished-layer.start));
+        if(count)positionNozzle(readSegment(layer.start+count-1),1);
+        return;
+    }
+    if(finished>=model.count)return;
+    const segment=readSegment(finished);
+    if(segment.start<=currentTime && currentTime<segment.end){
+        const duration=segment.end-segment.start;
+        positionNozzle(segment,duration>0?(currentTime-segment.start)/duration:1);
+    }
+}
 // A fully completed strand can still have an open endpoint during playback,
 // because the following loft segment has not been deposited yet. This one
 // transient cap closes only that advancing frontier, not every segment.
@@ -1393,6 +1471,7 @@ function updateVisibility() {
     }
     headMesh.visible=false;
     frontierCap.visible=false;
+    updateNozzle(finished);
     if(!browsingLayer && finished<model.count){
         const p=readSegment(finished);
         if(p.start<=currentTime&&currentTime<p.end&&visibleRoles.has(p.role)){
@@ -1586,6 +1665,7 @@ $("restart").addEventListener("click",()=>{
 });
 $("below").addEventListener("change",updateVisibility);
 $("ghost").addEventListener("change",updateVisibility);
+$("showNozzle").addEventListener("change",updateVisibility);
 $("showHops").addEventListener("change",updateVisibility);
 $("gridToggle").addEventListener("change",()=>{grid.visible=$("gridToggle").checked;});
 $("resetView").addEventListener("click",fit);
