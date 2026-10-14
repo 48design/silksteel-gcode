@@ -3184,7 +3184,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # geometric barriers. Emit status/fan commands once.
                             code = original.split(';', 1)[0].strip()
                             f_only = (re.match(r'^G0?[01](?:\s|$)', code)
-                                      and extract_f(code) is not None)
+                                      and extract_f(code) is not None
+                                      and extract_e(code) is None)
                             if pass_num == 0 or (not reverse and f_only):
                                 write_and_track(output_buffer, original, recent_output_lines)
                             continue
@@ -3261,6 +3262,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 and params['z'] is None)
                 f_only = (is_move and not has_xy and params['z'] is None
                           and params['e'] is None and params['f'] is not None)
+                zero_e_only = (is_move and not has_xy and params['z'] is None
+                               and params['e'] is not None and abs(delta) < 1e-9)
                 # Fan and progress updates can occur between individual curve
                 # segments. They do not break the geometric outer contour.
                 status_only = re.match(
@@ -3298,7 +3301,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         path_tail_x = params['x']
                     if params['y'] is not None:
                         path_tail_y = params['y']
-                elif f_only and path_lines:
+                elif (f_only or zero_e_only) and path_lines:
                     path_lines.append(original)
                     path_indices.append(source_idx)
                 else:
