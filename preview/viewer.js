@@ -276,16 +276,24 @@ const capVertexShader=vertexShader.replaceAll("aEnd","iCapEnd");
 const fragmentShader = `
 precision highp float;
 uniform float uAlpha;
+uniform float uMuted;
 varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vBeadColor;
 #include <clipping_planes_pars_fragment>
 void main(){
  #include <clipping_planes_fragment>
+ vec3 n=normalize(vNormal);
  vec3 light=normalize(vec3(-0.45,0.85,0.5));
- float diffuse=max(dot(normalize(vNormal),light),0.0);
+ float diffuse=max(dot(n,light),0.0);
  float shade=0.47+0.53*diffuse;
- gl_FragColor=vec4(vBeadColor*shade,uAlpha);
+ // Opaque charcoal layers: side and top normals remain distinct through
+ // directional, fill and grazing illumination even at very low brightness.
+ float fill=max(dot(n,normalize(vec3(0.65,0.30,-0.70))),0.0);
+ float top=max(n.y,0.0);
+ float darkShade=0.40+0.48*diffuse+0.22*fill+0.13*top;
+ vec3 mutedColor=vec3(0.105,0.155,0.215)*darkShade;
+ gl_FragColor=vec4(mix(vBeadColor*shade,mutedColor,uMuted),uAlpha);
  #include <tonemapping_fragment>
  #include <colorspace_fragment>
 }
@@ -298,9 +306,10 @@ const newMaterial = (role, faded, geometryShader=vertexShader, layerZ=0) => new 
         uRegularColor:{value:rgb[0].clone()},
         uNonPlanarBlend:{value:role===4?1:0},
         uLayerZ:{value:layerZ},
-        uAlpha:{value:faded?.19:1}
+        uMuted:{value:faded?1:0},
+        uAlpha:{value:1}
     },
-    transparent:!!faded,depthWrite:!faded,
+    transparent:false,depthWrite:true,
     polygonOffset:false
 });
 function disposeGroup(group) {
@@ -625,10 +634,11 @@ function renderFrontierCap(index){
     frontierCap.material.uniforms.uColor.value.copy(rgb[p.role]);
     frontierCap.material.uniforms.uLayerZ.value=layer.z;
     frontierCap.material.uniforms.uNonPlanarBlend.value=(p.role===4?1:0);
-    frontierCap.material.uniforms.uAlpha.value=
-        (layer.number!==model.layers[visualLayer].number && $("ghost").checked)?0.19:1;
-    frontierCap.material.transparent=frontierCap.material.uniforms.uAlpha.value<1;
-    frontierCap.material.depthWrite=!frontierCap.material.transparent;
+    frontierCap.material.uniforms.uMuted.value=
+        (layer.number!==model.layers[visualLayer].number && $("ghost").checked)?1:0;
+    frontierCap.material.uniforms.uAlpha.value=1;
+    frontierCap.material.transparent=false;
+    frontierCap.material.depthWrite=true;
     frontierCap.visible=true;
 }
 const hopTipGeom=new THREE.BufferGeometry();
