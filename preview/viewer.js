@@ -621,6 +621,8 @@ function renderFrontierCap(index){
     }
     frontierCap.userData.role=p.role;
     frontierCap.material.uniforms.uColor.value.copy(rgb[p.role]);
+    frontierCap.material.uniforms.uLayerZ.value=layer.z;
+    frontierCap.material.uniforms.uNonPlanarBlend.value=(p.role===4?1:0);
     frontierCap.material.uniforms.uAlpha.value=
         (layer.number!==model.layers[visualLayer].number && $("ghost").checked)?0.19:1;
     frontierCap.material.transparent=frontierCap.material.uniforms.uAlpha.value<1;
