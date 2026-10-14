@@ -3099,6 +3099,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             path_indices = []
             path_entry_x = position['x']
             path_entry_y = position['y']
+            path_tail_x, path_tail_y = path_entry_x, path_entry_y
 
             def flush_outer_path():
                 nonlocal path_lines, path_indices, path_entry_x, path_entry_y
@@ -3117,73 +3118,123 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 else:
                     passes_needed, height_per_pass = 1, effective_height
 
-                # A path begins at the nozzle's *actual* previous XY, after
-                # any travel/retract commands were applied exactly once.
                 origin_x, origin_y = path_entry_x, path_entry_y
-                path_z = current_z
+                x, y = origin_x, origin_y
+                feedrate = None
+                segments = []
+                # Resolve modal XY/F once. Reverse passes must follow the
+                # source segments in reverse order, including their speeds.
+                for source_idx, original in zip(path_indices, path_lines):
+                    code = original.split(';', 1)[0].strip()
+                    if not re.match(r'^G0?[01](?:\s|$)', code):
+                        continue
+                    params = parse_gcode_line(code)
+                    if params['f'] is not None:
+                        feedrate = params['f']
+                    if params['x'] is None and params['y'] is None:
+                        continue
+                    end_x = x if params['x'] is None else params['x']
+                    end_y = y if params['y'] is None else params['y']
+                    segment_length = math.hypot(end_x - x, end_y - y)
+                    segments.append((source_idx, original, x, y, end_x, end_y,
+                                     segment_length, feedrate))
+                    x, y = end_x, end_y
+
+                path_length = sum(segment[6] for segment in segments)
+                if path_length <= 1e-8:
+                    for original in path_lines:
+                        write_and_track(output_buffer, original, recent_output_lines)
+                    path_lines, path_indices = [], []
+                    return
+
+                closed = math.hypot(x - origin_x, y - origin_y) <= 0.002
+                bottom_z = current_z - (passes_needed - 1) * height_per_pass
+                height_rise = current_z - bottom_z
                 if passes_needed > 1:
                     smooth_paths += 1
-                for pass_num in range(passes_needed):
-                    pass_z = path_z - (passes_needed - pass_num - 1) * height_per_pass
-                    actual_layer_max_z[current_layer] = max(
-                        actual_layer_max_z.get(current_layer, pass_z), pass_z)
-                    if pass_num == 0:
-                        write_and_track(output_buffer,
-                            f"; ====== SMOOTHIFICATOR START: {passes_needed} passes at {height_per_pass:.4f}mm each ======\n",
-                            recent_output_lines)
-                    elif math.hypot(position['x'] - origin_x, position['y'] - origin_y) > 0.001:
-                        write_and_track(output_buffer,
-                            f"G0 X{origin_x:.3f} Y{origin_y:.3f} F8400 ; Smoothificator return to path start\n",
-                            recent_output_lines)
-                    write_and_track(output_buffer,
-                        f"G0 Z{pass_z:.3f} ; Smoothificator pass {pass_num + 1}/{passes_needed}\n",
-                        recent_output_lines)
+                write_and_track(output_buffer,
+                    f"; ====== SMOOTHIFICATOR START: {passes_needed} passes at {height_per_pass:.4f}mm each ======\n",
+                    recent_output_lines)
+                # Only the entry needs a stationary Z adjustment. Every later
+                # elevation change is part of an extrusion, like vase mode.
+                write_and_track(output_buffer,
+                    f"G1 Z{bottom_z:.5f} ; Smoothificator entry Z\n",
+                    recent_output_lines)
 
-                    for source_idx, original in zip(path_indices, path_lines):
-                        code = original.split(';', 1)[0].strip()
-                        if not re.match(r'^G0?[01](?:\s|$)', code):
-                            # Comments are metadata, not repeated commands.
-                            if pass_num == 0:
+                segment_by_index = {item[0]: item for item in segments}
+                for pass_num in range(passes_needed):
+                    reverse = not closed and pass_num % 2 == 1
+                    write_and_track(output_buffer,
+                        f"; Smoothificator pass {pass_num + 1}/{passes_needed}"
+                        f"{' reverse' if reverse else ''}\n",
+                        recent_output_lines)
+                    travelled = 0.0
+                    # The complete path rises only from the old bottom pass
+                    # level to the slicer's original top Z: no overshoot.
+                    ordered = reversed(segments) if reverse else segments
+                    if reverse:
+                        sources = ((item[0], item[1], item) for item in ordered)
+                    else:
+                        sources = ((idx, original, segment_by_index.get(idx))
+                                   for idx, original in zip(path_indices, path_lines))
+                    for source_idx, original, segment in sources:
+                        if segment is None:
+                            # Metadata and modal feedrate commands are not
+                            # geometric barriers. Emit status/fan commands once.
+                            code = original.split(';', 1)[0].strip()
+                            f_only = (re.match(r'^G0?[01](?:\s|$)', code)
+                                      and extract_f(code) is not None)
+                            if pass_num == 0 or (not reverse and f_only):
                                 write_and_track(output_buffer, original, recent_output_lines)
                             continue
-                        if extract_e(code) is None:
-                            # Repeating a modal F-only instruction is safe.
-                            write_and_track(output_buffer, original, recent_output_lines)
-                            continue
-                        # Distribute 5-decimal E rounding error to the
-                        # last pass. Three 0.01333mm segments otherwise
-                        # add up to 0.03999 instead of the source's
-                        # 0.04000mm, systematically losing filament.
-                        if pass_num < passes_needed - 1:
-                            delta = round(source_e_deltas[source_idx] / passes_needed, 5)
-                        else:
-                            delta = (source_e_deltas[source_idx]
-                                     - round(source_e_deltas[source_idx] / passes_needed, 5)
-                                     * (passes_needed - 1))
-                        e_value = delta if source_relative_modes[source_idx] else position['e'] + delta
-                        write_and_track(output_buffer,
-                            replace_e(original, e_value), recent_output_lines)
 
-                # Rebase to the slicer's absolute E coordinate so the
-                # following unmodified retract/prime can use its native E.
+                        _, _, sx, sy, ex, ey, length, speed = segment
+                        travelled += length
+                        fraction = (pass_num + travelled / path_length) / passes_needed
+                        target_z = bottom_z + height_rise * fraction
+                        source_delta = source_e_deltas[source_idx]
+                        if pass_num < passes_needed - 1:
+                            delta = round(source_delta / passes_needed, 5)
+                        else:
+                            delta = (source_delta
+                                     - round(source_delta / passes_needed, 5)
+                                     * (passes_needed - 1))
+                        target_e = delta if source_relative_modes[source_idx] else position['e'] + delta
+
+                        if reverse:
+                            # A reversed segment ends at its original start.
+                            # Explicit feedrate prevents reverse traversal from
+                            # inheriting the wrong modal F from another edge.
+                            move = (f"G1 X{sx:.3f} Y{sy:.3f} Z{target_z:.5f}"
+                                    f" E{target_e:.5f}")
+                            if speed is not None:
+                                move += f" F{speed:g}"
+                            write_and_track(output_buffer, move + "\n", recent_output_lines)
+                        else:
+                            move = replace_e(original, target_e) if extract_e(original.split(';', 1)[0]) is not None else original
+                            head, sep, comment = move.partition(';')
+                            move = head.rstrip('\r\n') + f" Z{target_z:.5f}"
+                            if sep:
+                                move += ' ;' + comment.rstrip('\r\n')
+                            write_and_track(output_buffer, move + "\n", recent_output_lines)
+
+                    actual_layer_max_z[current_layer] = max(
+                        actual_layer_max_z.get(current_layer, target_z), target_z)
+
+                # Keep native retract/prime E coordinates valid after replay.
                 last_idx = path_indices[-1]
                 if not source_relative_modes[last_idx]:
                     write_and_track(output_buffer,
                         f"G92 E{source_e_targets[last_idx]:.5f} ; Smoothificator E sync\n",
                         recent_output_lines)
-                # Diagnostic provenance marker. It has no effect on the
-                # printer and distinguishes transformed vs untouched walls.
                 write_and_track(output_buffer,
                     "; ====== SMOOTHIFICATOR END ======\n", recent_output_lines)
-                path_lines = []
-                path_indices = []
+                path_lines, path_indices = [], []
 
             for source_idx, original in zip(external_block_indices, external_block_lines):
                 code = original.split(';', 1)[0].strip()
                 if not code:
                     if ';WIPE' in original.upper():
-                        # Wipe state must start/end at its original point,
-                        # not inside each repeated outer-wall pass.
                         flush_outer_path()
                         write_and_track(output_buffer, original, recent_output_lines)
                     elif path_lines:
@@ -3201,27 +3252,41 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 and params['z'] is None)
                 f_only = (is_move and not has_xy and params['z'] is None
                           and params['e'] is None and params['f'] is not None)
-                # Slicers periodically insert status/progress commands in
-                # the middle of an otherwise continuous exterior contour.
-                # Keep them at their original place in pass 1 instead of
-                # splitting a 700+ mm wall into many tiny paths.
-                status_only = re.match(r'^M(?:117|73)(?:\s|$)', code) is not None
+                # Fan and progress updates can occur between individual curve
+                # segments. They do not break the geometric outer contour.
+                status_only = re.match(
+                    r'^M(?:73|117|106|107|204|205|220|221)(?:\s|$)', code) is not None
+                # Rounded E values may remain unchanged across very short
+                # interpolated curve edges. This is not a real travel; retain
+                # its XY geometry without inventing additional extrusion.
+                tiny_nonextrusion = (
+                    bool(path_lines) and is_move and code.startswith(('G1 ', 'G01 '))
+                    and has_xy and params['z'] is None and abs(delta) < 1e-9
+                    and math.hypot(
+                        (params['x'] if params['x'] is not None else path_tail_x) - path_tail_x,
+                        (params['y'] if params['y'] is not None else path_tail_y) - path_tail_y
+                    ) <= max(0.02, min(0.25, extrusion_width * 0.5))
+                )
 
                 if status_only and path_lines:
                     path_lines.append(original)
                     path_indices.append(source_idx)
-                elif is_extrusion:
+                elif is_extrusion or tiny_nonextrusion:
                     if not path_lines:
                         path_entry_x, path_entry_y = position['x'], position['y']
+                        path_tail_x, path_tail_y = path_entry_x, path_entry_y
                     path_lines.append(original)
                     path_indices.append(source_idx)
+                    if params['x'] is not None:
+                        path_tail_x = params['x']
+                    if params['y'] is not None:
+                        path_tail_y = params['y']
                 elif f_only and path_lines:
                     path_lines.append(original)
                     path_indices.append(source_idx)
                 else:
-                    # A barrier can be a retract/unretract, travel, G92,
-                    # mode switch, Z move or other motion/control command.
-                    # Flush the previous wall FIRST, then execute it once.
+                    # Real travels, retracts, G92, motion-mode switches and Z
+                    # moves remain path barriers and are executed only once.
                     flush_outer_path()
                     write_and_track(output_buffer, original, recent_output_lines)
                     if is_move and params['z'] is not None:
