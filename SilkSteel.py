@@ -4286,6 +4286,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         logging.info("FINAL PASS: Applying Safe Z-hop")
         logging.info("="*70)
         
+        from tools.travel_collision import DepositedPathMap
+        deposited_paths = DepositedPathMap(extrusion_width)
+        collision_height_tolerance = min(0.10, max(0.06, extrusion_width * 0.18))
+        tracked_e = 0.0
+        tracked_relative_e = False
+
         # Get the processed G-code lines
         modified_gcode = output_buffer.getvalue()
         output_buffer.close()
@@ -4314,6 +4320,21 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         zhop_skipped_already_safe = 0
         
         for line_idx, line in enumerate(gcode_lines):
+            command = line.split(';', 1)[0].strip()
+            if re.match(r'^M83(?:\s|$)', command):
+                tracked_relative_e = True
+            elif re.match(r'^M82(?:\s|$)', command):
+                tracked_relative_e = False
+            elif re.match(r'^G92(?:\s|$)', command):
+                reset_e = extract_e(command)
+                if reset_e is not None:
+                    tracked_e = reset_e
+                reset_x, reset_y = extract_x(command), extract_y(command)
+                if reset_x is not None:
+                    last_x = reset_x
+                if reset_y is not None:
+                    last_y = reset_y
+
             # Track layer changes
             if ";LAYER_CHANGE" in line or ";LAYER:" in line:
                 if ";LAYER:" in line:
@@ -4379,6 +4400,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 
                 # Preserve previous position for travel path sampling BEFORE updating
                 prev_x, prev_y = last_x, last_y
+                prev_z = zhop_working_z
+                e_delta = 0.0
+                if has_e:
+                    next_e = tracked_e + params['e'] if tracked_relative_e else params['e']
+                    e_delta = next_e - tracked_e
+                    tracked_e = next_e
                 if params['x'] is not None:
                     last_x = params['x']
                 if params['y'] is not None:
@@ -4400,59 +4427,29 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 is_extrusion = has_xy and has_e
                 
                 if is_travel and not is_hopped:
-                    # Calculate safe Z for THIS SPECIFIC TRAVEL PATH
-                    # Sample noise LUT along travel line to find maximum non-planar infill height
-                    start_x, start_y = prev_x, prev_y
-                    end_x = last_x
-                    end_y = last_y
-                    
-                    # Calculate travel distance first
-                    travel_dist = ((end_x - start_x)**2 + (end_y - start_y)**2)**0.5
+                    travel_dist = math.hypot(last_x - prev_x, last_y - prev_y)
                     if travel_dist < 0.01:
-                        # Ignore micro-travel; no hop needed
                         zhop_skipped_micro_travel += 1
                         final_output.write(line)
                         continue
-                    
-                    # Find maximum Z along the travel path by sampling noise LUT
-                    path_max_z = 0.0
-                    if 'grid_resolution' in locals() and 'noise_lut' in locals() and noise_lut is not None and 'amplitude' in locals():
-                        # Cache layer base Z lookup
-                        layer_base_z = z_layer_map.get(zhop_current_layer, zhop_working_z)
-                        
-                        # Sample points along the travel line
-                        num_samples = max(5, int(travel_dist / grid_resolution) + 1)
-                            
-                        for i in range(num_samples):
-                            t = i / max(1, num_samples - 1)
-                            sample_x = start_x + t * (end_x - start_x)
-                            sample_y = start_y + t * (end_y - start_y)
-                            
-                            # Calculate non-planar Z using helper function (no taper for travel path)
-                            actual_z = calculate_nonplanar_z(noise_lut, sample_x, sample_y, layer_base_z, amplitude, taper_factor=1.0)
-                            
-                            # Track maximum Z encountered
-                            path_max_z = max(path_max_z, actual_z)
-                    
-                    # Fallback to layer-wide max if LUT not available
-                    if path_max_z == 0.0:
-                        path_max_z = actual_layer_max_z.get(zhop_current_layer, layer_max_z.get(zhop_current_layer, 0.0))
-                    
-                    if path_max_z > 0 and not in_bridge and not in_wipe:  # never lift during bridge or wipe
-                        safe_z = path_max_z + safe_z_hop_margin
-                        # Only hop if difference is significant (> 0.1mm threshold)
-                        hop_distance = safe_z - zhop_working_z
-                        if hop_distance > 0.1:
+
+                    # Check prior *deposited* geometry only. A theoretical
+                    # noise peak or a different wall elsewhere on this layer
+                    # cannot justify a hop along an empty travel corridor.
+                    obstacle_z = deposited_paths.obstacle_top(
+                        prev_x, prev_y, last_x, last_y, prev_z,
+                        collision_height_tolerance)
+                    if obstacle_z is not None and not in_bridge and not in_wipe:
+                        safe_z = max(prev_z, obstacle_z + safe_z_hop_margin)
+                        if safe_z - prev_z > 0.1:
                             final_output.write(f"G0 Z{safe_z:.3f} F8400 ; SilkSteel: ZHOP_LIFT\n")
                             is_hopped = True
                             zhop_lift_count += 1
                         else:
                             zhop_skipped_already_safe += 1
-                    
-                    # Write the travel line
                     final_output.write(line)
                     continue
-                
+
                 if is_extrusion and is_hopped:
                     # ALWAYS restore the pre-hop height *before* extrusion.
                     # In non-planar infill each segment carries its own Z target.
@@ -4467,11 +4464,17 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     if has_z:
                         zhop_current_z = params['z']
                         zhop_working_z = params['z']
+                    if e_delta > 1e-8:
+                        deposited_paths.add(prev_x, prev_y, prev_z,
+                                            last_x, last_y, zhop_working_z)
                     final_output.write(line)
                     continue
                 
                 if is_extrusion:
                     zhop_has_extruded_on_layer = True
+                    if e_delta > 1e-8:
+                        deposited_paths.add(prev_x, prev_y, prev_z,
+                                            last_x, last_y, zhop_working_z)
                 
                 # All other G0/G1: pass through
                 final_output.write(line)

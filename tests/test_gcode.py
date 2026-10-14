@@ -500,6 +500,54 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertNotIn(" Z0.3", next(line for line in region.splitlines()
                                      if line.startswith("G1 X10 Y0")))
 
+    def test_safe_zhop_ignores_adjacent_road_and_lower_layer(self):
+        # Travel next to a strand is not a collision. An older, lower strand
+        # below the current nozzle Z must not force a hop either.
+        code = [
+            "; layer_height = 0.2", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M82", "G92 E100",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G1 Z0.2", ";TYPE:External perimeter",
+            "G0 X0 Y0 F8400", "G1 X20 Y0 E101 F1200",
+            "G0 X20 Y0.7 F8400", "G0 X0 Y0.7 F8400",
+            "G1 X0 Y1.2 E101.2 F1200",
+            ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2", ";LAYER:1",
+            "G1 Z0.4", ";TYPE:Internal infill",
+            "G0 X0 Y-2 F8400", "G0 X20 Y2 F8400",
+            "G1 X20 Y8 E101.5 F1200",
+        ]
+        output = self.process("\n".join(code) + "\n",
+                              enable_smoothificator=False,
+                              enable_safe_z_hop=True)
+        self.assertNotIn("ZHOP_LIFT", output)
+        self.assertNotIn("ZHOP_DROP", output)
+
+    def test_safe_zhop_only_lifts_for_crossed_printed_obstacle(self):
+        code = [
+            "; layer_height = 0.2", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M82", "G92 E100",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G1 Z0.2", ";TYPE:Internal perimeter",
+            "G0 X0 Y0 F8400", "G1 X20 Y0 E101 F1200",
+            "G0 X20 Y-4 F8400",
+            "G0 X0 Y4 F8400",  # diagonal crosses the printed horizontal wall
+            "G1 X0 Y8 E101.5 F1200",
+        ]
+        output = self.process("\n".join(code) + "\n",
+                              enable_smoothificator=False,
+                              enable_safe_z_hop=True)
+        self.assertEqual(output.count("ZHOP_LIFT"), 1)
+        self.assertEqual(output.count("ZHOP_DROP"), 1)
+        self.assertIn("G0 Z0.700 F8400 ; SilkSteel: ZHOP_LIFT", output)
+        # An explicit restore happens before the next extrusion.
+        lift_index = output.index("ZHOP_LIFT")
+        travel_index = output.index("G0 X0 Y4 F8400")
+        drop_index = output.index("ZHOP_DROP")
+        print_index = output.index("G1 X0 Y8 E101.5")
+        self.assertLess(lift_index, travel_index)
+        self.assertLess(travel_index, drop_index)
+        self.assertLess(drop_index, print_index)
+
     def test_zhop_drops_before_z_bearing_nonplanar_extrusion(self):
         # Regression: G1 X/Y/Z/E moves all axes simultaneously. A segment's
         # explicit Z must NOT cancel a pending hop without a separate Z drop.
