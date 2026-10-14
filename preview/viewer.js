@@ -1197,6 +1197,27 @@ function chooseLayer(index) {
     updateTimelineUI();
     updateVisibility();
 }
+// Arrow-key navigation works globally except while editing native controls.
+document.addEventListener("keydown", event=>{
+    if(!model||!data||event.altKey||event.ctrlKey||event.metaKey)return;
+    const target=event.target;
+    if(target?.isContentEditable || target?.closest?.("input,select,textarea,[contenteditable], [role=slider]"))return;
+    if(!["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(event.key))return;
+    event.preventDefault();
+    if(event.key==="ArrowUp"||event.key==="ArrowDown"){
+        const current=browsingLayer?selectedLayer:visualLayer;
+        chooseLayer(current+(event.key==="ArrowUp"?1:-1));
+    }else{
+        setPlaying(false);
+        const [min,max]=activeRange();
+        const delta=(event.shiftKey?5:0.5)*(event.key==="ArrowRight"?1:-1);
+        const origin=browsingLayer
+            ? (playbackMode==="layer"?min:currentTime)
+            : currentTime;
+        seek(Math.max(min,Math.min(max,origin+delta)));
+    }
+});
+
 function markerLabel(text,x,width,onClick) {
     const mark=document.createElement("button");
     mark.type="button"; mark.className="timeline-marker";
