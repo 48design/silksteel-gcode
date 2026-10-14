@@ -219,12 +219,12 @@ class DepositedSurface:
                 cy = math.floor(y * self.inv)
                 for dx in range(-grid_radius, grid_radius + 1):
                     gx = cx + dx
-                    if ((gx + 0.5) * self.resolution - x) ** 2 > rr:
+                    x_sq = ((gx + 0.5) * self.resolution - x) ** 2
+                    if x_sq > rr:
                         continue
                     for dy in range(-grid_radius, grid_radius + 1):
                         gy = cy + dy
-                        if (((gx + 0.5) * self.resolution - x) ** 2 +
-                                ((gy + 0.5) * self.resolution - y) ** 2 > rr):
+                        if x_sq + ((gy + 0.5) * self.resolution - y) ** 2 > rr:
                             continue
                         key = (gx, gy)
                         if self._strand_end is not None:
