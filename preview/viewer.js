@@ -1340,6 +1340,8 @@ function updateVisibility() {
             const alpha=Math.max(0,Math.min(1,(currentTime-p.start)/(p.end-p.start)));
             if(alpha>0){
                 headMesh.material.uniforms.uColor.value.copy(rgb[p.role]);
+                headMesh.material.uniforms.uLayerZ.value=model.layers[visualLayer].z;
+                headMesh.material.uniforms.uNonPlanarBlend.value=(p.role===4?1:0);
                 headMesh.userData.role=p.role;
                 renderTip(headMesh,p,alpha,finished);
             }
