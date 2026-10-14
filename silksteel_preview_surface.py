@@ -228,7 +228,9 @@ class DepositedSurface:
                             continue
                         key = (gx, gy)
                         if self._strand_end is not None:
-                            self._pending[key] = max(self._pending.get(key, -math.inf), z)
+                            previous = self._pending.get(key)
+                            if previous is None or z > previous:
+                                self._pending[key] = z
                         else:
                             high, low = self._tops.get(key, (-math.inf, -math.inf))
                             if z > high + 0.025:
