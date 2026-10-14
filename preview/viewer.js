@@ -297,10 +297,11 @@ void main(){
  // directional, fill and grazing illumination even at very low brightness.
  float fill=max(dot(n,normalize(vec3(0.65,0.30,-0.70))),0.0);
  float top=max(n.y,0.0);
- // Approximate layer-height footprint in screen pixels. Below ~2 px
- // alternating highlights become undersampled and cause visible moire.
- float detail=smoothstep(0.75,2.5,vLayerPixels);
- float darkShade=mix(0.67,0.40+0.48*diffuse+0.22*fill+0.13*top,detail);
+ // Gradual anti-aliasing starts while layers are still several pixels
+ // high, rather than abruptly suppressing highlights only below 2 px.
+ float detail=smoothstep(1.5,8.0,vLayerPixels);
+ float lit=0.55+0.27*diffuse+0.12*fill+0.06*top;
+ float darkShade=mix(0.78,lit,detail);
  vec3 mutedColor=vec3(0.018,0.026,0.040)*darkShade;
  // Screen-space specular antialiasing: broaden the highlight when the
  // interpolated normal varies faster than a pixel can resolve.
@@ -310,7 +311,9 @@ void main(){
  float gloss=52.0/(1.0+120.0*normalVariation);
  float specular=pow(max(dot(n,halfVec),0.0),gloss);
  float grazing=pow(1.0-max(dot(n,viewDir),0.0),3.0);
- vec3 sheen=vec3(0.19,0.25,0.34)*(0.85*specular+0.10*grazing)*detail;
+ // Keep highlights near the diffuse/albedo range: no bright silver
+ // stripes between neighboring dark toolpaths.
+ vec3 sheen=vec3(0.035,0.048,0.066)*(0.55*specular+0.045*grazing)*detail;
  gl_FragColor=vec4(mix(vBeadColor*shade,mutedColor+sheen,uMuted),uAlpha);
  #include <tonemapping_fragment>
  #include <colorspace_fragment>
