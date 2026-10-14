@@ -398,7 +398,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                             layer_z=layer["z"] if explicit_layers or len(layers) > 1 else None,
                             speed=feedrate / 60.0, role=role,
                             brick_pass=brick_pass_index,
-                            bed_reference=explicit_layers and layer_no == 0
+                            bed_reference=explicit_layers and layer_no == 0 and role == 0
                         )
                         # Reject only the invalid SUBSECTION, never its valid
                         # neighbors or an entire otherwise valid G-code move.
