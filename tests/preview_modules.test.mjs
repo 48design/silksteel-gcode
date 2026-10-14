@@ -178,7 +178,7 @@ assert(tallLoft.bounds.padding>=.9); // culling must include full downward stret
 // Playback must not expose a missing end cap when the next G1 is hidden.
 const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
 assert(viewer.includes("vLayerPixels=h*projectionMatrix[1][1]*uViewportHeight"));
-assert(viewer.includes("float detail=smoothstep(0.75,2.5,vLayerPixels)"));
+assert(viewer.includes("float detail=smoothstep(1.5,8.0,vLayerPixels)"));
 assert(viewer.includes("float normalVariation=dot(fwidth(n),fwidth(n))"));
 assert(viewer.includes("vec3 sheen="));
 
