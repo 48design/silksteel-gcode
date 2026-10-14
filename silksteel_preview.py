@@ -238,7 +238,26 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                     continue
                 cmd = m.group(1)
             cmd = {"G00": "G0", "G01": "G1", "G02": "G2", "G03": "G3", "G04": "G4"}.get(cmd, cmd)
-            params = {k: float(v) for k, v in TOKEN.findall(code.upper()) if k not in ("G", "M")}
+            # Most slicers emit whitespace-separated G0/G1 XYZEF words.
+            # Parse those directly; retain the regex parser for packed and
+            # nonstandard commands. G-code semantics and output stay identical.
+            params = None
+            if cmd in ("G0", "G1") and len(words) > 1:
+                quick = {}
+                for field in words[1].split():
+                    key, value = field[:1], field[1:]
+                    if (key not in "XYZEF" or not value or
+                            value[0] not in "+-.0123456789" or "_" in value):
+                        break
+                    try:
+                        quick[key] = float(value)
+                    except ValueError:
+                        break
+                else:
+                    params = quick
+            if params is None:
+                params = {k: float(v) for k, v in TOKEN.findall(code.upper())
+                          if k not in ("G", "M")}
             if cmd == "G4":
                 surface.finish_strand()
                 before = elapsed
