@@ -47,7 +47,7 @@ class DepositedPathMap:
         distance = math.hypot(x1 - x0, y1 - y0)
         if distance < 0.02 or not self.cells:
             return None
-        endpoint = min(0.45, distance * 0.20)
+        endpoint = min(0.42, distance * 0.50)
         interior = distance - 2.0 * endpoint
         if interior <= 0:
             return None
