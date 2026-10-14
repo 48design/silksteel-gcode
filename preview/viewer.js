@@ -648,17 +648,18 @@ function refreshCut(){
     const axis=$("cutAxis").value, n=new THREE.Vector3(0,0,0);
     const idx=axis==="x"?0:axis==="y"?1:2;
     const coord=idx===2?1:idx===1?2:0;
-    n.setComponent(coord,$("cutInvert").checked?-1:1);
+    n.setComponent(coord,($("cutInvert").checked?-1:1)*(axis==="y"?-1:1));
     const bounds=model?.bounds||[[0,0,0],[1,1,1]];
     const min=bounds[0][idx],max=bounds[1][idx];
     const position=min+(max-min)*Number($("cutPosition").value)/1000;
     clipPlane.normal.copy(n);
-    clipPlane.constant=enabled?-position*n.getComponent(coord):1e9;
+    clipPlane.constant=enabled?-(axis==="y"?-position:position)*n.getComponent(coord):1e9;
     $("cutValue").textContent=enabled?axis.toUpperCase()+" = "+position.toFixed(3)+" mm":"Schnitt aus";
     if(cutHelper){scene.remove(cutHelper);cutHelper.geometry.dispose();cutHelper.material.dispose();cutHelper=null;}
     if(enabled){
         const size=Math.max(10,...bounds[1].map((v,i)=>v-bounds[0][i]))*1.08;
         cutHelper=new THREE.PlaneHelper(clipPlane,size,0x80c0ff);
+        cutHelper.scale.z=-1; // Neutralize the mirrored scene root for world-space cut plane.
         scene.add(cutHelper);
     }
     sectionKey="";
