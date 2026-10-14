@@ -177,6 +177,12 @@ assert(tallLoft.bounds.padding>=.9); // culling must include full downward stret
 
 // Playback must not expose a missing end cap when the next G1 is hidden.
 const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
+// Keyboard shortcuts: layers and animation, without hijacking form controls.
+assert(viewer.includes('document.addEventListener("keydown", event=>{'));
+assert(viewer.includes('chooseLayer(current+(event.key==="ArrowUp"?1:-1))'));
+assert(viewer.includes('event.key==="ArrowRight"?1:-1'));
+assert(viewer.includes('target?.closest?.("input,select,textarea,[contenteditable], [role=slider]")'));
+
 const visibilityStart=viewer.indexOf("function updateVisibility() {");
 const visibilityEnd=viewer.indexOf("function ",visibilityStart+1);
 const visibilityBody=viewer.slice(visibilityStart,visibilityEnd);
