@@ -3223,11 +3223,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             write_and_track(output_buffer, move + "\n", recent_output_lines)
                         else:
                             move = replace_e(original, target_e) if extract_e(original.split(';', 1)[0]) is not None else original
-                            head, sep, comment = move.partition(';')
-                            move = head.rstrip('\r\n') + f" Z{target_z:.5f}"
-                            if sep:
-                                move += ' ;' + comment.rstrip('\r\n')
-                            write_and_track(output_buffer, move + "\n", recent_output_lines)
+                            write_and_track(output_buffer, move, recent_output_lines)
 
                     actual_layer_max_z[current_layer] = max(
                         actual_layer_max_z.get(current_layer, pass_z), pass_z)
