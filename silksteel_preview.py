@@ -395,7 +395,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         sections = IdealizedProfile.sections(
                             tuple(part_start), tuple(part_end), extrusion_area, nominal_h,
                             first_height or layer_height,
-                            layer_z=layer["z"] if explicit_layers else None,
+                            layer_z=layer["z"] if explicit_layers or len(layers) > 1 else None,
                             speed=feedrate / 60.0, role=role,
                             brick_pass=brick_pass_index
                         )
