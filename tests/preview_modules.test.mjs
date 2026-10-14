@@ -237,6 +237,20 @@ assert.equal(sharedSplitSection(i=>[
     {...split[0],line:123},{...split[1],line:124}
 ][i]||null,0,true),null);
 
+// Color transitions must not break a physically connected GPU loft.
+const gradientRecords=[
+    {...bead([0,0,1.04],[10,0,1.04],0,0,1),line:12998},
+    {...bead([10,0,1.04],[20,0,1.281],4,1,2),line:12999},
+    {...bead([20,0,1.281],[30,0,1.04],4,2,3),line:13000},
+    {...bead([30,0,1.04],[40,0,1.04],0,3,4),line:13001}
+];
+const gradientRead=i=>gradientRecords[i]||null;
+assert(joinContinuity(gradientRead,0,true));
+assert(joinContinuity(gradientRead,2,true));
+assert.equal(planLoft([0,1,2,3],gradientRead,0,4,true).caps.length,2);
+assert(viewer.includes("float zAtRing=mix(iStart.z,iStop.z,aEnd)"));
+assert(viewer.includes("vBeadColor=mix(uColor,mix(uRegularColor,uColor,raised),uNonPlanarBlend)"));
+
 // A physical continuation with a different feature must not be welded.
 const mixed=[
     bead([0,0,.2],[10,0,.2]),
