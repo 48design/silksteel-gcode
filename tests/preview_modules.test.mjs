@@ -177,6 +177,16 @@ assert(tallLoft.bounds.padding>=.9); // culling must include full downward stret
 
 // Playback must not expose a missing end cap when the next G1 is hidden.
 const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
+const visibilityStart=viewer.indexOf("function updateVisibility() {");
+const visibilityEnd=viewer.indexOf("function ",visibilityStart+1);
+const visibilityBody=viewer.slice(visibilityStart,visibilityEnd);
+assert(visibilityStart>=0);
+assert(visibilityBody.includes("model.layers[i].z"));
+// Catches the regression that broke the entire viewer/timeline during
+// faded-material reconstruction (no local 'info' exists in this scope).
+assert(!/\\binfo\\.z\\b/.test(visibilityBody));
+
+
 assert(viewer.includes("vec3 p=basePoint + joinVector*lateral"));
 assert(viewer.includes('const base=sectionMesh(4,"mantle")'));
 assert(viewer.includes('const capBase=sectionMesh(4,"cap")'));
