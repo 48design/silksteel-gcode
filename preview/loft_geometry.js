@@ -57,23 +57,27 @@ export function planLoft(indices,read,first,last,seamless=true){
           sizesEnd=new Float32Array(n*2);
     const caps=[];
     let lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
-    let padding=0;
+    let padding=0,previousId=-2,previousRight=null;
     for(let i=0;i<n;i++){
         const id=indices[i],p=read(id);
-        const left=boundary(read,id,false,first,last,seamless);
+        // A connected junction has identical data on both sides. Reuse the
+        // previous outgoing ring when successive IDs share a source junction.
+        const left=id===previousId+1 && previousRight?.connected
+            ? previousRight : boundary(read,id,false,first,last,seamless);
         const right=boundary(read,id,true,first,last,seamless);
+        previousId=id;
+        previousRight=right;
         starts.set(left.point,i*3);ends.set(right.point,i*3);
-        sizes.set([p.w,p.h],i*2);
+        sizes[i*2]=p.w;sizes[i*2+1]=p.h;
         joinsStart.set(left.join,i*3);
         joinsEnd.set(right.join,i*3);
         sizesStart.set(left.size,i*2);
         sizesEnd.set(right.size,i*2);
         if(!left.connected)caps.push({index:id,end:0,local:i});
         if(!right.connected)caps.push({index:id,end:1,local:i});
-        for(const point of [p.a,p.b]){
-            for(let d=0;d<3;d++){
-                lo[d]=Math.min(lo[d],point[d]);hi[d]=Math.max(hi[d],point[d]);
-            }
+        for(let d=0;d<3;d++){
+            lo[d]=Math.min(lo[d],p.a[d],p.b[d]);
+            hi[d]=Math.max(hi[d],p.a[d],p.b[d]);
         }
         padding=Math.max(padding,left.size[0]*Math.hypot(left.join[0],left.join[1]),
             right.size[0]*Math.hypot(right.join[0],right.join[1]),
