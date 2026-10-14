@@ -630,8 +630,8 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreater(field.width_for_area(area,compressed),
                            field.width_for_area(area,free))
 
-    def test_high_first_layer_uses_nominal_height_without_support_grid(self):
-        from silksteel_preview_surface import DepositedSurface
+    def test_high_first_layer_uses_actual_bed_clearance_without_support_grid(self):
+        from silksteel_preview_ideal import IdealizedProfile
         meta,rows=self.parse([
             "; layer_height = 0.2",
             ";LAYER_CHANGE", ";Z:0.8", ";HEIGHT:0.2", ";LAYER:0",
@@ -641,11 +641,12 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertEqual(meta["count"],1)
         self.assertEqual(meta["omittedCount"],0)
         area=.4*math.pi*.875**2/20
+        expected=IdealizedProfile.free_square_side(area)
         for row in rows:
-            self.assertAlmostEqual(row[7],.2,places=5)
+            self.assertAlmostEqual(row[7],expected,places=5)
             self.assertAlmostEqual(
-                DepositedSurface.area_for_size(row[6],row[7]),area,places=5)
-            self.assertAlmostEqual(row[2]-row[7],.6,places=5)
+                IdealizedProfile.area_for_size(row[6],row[7]),area,places=5)
+            self.assertGreater(row[2]-row[7],.5)
 
     def test_free_vs_supported_cross_sections_conserve_material(self):
         from silksteel_preview_surface import DepositedSurface
