@@ -3222,7 +3222,17 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 move += f" F{speed:g}"
                             write_and_track(output_buffer, move + "\n", recent_output_lines)
                         else:
-                            move = replace_e(original, target_e) if extract_e(original.split(';', 1)[0]) is not None else original
+                            if extract_e(original.split(';', 1)[0]) is not None:
+                                move = replace_e(original, target_e)
+                            else:
+                                # Rounded-zero-E segments are legitimate parts
+                                # of the wall. Explicit zero extrusion keeps
+                                # Safe Z-hop from treating them as travels.
+                                head, sep, comment = original.partition(';')
+                                move = head.rstrip('\r\n') + f" E{target_e:.5f}"
+                                if sep:
+                                    move += ' ;' + comment.rstrip('\r\n')
+                                move += "\n"
                             write_and_track(output_buffer, move, recent_output_lines)
 
                     actual_layer_max_z[current_layer] = max(
