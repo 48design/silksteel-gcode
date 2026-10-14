@@ -430,7 +430,7 @@ class GCodeSafetyTests(unittest.TestCase):
                               enable_smoothificator=True,
                               enable_safe_z_hop=True)
         region = output.split("SMOOTHIFICATOR START:", 1)[1].split("SMOOTHIFICATOR END", 1)[0]
-        self.assertEqual(region.count("Smoothificator pass "), 3)
+        self.assertEqual(len(re.findall(r"; Smoothificator pass \\d+/\\d+", region)), 3)
         self.assertNotIn("reverse", region)
         self.assertNotIn("ZHOP_LIFT", region)
         self.assertNotIn("ZHOP_DROP", region)
@@ -493,7 +493,7 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertEqual(region.count("M107"), 1)
         self.assertNotIn("ZHOP_LIFT", region)
         self.assertNotIn("return to path start", region)
-        self.assertEqual(region.count("Smoothificator pass "), 3)
+        self.assertEqual(len(re.findall(r"; Smoothificator pass \\d+/\\d+", region)), 3)
         self.assertEqual(region.count("G1 X10.03 Y0"), 3)
         self.assertEqual([silk.extract_z(line) for line in region.splitlines()
                           if "Smoothificator pass Z" in line], [0.3, 0.4, 0.5])
