@@ -407,6 +407,29 @@ class GCodeSafetyTests(unittest.TestCase):
                 self.assertAlmostEqual(sum(d for line, d in zip(output.splitlines(), delta)
                                            if line in moves), 0.6, places=4)
 
+    def test_smoothificator_even_passes_restore_xy_only_if_needed(self):
+        # Two serpentine passes end at the source contour's start. Only a
+        # subsequent direct extrusion (without slicer XY travel) needs a
+        # one-time relocation to the original end.
+        lines = [
+            "; layer_height = 0.2", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M82", "G92 E100",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G1 Z0.2", ";TYPE:Solid infill",
+            ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2", ";LAYER:1",
+            "G1 Z0.4", ";TYPE:External perimeter", "G0 X0 Y0",
+            "G1 X10 Y0 E100.30000 F1200",
+            "G1 E100.20000 F1800",   # pressure change, real barrier
+            "G1 X20 Y0 E100.50000 F1200",
+            ";TYPE:Solid infill",
+        ]
+        output = self.process("\n".join(lines) + "\n", enable_smoothificator=True)
+        layer = output.split(";LAYER:1", 1)[1]
+        self.assertEqual(layer.count("SMOOTHIFICATOR START: 2 passes"), 2)
+        self.assertEqual(layer.count("Smoothificator source XY restore"), 1)
+        self.assertIn("G0 X10.000 Y0.000 F8400 ; Smoothificator source XY restore", layer)
+        self.assertNotIn("return to path start", layer)
+
     def test_smoothificator_keeps_micro_curve_and_fan_commands_together(self):
         # SuperSlicer inserts zero-rounded-E micro moves and fan changes
         # between adjacent curve segments. Neither is a path boundary.
