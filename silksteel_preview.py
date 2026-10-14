@@ -783,9 +783,9 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     offsets = []
                     try:
                         # Snapshots change every run and have no useful cache key.
-                    # Only stable, manually supplied paths benefit from caching.
-                    parser = convert if (source.parent / ".silksteel-preview-snapshot").exists() else convert_cached
-                    model = parser(source, target, progress=update, source_offsets=offsets)
+                        # Only stable, manually supplied paths benefit from caching.
+                        parser = convert if (source.parent / ".silksteel-preview-snapshot").exists() else convert_cached
+                        model = parser(source, target, progress=update, source_offsets=offsets)
                     except Exception:
                         if index == 0:
                             raise
