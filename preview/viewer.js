@@ -424,13 +424,14 @@ function bindLoftAttributes(geometry,plan,capItems=null){
         for(const [key,values,stride] of vectors){
             const selected=new Float32Array(capItems.length*stride);
             for(let j=0;j<capItems.length;j++){
-                const source=capItems[j].local*stride;
-                selected.set(values.subarray(source,source+stride),j*stride);
+                const source=capItems[j].local*stride, target=j*stride;
+                for(let k=0;k<stride;k++)selected[target+k]=values[source+k];
             }
             geometry.setAttribute(key,new THREE.InstancedBufferAttribute(selected,stride));
         }
-        geometry.setAttribute("iCapEnd",new THREE.InstancedBufferAttribute(
-            Float32Array.from(capItems.map(c=>c.end)),1));
+        const capEnds=new Float32Array(capItems.length);
+        for(let j=0;j<capItems.length;j++)capEnds[j]=capItems[j].end;
+        geometry.setAttribute("iCapEnd",new THREE.InstancedBufferAttribute(capEnds,1));
         geometry.instanceCount=capItems.length;
     }else{
         for(const [key,values,stride] of vectors)
