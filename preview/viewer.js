@@ -292,7 +292,7 @@ void main(){
  float fill=max(dot(n,normalize(vec3(0.65,0.30,-0.70))),0.0);
  float top=max(n.y,0.0);
  float darkShade=0.40+0.48*diffuse+0.22*fill+0.13*top;
- vec3 mutedColor=vec3(0.105,0.155,0.215)*darkShade;
+ vec3 mutedColor=vec3(0.018,0.026,0.040)*darkShade;
  gl_FragColor=vec4(mix(vBeadColor*shade,mutedColor,uMuted),uAlpha);
  #include <tonemapping_fragment>
  #include <colorspace_fragment>
