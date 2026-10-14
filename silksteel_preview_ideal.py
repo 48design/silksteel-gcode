@@ -65,10 +65,10 @@ class IdealizedProfile:
             # Before the first slicer layer *and* in the actual first layer,
             # the only known substrate is the print bed (Z=0). A nominal
             # layer must not be imagined 0.2 mm below an elevated prime line.
-            # Use the physical bed gap when sufficient material was extruded;
-            # a low-flow move high above the bed remains a rounded free strand.
-            free_height = max(nominal, IdealizedProfile.free_square_side(area))
-            height = min(max(0.0, nozzle_z), free_height)
+            # This is an intentional geometry abstraction: Z gives the
+            # nozzle-to-bed gap, regardless of extrusion amount. Cross-section
+            # area determines width; do not invent a free-strand height cap.
+            height = nozzle_z
         elif role == 1 or brick_pass == 2:
             # Smoothificator / second Bricklayers base pass: already defined
             # by the exact per-pass layer thickness in the processed G-code.
