@@ -44,6 +44,7 @@ class IdealizedProfile:
         *,
         role: int = 0,
         brick_pass: int = 0,
+        bed_reference: bool = False,
     ) -> list[tuple[float, float, float, float]]:
         """Return (t0, t1, width, height); never subdivide to probe support.
 
@@ -60,13 +61,14 @@ class IdealizedProfile:
         nozzle_z = (start[2] + end[2]) * 0.5
         reference_z = nozzle_z if layer_z is None else layer_z
 
-        if layer_z is None and role not in (1, 5, 6) and brick_pass == 0:
-            # Before any slicer layer marker, extrusion is often a purge/prime
-            # line. The only known surface is the print bed (Z=0), *not* a
-            # fictitious nominal-height layer immediately below the nozzle.
-            # At very large clearances, an ordinary low-flow strand cannot
-            # reach the bed: let it retain a rounded free profile instead.
-            height = min(max(0.0, nozzle_z), IdealizedProfile.free_square_side(area))
+        if (layer_z is None or bed_reference) and role not in (1, 5, 6) and brick_pass == 0:
+            # Before the first slicer layer *and* in the actual first layer,
+            # the only known substrate is the print bed (Z=0). A nominal
+            # layer must not be imagined 0.2 mm below an elevated prime line.
+            # Use the physical bed gap when sufficient material was extruded;
+            # a low-flow move high above the bed remains a rounded free strand.
+            free_height = max(nominal, IdealizedProfile.free_square_side(area))
+            height = min(max(0.0, nozzle_z), free_height)
         elif role == 1 or brick_pass == 2:
             # Smoothificator / second Bricklayers base pass: already defined
             # by the exact per-pass layer thickness in the processed G-code.
