@@ -285,9 +285,14 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         ignored_arcs += 1
                     else:
                         arc_count += 1
-                path = arc_path[0] if arc_path is not None else [pos, new_pos]
-                path_lengths = [math.dist(a, b) for a, b in zip(path, path[1:])]
-                distance = sum(path_lengths)
+                if arc_path is None:
+                    path = [pos, new_pos]
+                    distance = math.dist(pos, new_pos)
+                    path_lengths = [distance]
+                else:
+                    path = arc_path[0]
+                    path_lengths = [math.dist(a, b) for a, b in zip(path, path[1:])]
+                    distance = sum(path_lengths)
                 if delta_e <= 0 and (distance > 1e-7 or delta_e < -1e-7):
                     # Travels/retractions break the physically continuous
                     # strand, exposing its deposited footprint as support
