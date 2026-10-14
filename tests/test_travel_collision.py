@@ -23,10 +23,10 @@ class DepositedPathMapTests(unittest.TestCase):
     def test_printed_nonplanar_height_is_spatially_local(self):
         roads = DepositedPathMap(0.45)
         roads.add(0, 0, 0.3, 20, 0, 0.6)
-        high = roads.obstacle_top(10, -3, 10, 3, 0.55)
+        high = roads.obstacle_top(10, -3, 10, 3, 0.5)
         self.assertIsNotNone(high)
         self.assertGreater(high, 0.4)
-        self.assertIsNone(roads.obstacle_top(10, 5, 10, 9, 0.55))
+        self.assertIsNone(roads.obstacle_top(10, 5, 10, 9, 0.5))
 
     def test_future_paths_cannot_block_travel(self):
         roads = DepositedPathMap(0.45)
