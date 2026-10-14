@@ -184,7 +184,7 @@ assert(visibilityStart>=0);
 assert(visibilityBody.includes("model.layers[i].z"));
 // Catches the regression that broke the entire viewer/timeline during
 // faded-material reconstruction (no local 'info' exists in this scope).
-assert(!/\\binfo\\.z\\b/.test(visibilityBody));
+assert(!/\binfo\.z\b/.test(visibilityBody));
 
 
 assert(viewer.includes("vec3 p=basePoint + joinVector*lateral"));
