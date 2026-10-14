@@ -774,7 +774,10 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 offsets = []
                 # A new upload has a unique temporary path: a disk cache only
                 # duplicates its data and cannot accelerate the first preview.
+                started_parse = time.perf_counter()
                 model = convert(upload, target, progress=update, source_offsets=offsets)
+                model["parseSeconds"] = round(time.perf_counter() - started_parse, 3)
+                print(f"SilkSteel Preview: upload conversion {model['parseSeconds']:.3f}s", flush=True)
                 model["name"] = display
                 model["filename"] = display
                 model["url"] = "/" + target.name
@@ -801,7 +804,10 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 parser = (convert if
                     (original.parent / ".silksteel-preview-snapshot").exists()
                     else convert_cached)
+                started_parse = time.perf_counter()
                 model = parser(original, target, source_offsets=offsets)
+                model["parseSeconds"] = round(time.perf_counter() - started_parse, 3)
+                print(f"SilkSteel Preview: original conversion {model['parseSeconds']:.3f}s", flush=True)
                 model["name"], model["url"] = "Original", "/" + target.name
                 model["filename"] = original_display_name or original.name
                 model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
@@ -829,7 +835,10 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     parser = (convert if
                         (processed.parent / ".silksteel-preview-snapshot").exists()
                         else convert_cached)
+                    started_parse = time.perf_counter()
                     model = parser(processed, target, progress=update, source_offsets=offsets)
+                    model["parseSeconds"] = round(time.perf_counter() - started_parse, 3)
+                    print(f"SilkSteel Preview: processed conversion {model['parseSeconds']:.3f}s, {model['count']} strands", flush=True)
                     model["name"], model["url"] = "SilkSteel", "/" + target.name
                     model["filename"] = display_name or processed.name
                     model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
