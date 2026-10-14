@@ -3148,20 +3148,21 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     path_lines, path_indices = [], []
                     return
 
-                closed = math.hypot(x - origin_x, y - origin_y) <= 0.002
+                # Slicers can deliberately leave a sub-nozzle-width seam gap
+                # even for a geometrically closed perimeter. Detect that as
+                # a loop; do not reverse such contours on successive passes.
+                closure_gap = math.hypot(x - origin_x, y - origin_y)
+                closure_tolerance = max(0.01, min(0.4, extrusion_width * 0.75))
+                closed = (len(segments) >= 3 and
+                          closure_gap <= closure_tolerance)
                 bottom_z = current_z - (passes_needed - 1) * height_per_pass
-                height_rise = current_z - bottom_z
                 if passes_needed > 1:
                     smooth_paths += 1
                 write_and_track(output_buffer,
                     f"; ====== SMOOTHIFICATOR START: {passes_needed} passes at {height_per_pass:.4f}mm each ======\n",
                     recent_output_lines)
-                # Only the entry needs a stationary Z adjustment. Every later
-                # elevation change is part of an extrusion, like vase mode.
-                write_and_track(output_buffer,
-                    f"G1 Z{bottom_z:.5f} ; Smoothificator entry Z\n",
-                    recent_output_lines)
-
+                # Z changes happen *at* each pass boundary, not gradually
+                # across the perimeter. A pass has one constant nozzle Z.
                 segment_by_index = {item[0]: item for item in segments}
                 for pass_num in range(passes_needed):
                     reverse = not closed and pass_num % 2 == 1
@@ -3169,9 +3170,20 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                         f"; Smoothificator pass {pass_num + 1}/{passes_needed}"
                         f"{' reverse' if reverse else ''}\n",
                         recent_output_lines)
-                    travelled = 0.0
-                    # The complete path rises only from the old bottom pass
-                    # level to the slicer's original top Z: no overshoot.
+                    pass_z = bottom_z + pass_num * height_per_pass
+                    # A plain Z step of exactly one pass height. No XY
+                    # travel, retraction or Safe Z-hop between passes.
+                    write_and_track(output_buffer,
+                        f"G1 Z{pass_z:.5f} ; Smoothificator pass Z {pass_num + 1}/{passes_needed}\n",
+                        recent_output_lines)
+                    # Some slicers deliberately omit the last fraction of
+                    # an outer loop to prevent a seam blob. Close only that
+                    # sub-nozzle-width gap before continuing clockwise.
+                    if pass_num and closed and closure_gap > 0.002:
+                        seam_e = 0.0 if source_relative_modes[path_indices[-1]] else position['e']
+                        write_and_track(output_buffer,
+                            f"G1 X{origin_x:.3f} Y{origin_y:.3f} E{seam_e:.5f} ; Smoothificator seam continuity\n",
+                            recent_output_lines)
                     ordered = reversed(segments) if reverse else segments
                     if reverse:
                         sources = ((item[0], item[1], item) for item in ordered)
@@ -3191,9 +3203,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             continue
 
                         _, _, sx, sy, ex, ey, length, speed = segment
-                        travelled += length
-                        fraction = (pass_num + travelled / path_length) / passes_needed
-                        target_z = bottom_z + height_rise * fraction
                         source_delta = source_e_deltas[source_idx]
                         if pass_num < passes_needed - 1:
                             delta = round(source_delta / passes_needed, 5)
@@ -3207,21 +3216,27 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                             # A reversed segment ends at its original start.
                             # Explicit feedrate prevents reverse traversal from
                             # inheriting the wrong modal F from another edge.
-                            move = (f"G1 X{sx:.3f} Y{sy:.3f} Z{target_z:.5f}"
+                            move = (f"G1 X{sx:.3f} Y{sy:.3f}"
                                     f" E{target_e:.5f}")
                             if speed is not None:
                                 move += f" F{speed:g}"
                             write_and_track(output_buffer, move + "\n", recent_output_lines)
                         else:
-                            move = replace_e(original, target_e) if extract_e(original.split(';', 1)[0]) is not None else original
-                            head, sep, comment = move.partition(';')
-                            move = head.rstrip('\r\n') + f" Z{target_z:.5f}"
-                            if sep:
-                                move += ' ;' + comment.rstrip('\r\n')
-                            write_and_track(output_buffer, move + "\n", recent_output_lines)
+                            if extract_e(original.split(';', 1)[0]) is not None:
+                                move = replace_e(original, target_e)
+                            else:
+                                # Rounded-zero-E segments are legitimate parts
+                                # of the wall. Explicit zero extrusion keeps
+                                # Safe Z-hop from treating them as travels.
+                                head, sep, comment = original.partition(';')
+                                move = head.rstrip('\r\n') + f" E{target_e:.5f}"
+                                if sep:
+                                    move += ' ;' + comment.rstrip('\r\n')
+                                move += "\n"
+                            write_and_track(output_buffer, move, recent_output_lines)
 
                     actual_layer_max_z[current_layer] = max(
-                        actual_layer_max_z.get(current_layer, target_z), target_z)
+                        actual_layer_max_z.get(current_layer, pass_z), pass_z)
 
                 # Keep native retract/prime E coordinates valid after replay.
                 last_idx = path_indices[-1]
