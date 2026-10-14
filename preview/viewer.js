@@ -52,6 +52,8 @@ let layout = await loadPreviewMetadata();
 const canvasHost = $("viewport");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#0c1119");
+// G-code X/Y/Z -> Three.js X/Z/-Y. Without the Y sign flip, the XY plane is mirrored.
+scene.scale.z=-1;
 const camera = new THREE.PerspectiveCamera(45, 1, .02, 100000);
 const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:"high-performance"});
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -730,9 +732,9 @@ function showDiagnostics(){
             setPlaying(false);
             if(playbackMode==="layer")selectedLayer=issue.layer;
             seek(issue.time);
-            controls.target.set(issue.position[0],issue.position[2],issue.position[1]);
+            controls.target.set(issue.position[0],issue.position[2],-issue.position[1]);
             const dist=Math.max(3,(model.bounds[1][0]-model.bounds[0][0])*.08);
-            camera.position.set(issue.position[0]+dist,issue.position[2]+dist,issue.position[1]+dist);
+            camera.position.set(issue.position[0]+dist,issue.position[2]+dist,-issue.position[1]+dist);
             controls.update();
         });
         list.append(btn);
@@ -1429,8 +1431,8 @@ function fit() {
     const [lo,hi] = model.bounds;
     const cx=(lo[0]+hi[0])/2,cy=(lo[1]+hi[1])/2,cz=(lo[2]+hi[2])/2;
     const size=Math.max(hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2],10);
-    controls.target.set(cx,cz,cy);
-    camera.position.set(cx+size*.6,cz+size*.85,cy+size*.85);
+    controls.target.set(cx,cz,-cy);
+    camera.position.set(cx+size*.6,cz+size*.85,-cy+size*.85);
     camera.near=Math.max(.01,size/15000);camera.far=size*150;camera.updateProjectionMatrix();
     controls.update();
     // The grid represents the physical print-bed plane, not the lowest
@@ -1607,8 +1609,8 @@ function selectSegment(event) {
     let best=14*14, pick=null, isRaw=false;
     const a=new THREE.Vector3(),b=new THREE.Vector3();
     const test=p=>{
-        a.set(p.a[0],p.a[2],p.a[1]).project(camera);
-        b.set(p.b[0],p.b[2],p.b[1]).project(camera);
+        a.set(p.a[0],p.a[2],-p.a[1]).project(camera);
+        b.set(p.b[0],p.b[2],-p.b[1]).project(camera);
         const dx=b.x-a.x,dy=b.y-a.y;
         const t=Math.max(0,Math.min(1,((mouse.x-a.x)*dx+(mouse.y-a.y)*dy)/(dx*dx+dy*dy||1)));
         const x=a.x+t*dx,y=a.y+t*dy;
