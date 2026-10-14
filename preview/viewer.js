@@ -1657,8 +1657,28 @@ window.addEventListener("drop",event=>{
     document.body.classList.remove("dragging");
     uploadGcode(event.dataTransfer?.files?.[0]);
 });
+async function loadPendingModels(){
+    while(layout.pendingModels>0){
+        await new Promise(resolve=>setTimeout(resolve,1200));
+        if(uploading)return;
+        let next;
+        try{
+            const response=await fetch("/meta.json",{cache:"no-store"});
+            if(!response.ok)return;
+            next=await response.json();
+        }catch{return;}
+        if(next.models.length>layout.models.length){
+            const selected=modelSelect.value;
+            layout.models=next.models;
+            refreshModelOptions();
+            modelSelect.value=selected;
+            if($("compareToggle").checked)enableComparison();
+        }
+        layout.pendingModels=next.pendingModels||0;
+    }
+}
 if(layout.models.length){
-    loadModel(0).catch(showError);
+    loadModel(0).then(loadPendingModels).catch(showError);
 }else{
     $("fileName").textContent="Keine G-Code-Datei geladen";
     $("stats").textContent="G-Code per Drag & Drop oder über „Datei öffnen“ laden.";
