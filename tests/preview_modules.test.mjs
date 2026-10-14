@@ -183,6 +183,27 @@ assert(viewer.includes("float specDetail=smoothstep(1.0,4.5,vLayerPixels)"));
 assert(viewer.includes("float normalVariation=dot(fwidth(n),fwidth(n))"));
 assert(viewer.includes("vec3 sheen="));
 
+// The translucent nozzle is reusable and follows the extrusion XYZ exactly.
+assert(viewer.includes("function createNozzle(){"));
+assert(viewer.includes("const nozzle=createNozzle()"));
+assert(viewer.includes("function updateNozzle(finished){"));
+assert(viewer.includes("updateNozzle(finished);"));
+assert(viewer.includes('$("showNozzle").addEventListener("change",updateVisibility)'));
+assert(viewer.includes("if(browsingLayer || currentTime>=model.duration-0.0001)"));
+assert(viewer.includes("if(segment.start<=currentTime && currentTime<segment.end)"));
+const html=readFileSync(join(root,"preview","index.html"),"utf-8");
+assert.match(html,/<input type="checkbox" id="showNozzle" checked>/);
+const poseSource=viewer.match(/function positionNozzle\(segment,progress\)\{[\s\S]*?\n\}/)?.[0];
+assert(poseSource,"Nozzle interpolation helper is missing");
+const fakeNozzle={position:{set(...xyz){this.xyz=xyz;}},visible:false};
+const positionNozzle=new Function("nozzle",poseSource+"; return positionNozzle;")(fakeNozzle);
+const motion={a:[10,20,.3],b:[14,24,.5]};
+positionNozzle(motion,.5);
+assert.deepEqual(fakeNozzle.position.xyz,[12,.4,22]);
+assert.equal(fakeNozzle.visible,true);
+positionNozzle(motion,2);
+assert.deepEqual(fakeNozzle.position.xyz,[14,.5,24]);
+
 // Dimmed underlayers must be solid, not alpha-blended, and retain relief.
 assert(viewer.includes("uMuted:{value:faded?1:0}"));
 assert(viewer.includes("transparent:false,depthWrite:true"));
