@@ -1321,7 +1321,7 @@ function updateVisibility() {
             if(mesh.userData.faded!==faded){
                 mesh.material.dispose();
                 mesh.material=newMaterial(mesh.userData.role,faded,
-                    mesh.userData.cap?capVertexShader:vertexShader,info.z);
+                    mesh.userData.cap?capVertexShader:vertexShader,model.layers[i].z);
                 mesh.userData.faded=faded;
             }
         }
