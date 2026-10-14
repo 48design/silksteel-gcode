@@ -1420,20 +1420,24 @@ function updateVisibility() {
         : currentTime>=model.duration-0.0001?model.hopCount:
             completedBefore(model.hopCount,currentTime,hopEndAt);
     const showHops=$("showHops").checked;
-    for(let i=start;i<=current;i++){
-        const info=model.layers[i];
-        if(!showHops||!info.hopCount)continue;
-        let g=hopCache.get(i);
-        if(!g){g=createHopLayer(i);hopCache.set(i,g);}
-        keep.add("h"+i);
-        if(!g.parent)scene.add(g);
-        g.geometry.setDrawRange(0,2*Math.max(0,Math.min(info.hopCount,hopsFinished-info.hopStart)));
-        g.visible=true;
+    // Hops describe travel on one layer. Unlike deposited geometry, hops
+    // on older layers only obscure the motion currently being inspected.
+    const hopLayer=model.layers[current];
+    if(showHops&&hopLayer.hopCount){
+        let group=hopCache.get(current);
+        if(!group){group=createHopLayer(current);hopCache.set(current,group);}
+        if(!group.parent)scene.add(group);
+        group.geometry.setDrawRange(0,2*Math.max(0,
+            Math.min(hopLayer.hopCount,hopsFinished-hopLayer.hopStart)));
+        group.visible=true;
     }
-    for(const [i,g] of hopCache){
-        if(!showHops||!keep.has("h"+i)){
-            scene.remove(g);
-            if(hopCache.size>24||!showHops){disposeHopGroup(g);hopCache.delete(i);}
+    for(const [i,group] of hopCache){
+        if(!showHops||i!==current){
+            scene.remove(group);
+            if(hopCache.size>24||!showHops){
+                disposeHopGroup(group);
+                hopCache.delete(i);
+            }
         }
     }
     hopTip.visible=false;
@@ -1441,7 +1445,7 @@ function updateVisibility() {
         const hop=readHop(hopsFinished);
         if(hop.start<=currentTime&&currentTime<hop.end){
             const startIndex=model.layers.findIndex(l=>hopsFinished>=l.hopStart&&hopsFinished<l.hopStart+l.hopCount);
-            if(startIndex>=start&&startIndex<=current){
+            if(startIndex===current){
                 const ratio=Math.max(0,Math.min(1,(currentTime-hop.start)/(hop.end-hop.start)));
                 const p=hopTip.geometry.attributes.position;
                 p.array.set([hop.a[0],hop.a[2],hop.a[1],
