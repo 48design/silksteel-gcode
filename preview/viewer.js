@@ -1397,7 +1397,9 @@ function fit() {
     camera.position.set(cx+size*.6,cz+size*.85,cy+size*.85);
     camera.near=Math.max(.01,size/15000);camera.far=size*150;camera.updateProjectionMatrix();
     controls.update();
-    grid.position.set(cx,lo[2]-.15,cy);
+    // The grid represents the physical print-bed plane, not the lowest
+    // extrusion Z minus an arbitrary display offset.
+    grid.position.set(cx,0,cy);
     grid.scale.set(Math.max(1,size/300),1,Math.max(1,size/300));
 }
 async function loadModel(index) {
