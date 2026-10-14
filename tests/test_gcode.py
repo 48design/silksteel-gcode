@@ -399,13 +399,51 @@ class GCodeSafetyTests(unittest.TestCase):
                          if line.startswith("G1 X") and silk.extract_e(line) is not None]
                 self.assertEqual([silk.extract_x(line) for line in moves],
                                  [10, 20, 10, 0, 10, 20])
-                self.assertTrue(all(silk.extract_z(line) is not None for line in moves))
-                heights = [silk.extract_z(line) for line in moves]
-                self.assertTrue(all(a < b for a, b in zip(heights, heights[1:])))
-                self.assertAlmostEqual(heights[-1], 0.5, places=4)
+                # All segments within each pass have constant Z. Each
+                # pass boundary lifts exactly 0.1mm in one stationary move.
+                self.assertTrue(all(silk.extract_z(line) is None for line in moves))
+                pass_heights = [silk.extract_z(line) for line in region.splitlines()
+                                if "Smoothificator pass Z" in line]
+                self.assertEqual(pass_heights, [0.3, 0.4, 0.5])
+                self.assertNotIn("Smoothificator seam continuity", region)
                 delta, _, _ = silk.scan_source_extrusion(output.splitlines())
                 self.assertAlmostEqual(sum(d for line, d in zip(output.splitlines(), delta)
                                            if line in moves), 0.6, places=4)
+
+    def test_smoothificator_nearly_closed_outline_follows_same_direction(self):
+        # SuperSlicer sometimes leaves a small anti-blob gap at the seam.
+        # This is still one perimeter, not an open path to zig-zag.
+        lines = [
+            "; layer_height = 0.3", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M82", "G92 E100",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G1 Z0.2", ";TYPE:Solid infill",
+            ";LAYER_CHANGE", ";Z:0.5", ";HEIGHT:0.3", ";LAYER:1",
+            "G1 Z0.5", ";TYPE:External perimeter", "G0 X0 Y0",
+            "G1 X10 Y0 E100.3 F1200",
+            "G1 X10 Y10 E100.6",
+            "G1 X0 Y10 E100.9",
+            "G1 X0.16 Y0 E101.2",
+            ";TYPE:Solid infill",
+        ]
+        output = self.process("\n".join(lines) + "\n",
+                              enable_smoothificator=True,
+                              enable_safe_z_hop=True)
+        region = output.split("SMOOTHIFICATOR START:", 1)[1].split("SMOOTHIFICATOR END", 1)[0]
+        self.assertEqual(region.count("Smoothificator pass "), 3)
+        self.assertNotIn("reverse", region)
+        self.assertNotIn("ZHOP_LIFT", region)
+        self.assertNotIn("ZHOP_DROP", region)
+        self.assertEqual([silk.extract_z(line) for line in region.splitlines()
+                          if "Smoothificator pass Z" in line], [0.3, 0.4, 0.5])
+        passes = re.split(r"; Smoothificator pass [123]/3\n", region)
+        self.assertEqual(len(passes), 4)
+        for current in passes[1:]:
+            first = next(line for line in current.splitlines()
+                         if line.startswith("G1 X10 Y0"))
+            self.assertIsNotNone(first)
+            self.assertIsNone(silk.extract_z(first))
+        self.assertEqual(region.count("Smoothificator seam continuity"), 2)
 
     def test_smoothificator_even_passes_restore_xy_only_if_needed(self):
         # Two serpentine passes end at the source contour's start. Only a
@@ -457,10 +495,10 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertNotIn("return to path start", region)
         self.assertEqual(region.count("Smoothificator pass "), 3)
         self.assertEqual(region.count("G1 X10.03 Y0"), 3)
-        self.assertAlmostEqual(silk.extract_z(
-            next(line for line in reversed(region.splitlines())
-                 if line.startswith("G1 X") and silk.extract_e(line) is not None)
-        ), 0.5, places=4)
+        self.assertEqual([silk.extract_z(line) for line in region.splitlines()
+                          if "Smoothificator pass Z" in line], [0.3, 0.4, 0.5])
+        self.assertNotIn(" Z0.3", next(line for line in region.splitlines()
+                                     if line.startswith("G1 X10 Y0")))
 
     def test_zhop_drops_before_z_bearing_nonplanar_extrusion(self):
         # Regression: G1 X/Y/Z/E moves all axes simultaneously. A segment's
