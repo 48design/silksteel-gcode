@@ -177,6 +177,12 @@ assert(tallLoft.bounds.padding>=.9); // culling must include full downward stret
 
 // Playback must not expose a missing end cap when the next G1 is hidden.
 const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
+// Dimmed underlayers must be solid, not alpha-blended, and retain relief.
+assert(viewer.includes("uMuted:{value:faded?1:0}"));
+assert(viewer.includes("transparent:false,depthWrite:true"));
+assert(viewer.includes("float darkShade="));
+assert(viewer.includes("frontierCap.material.uniforms.uMuted.value="));
+
 // Three.js X/Z/Y without a Y sign reversal mirrors the slicer's XY paths.
 assert(viewer.includes("scene.scale.z=-1"));
 assert(viewer.includes("controls.target.set(cx,cz,-cy)"));
