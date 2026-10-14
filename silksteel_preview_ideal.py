@@ -9,11 +9,28 @@ from __future__ import annotations
 
 import math
 
-from silksteel_preview_surface import DepositedSurface
+CORNER_LOSS = (4.0 - math.pi) * 0.4 ** 2
 
 
 class IdealizedProfile:
     """Compute one volume-preserving cross section per source path segment."""
+
+    @staticmethod
+    def area_for_size(width: float, height: float) -> float:
+        return width * height - CORNER_LOSS * min(width, height) ** 2
+
+    @staticmethod
+    def width_for_area(area: float, height: float) -> float:
+        wide = area / height + CORNER_LOSS * height
+        if wide >= height:
+            return wide
+        return 2.0 * area / (
+            height + math.sqrt(max(0.0, height * height - 4.0 * CORNER_LOSS * area))
+        )
+
+    @staticmethod
+    def free_square_side(area: float) -> float:
+        return math.sqrt(area / (1.0 - CORNER_LOSS))
 
     @staticmethod
     def sections(
@@ -49,7 +66,7 @@ class IdealizedProfile:
             height = nominal
         elif role == 6:
             # A bridge is assumed to span air, with a rounded free strand.
-            height = DepositedSurface.free_square_side(area)
+            height = IdealizedProfile.free_square_side(area)
         elif role == 5:
             # Valley fill is deliberately emitted as <= 0.1 mm Z increments.
             height = min(nominal, 0.1)
@@ -64,7 +81,7 @@ class IdealizedProfile:
         # A negative deep valley offset would otherwise produce a negative
         # cross-section. Keep its volume represented by a finite thin strand.
         height = max(0.05, nominal * 0.5, height)
-        width = DepositedSurface.width_for_area(area, height)
+        width = IdealizedProfile.width_for_area(area, height)
         if not (math.isfinite(width) and math.isfinite(height) and
                 0 < width <= 40 and 0 < height <= 40):
             return []
