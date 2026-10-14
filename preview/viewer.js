@@ -236,8 +236,11 @@ attribute vec2 iSize;
 attribute vec3 iJoinStart, iJoinEnd;
 attribute vec2 iSizeStart, iSizeEnd;
 uniform float uAlpha;
+uniform vec3 uColor, uRegularColor;
+uniform float uLayerZ, uNonPlanarBlend;
 varying vec3 vNormal;
 varying vec3 vPosition;
+varying vec3 vBeadColor;
 #include <clipping_planes_pars_vertex>
 void main(){
   vec3 d=iStop-iStart;
@@ -258,6 +261,11 @@ void main(){
   vNormal=aCap>0.5 ? (aEnd>0.5 ? tangent : -tangent)
                       : normalize(joinVector*aCos+vec3(0.0,aSin,0.0));
   vPosition=p;
+  // Vertex-level color: a descending non-planar move fades back to the
+  // standard infill color at precisely the nominal layer Z.
+  float zAtRing=mix(iStart.z,iStop.z,aEnd);
+  float raised=smoothstep(0.005,0.04,abs(zAtRing-uLayerZ));
+  vBeadColor=mix(uColor,mix(uRegularColor,uColor,raised),uNonPlanarBlend);
   vec4 mvPosition=modelViewMatrix*vec4(p,1.0);
   gl_Position=projectionMatrix*mvPosition;
   #include <clipping_planes_vertex>
@@ -268,25 +276,31 @@ void main(){
 const capVertexShader=vertexShader.replaceAll("aEnd","iCapEnd");
 const fragmentShader = `
 precision highp float;
-uniform vec3 uColor;
 uniform float uAlpha;
 varying vec3 vNormal;
 varying vec3 vPosition;
+varying vec3 vBeadColor;
 #include <clipping_planes_pars_fragment>
 void main(){
  #include <clipping_planes_fragment>
  vec3 light=normalize(vec3(-0.45,0.85,0.5));
  float diffuse=max(dot(normalize(vNormal),light),0.0);
  float shade=0.47+0.53*diffuse;
- gl_FragColor=vec4(uColor*shade,uAlpha);
+ gl_FragColor=vec4(vBeadColor*shade,uAlpha);
  #include <tonemapping_fragment>
  #include <colorspace_fragment>
 }
 `;
-const newMaterial = (role, faded, geometryShader=vertexShader) => new THREE.ShaderMaterial({
+const newMaterial = (role, faded, geometryShader=vertexShader, layerZ=0) => new THREE.ShaderMaterial({
     vertexShader:geometryShader, fragmentShader, side:THREE.DoubleSide,
     clipping:true, clippingPlanes:clipPlanes,
-    uniforms:{uColor:{value:rgb[role].clone()},uAlpha:{value:faded?.19:1}},
+    uniforms:{
+        uColor:{value:rgb[role].clone()},
+        uRegularColor:{value:rgb[0].clone()},
+        uNonPlanarBlend:{value:role===4?1:0},
+        uLayerZ:{value:layerZ},
+        uAlpha:{value:faded?.19:1}
+    },
     transparent:!!faded,depthWrite:!faded,
     polygonOffset:false
 });
@@ -496,7 +510,7 @@ function createLayer(index) {
         const plan=planLoft(chunk.indices,cachedRead,first,last,seamless);
         const geometry=base.clone();
         bindLoftAttributes(geometry,plan);
-        const mesh=new THREE.Mesh(geometry,newMaterial(chunk.role,false));
+        const mesh=new THREE.Mesh(geometry,newMaterial(chunk.role,false,vertexShader,info.z));
         mesh.frustumCulled=true;
         mesh.userData.role=chunk.role;
         mesh.userData.indices=Uint32Array.from(chunk.indices);
@@ -508,7 +522,7 @@ function createLayer(index) {
         if(plan.caps.length){
             const capGeometry=capBase.clone();
             bindLoftAttributes(capGeometry,plan,plan.caps);
-            const caps=new THREE.Mesh(capGeometry,newMaterial(chunk.role,false,capVertexShader));
+            const caps=new THREE.Mesh(capGeometry,newMaterial(chunk.role,false,capVertexShader,info.z));
             caps.frustumCulled=true;
             caps.userData.role=chunk.role;
             caps.userData.cap=true;
@@ -1308,7 +1322,7 @@ function updateVisibility() {
             if(mesh.userData.faded!==faded){
                 mesh.material.dispose();
                 mesh.material=newMaterial(mesh.userData.role,faded,
-                    mesh.userData.cap?capVertexShader:vertexShader);
+                    mesh.userData.cap?capVertexShader:vertexShader,info.z);
                 mesh.userData.faded=faded;
             }
         }
