@@ -177,6 +177,17 @@ assert(tallLoft.bounds.padding>=.9); // culling must include full downward stret
 
 // Playback must not expose a missing end cap when the next G1 is hidden.
 const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
+// The selected model must never be published before its binary tracks arrive.
+const loadStart=viewer.indexOf("async function loadModel(index) {");
+const loadEnd=viewer.indexOf('modelSelect.addEventListener("change"',loadStart);
+const loadBody=viewer.slice(loadStart,loadEnd);
+assert(loadStart>=0&&loadEnd>loadStart);
+assert(loadBody.includes("const generation=++modelLoadGeneration"));
+assert(loadBody.includes("if(generation!==modelLoadGeneration)return"));
+assert(loadBody.indexOf("model=requested;")>loadBody.indexOf("nextData.byteLength"));
+assert(loadBody.indexOf("data=nextData;")>loadBody.indexOf("model=requested;"));
+assert(loadBody.indexOf("hopData=nextHops;")>loadBody.indexOf("data=nextData;"));
+
 // Keyboard shortcuts: layers and animation, without hijacking form controls.
 assert(viewer.includes('document.addEventListener("keydown", event=>{'));
 assert(viewer.includes('chooseLayer(current+(event.key==="ArrowUp"?1:-1))'));
