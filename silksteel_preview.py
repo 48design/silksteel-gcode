@@ -368,7 +368,9 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         role = 1
                     elif role_type.startswith("BRIDGE") or role_type.startswith("INTERNAL BRIDGE"):
                         role = 6
-                    elif "INFILL" in role_type and "Z" in params and abs(new_pos[2] - layer["z"]) > 0.005:
+                    elif ("INFILL" in role_type and
+                          (abs(pos[2] - layer["z"]) > 0.005 or
+                           abs(new_pos[2] - layer["z"]) > 0.005)):
                         role = 4
                     else:
                         role = 0
