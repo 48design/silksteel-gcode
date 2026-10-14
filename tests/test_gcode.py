@@ -367,6 +367,101 @@ class GCodeSafetyTests(unittest.TestCase):
                              and silk.extract_e(line) is not None and delta > 0)
                 self.assertAlmostEqual(wall_e, 2.0, places=3)
 
+    def test_smoothificator_open_path_zigzags_without_return_travels(self):
+        # A source open outline must print back and forth, raising Z during
+        # extrusion instead of travelling to its start after each pass.
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                lines = [
+                    "; layer_height = 0.3", "; first_layer_height = 0.2",
+                    "; extrusion_width = 0.45", "G90",
+                    "M83" if relative else "M82",
+                    "G92 E0" if relative else "G92 E100",
+                    ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+                    "G1 Z0.2", ";TYPE:Solid infill", "G1 X0 Y0 F1200",
+                    ";LAYER_CHANGE", ";Z:0.5", ";HEIGHT:0.3", ";LAYER:1",
+                    "G1 Z0.5", ";TYPE:External perimeter",
+                    "G0 X0 Y0 F8400",
+                    "G1 X10 Y0 E0.30000 F1200" if relative else "G1 X10 Y0 E100.30000 F1200",
+                    "G1 F900",
+                    "G1 X20 Y0 E0.30000" if relative else "G1 X20 Y0 E100.60000",
+                    ";TYPE:Solid infill",
+                ]
+                output = self.process("\n".join(lines) + "\n",
+                                      enable_smoothificator=True,
+                                      enable_safe_z_hop=True)
+                region = output.split("SMOOTHIFICATOR START:", 1)[1].split("SMOOTHIFICATOR END", 1)[0]
+                self.assertIn("Smoothificator pass 2/3 reverse", region)
+                self.assertNotIn("return to path start", region)
+                self.assertNotIn("ZHOP_LIFT", region)
+                self.assertNotIn("ZHOP_DROP", region)
+                moves = [line for line in region.splitlines()
+                         if line.startswith("G1 X") and silk.extract_e(line) is not None]
+                self.assertEqual([silk.extract_x(line) for line in moves],
+                                 [10, 20, 10, 0, 10, 20])
+                self.assertTrue(all(silk.extract_z(line) is not None for line in moves))
+                heights = [silk.extract_z(line) for line in moves]
+                self.assertTrue(all(a < b for a, b in zip(heights, heights[1:])))
+                self.assertAlmostEqual(heights[-1], 0.5, places=4)
+                delta, _, _ = silk.scan_source_extrusion(output.splitlines())
+                self.assertAlmostEqual(sum(d for line, d in zip(output.splitlines(), delta)
+                                           if line in moves), 0.6, places=4)
+
+    def test_smoothificator_even_passes_restore_xy_only_if_needed(self):
+        # Two serpentine passes end at the source contour's start. Only a
+        # subsequent direct extrusion (without slicer XY travel) needs a
+        # one-time relocation to the original end.
+        lines = [
+            "; layer_height = 0.2", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M82", "G92 E100",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G1 Z0.2", ";TYPE:Solid infill",
+            ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2", ";LAYER:1",
+            "G1 Z0.4", ";TYPE:External perimeter", "G0 X0 Y0",
+            "G1 X10 Y0 E100.30000 F1200",
+            "G1 E100.20000 F1800",   # pressure change, real barrier
+            "G1 X20 Y0 E100.50000 F1200",
+            ";TYPE:Solid infill",
+        ]
+        output = self.process("\n".join(lines) + "\n", enable_smoothificator=True)
+        layer = output.split(";LAYER:1", 1)[1]
+        self.assertEqual(layer.count("SMOOTHIFICATOR START: 2 passes"), 2)
+        self.assertEqual(layer.count("Smoothificator source XY restore"), 1)
+        self.assertIn("G0 X10.000 Y0.000 F8400 ; Smoothificator source XY restore", layer)
+        self.assertNotIn("return to path start", layer)
+
+    def test_smoothificator_keeps_micro_curve_and_fan_commands_together(self):
+        # SuperSlicer inserts zero-rounded-E micro moves and fan changes
+        # between adjacent curve segments. Neither is a path boundary.
+        lines = [
+            "; layer_height = 0.3", "; first_layer_height = 0.2",
+            "; extrusion_width = 0.45", "G90", "M82", "G92 E100",
+            ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2", ";LAYER:0",
+            "G1 Z0.2", ";TYPE:Solid infill",
+            ";LAYER_CHANGE", ";Z:0.5", ";HEIGHT:0.3", ";LAYER:1",
+            "G1 Z0.5", ";TYPE:External perimeter", "G0 X0 Y0",
+            "G1 X10 Y0 E100.30000 F1200",
+            "G1 X10.03 Y0 E100.30000",
+            "M106 S120", "G1 X10 Y10 E100.60000",
+            "M107", "G1 X0 Y10 E100.90000",
+            "G1 X0 Y0 E101.20000",
+            ";TYPE:Solid infill",
+        ]
+        output = self.process("\n".join(lines) + "\n",
+                              enable_smoothificator=True, enable_safe_z_hop=True)
+        region = output.split(";LAYER:1", 1)[1].split(";TYPE:Solid infill", 1)[0]
+        self.assertEqual(region.count("SMOOTHIFICATOR START: 3 passes"), 1)
+        self.assertEqual(region.count("M106 S120"), 1)
+        self.assertEqual(region.count("M107"), 1)
+        self.assertNotIn("ZHOP_LIFT", region)
+        self.assertNotIn("return to path start", region)
+        self.assertEqual(region.count("Smoothificator pass "), 3)
+        self.assertEqual(region.count("G1 X10.03 Y0"), 3)
+        self.assertAlmostEqual(silk.extract_z(
+            next(line for line in reversed(region.splitlines())
+                 if line.startswith("G1 X") and silk.extract_e(line) is not None)
+        ), 0.5, places=4)
+
     def test_zhop_drops_before_z_bearing_nonplanar_extrusion(self):
         # Regression: G1 X/Y/Z/E moves all axes simultaneously. A segment's
         # explicit Z must NOT cancel a pending hop without a separate Z drop.
