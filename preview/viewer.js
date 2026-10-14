@@ -240,6 +240,8 @@ uniform float uLayerZ, uNonPlanarBlend;
 varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vBeadColor;
+varying float vBeadHeight;
+varying float vViewDepth;
 #include <clipping_planes_pars_vertex>
 void main(){
   vec3 d=iStop-iStart;
@@ -266,6 +268,8 @@ void main(){
   float raised=smoothstep(0.005,0.04,abs(zAtRing-uLayerZ));
   vBeadColor=mix(uColor,mix(uRegularColor,uColor,raised),uNonPlanarBlend);
   vec4 mvPosition=modelViewMatrix*vec4(p,1.0);
+  vBeadHeight=h;
+  vViewDepth=max(0.001,-mvPosition.z);
   gl_Position=projectionMatrix*mvPosition;
   #include <clipping_planes_vertex>
 }
@@ -277,6 +281,9 @@ const fragmentShader = `
 precision highp float;
 uniform float uAlpha;
 uniform float uMuted;
+uniform float uViewportHeight;
+varying float vBeadHeight;
+varying float vViewDepth;
 varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vBeadColor;
@@ -291,15 +298,22 @@ void main(){
  // directional, fill and grazing illumination even at very low brightness.
  float fill=max(dot(n,normalize(vec3(0.65,0.30,-0.70))),0.0);
  float top=max(n.y,0.0);
- float darkShade=0.40+0.48*diffuse+0.22*fill+0.13*top;
+ // Approximate layer-height footprint in screen pixels. Below ~2 px
+ // alternating highlights become undersampled and cause visible moire.
+ float layerPx=vBeadHeight*projectionMatrix[1][1]*uViewportHeight/
+               (2.0*vViewDepth);
+ float detail=smoothstep(0.75,2.5,layerPx);
+ float darkShade=mix(0.67,0.40+0.48*diffuse+0.22*fill+0.13*top,detail);
  vec3 mutedColor=vec3(0.018,0.026,0.040)*darkShade;
- // View-dependent, narrow highlights make rounded bead edges readable
- // without lifting the dark base color or changing normal feature colors.
+ // Screen-space specular antialiasing: broaden the highlight when the
+ // interpolated normal varies faster than a pixel can resolve.
  vec3 viewDir=normalize(vec3(cameraPosition.x,cameraPosition.y,-cameraPosition.z)-vPosition);
  vec3 halfVec=normalize(light+viewDir);
- float specular=pow(max(dot(n,halfVec),0.0),52.0);
+ float normalVariation=dot(fwidth(n),fwidth(n));
+ float gloss=52.0/(1.0+120.0*normalVariation);
+ float specular=pow(max(dot(n,halfVec),0.0),gloss);
  float grazing=pow(1.0-max(dot(n,viewDir),0.0),3.0);
- vec3 sheen=vec3(0.19,0.25,0.34)*(0.85*specular+0.10*grazing);
+ vec3 sheen=vec3(0.19,0.25,0.34)*(0.85*specular+0.10*grazing)*detail;
  gl_FragColor=vec4(mix(vBeadColor*shade,mutedColor+sheen,uMuted),uAlpha);
  #include <tonemapping_fragment>
  #include <colorspace_fragment>
@@ -314,6 +328,7 @@ const newMaterial = (role, faded, geometryShader=vertexShader, layerZ=0) => new 
         uNonPlanarBlend:{value:role===4?1:0},
         uLayerZ:{value:layerZ},
         uMuted:{value:faded?1:0},
+        uViewportHeight:{value:renderer.domElement.height},
         uAlpha:{value:1}
     },
     transparent:false,depthWrite:true,
@@ -1692,7 +1707,15 @@ renderer.domElement.addEventListener("pointerdown",e=>{down=[e.clientX,e.clientY
 renderer.domElement.addEventListener("pointerup",e=>{if(down&&Math.hypot(e.clientX-down[0],e.clientY-down[1])<4)selectSegment(e);down=null;});
 const resize = new ResizeObserver(() => {
     const w=canvasHost.clientWidth,h=canvasHost.clientHeight;
-    if(w&&h){renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+    if(w&&h){
+        renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();
+        const pxHeight=renderer.domElement.height;
+        for(const group of cache.values())
+            for(const mesh of group.children)
+                mesh.material.uniforms.uViewportHeight.value=pxHeight;
+        headMesh.material.uniforms.uViewportHeight.value=pxHeight;
+        frontierCap.material.uniforms.uViewportHeight.value=pxHeight;
+    }
 });
 resize.observe(canvasHost);
 const timelineResize=new ResizeObserver(()=>{
