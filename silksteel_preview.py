@@ -554,7 +554,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
         root = Path(tmp)
         heartbeat = {"at": time.monotonic()}
         state = {"status": "loading", "message": "G-Code-Analyse wird gestartet…",
-                 "progress": 0, "lines": 0}
+                 "progress": 0, "lines": 0, "pendingModels": 0}
         models = []
         sources_by_url: dict[str, tuple[Path, list[int]]] = {}
         ready = threading.Event()
@@ -765,18 +765,29 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 sources = [("SilkSteel", processed, display_name or processed.name)] if processed else []
                 if original is not None:
                     sources.append(("Original", original, original_display_name or original.name))
+                state["pendingModels"] = len(sources)
                 for index, (label, source, display) in enumerate(sources):
                     state["message"] = f"{label}: {source.name} wird analysiert…"
-                    state["progress"] = int(index * 100 / len(sources))
+                    if index == 0:
+                        state["progress"] = 0
                     state["lines"] = 0
 
                     def update(lines, percent, index=index):
-                        state["lines"] = lines
-                        state["progress"] = int((index + percent / 100) * 100 / len(sources))
+                        if index == 0:
+                            state["lines"] = lines
+                            state["progress"] = percent
 
                     target = root / (label.lower() + ".bin")
                     offsets = []
-                    model = convert_cached(source, target, progress=update, source_offsets=offsets)
+                    try:
+                        model = convert_cached(source, target, progress=update, source_offsets=offsets)
+                    except Exception:
+                        if index == 0:
+                            raise
+                        traceback.print_exc()
+                        print(f"SilkSteel Preview: unable to load optional {label}", flush=True)
+                        state["pendingModels"] -= 1
+                        continue
                     model["name"], model["url"] = label, "/" + target.name
                     model["filename"] = display
                     model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
@@ -784,11 +795,17 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     model["moveUrl"] = "/" + target.with_suffix(".moves.bin").name
                     sources_by_url[model["url"]] = (source, offsets)
                     models.append(model)
+                    state["pendingModels"] -= 1
+                    # The processed result can be inspected immediately; the
+                    # original is optional and continues preparing afterwards.
+                    if index == 0:
+                        state.update(status="ready", message="Vorschau bereit", progress=100)
                 state.update(status="ready", message="Vorschau bereit", progress=100)
                 print("SilkSteel Preview: finished parsing", flush=True)
             except Exception as exc:
                 traceback.print_exc()
-                state.update(status="error", message=f"{type(exc).__name__}: {exc}")
+                state.update(status="error", message=f"{type(exc).__name__}: {exc}",
+                             pendingModels=0)
             finally:
                 ready.set()
 
