@@ -1428,7 +1428,7 @@ async function loadModel(index) {
     fit();
     refreshCut();
     seek(model.duration);
-    console.info(`[Viewer] ${model.name}: transfer ${transferMs.toFixed(1)}ms; initial geometry ${(performance.now()-loadStarted-transferMs).toFixed(1)}ms; total ${(performance.now()-loadStarted).toFixed(1)}ms`);
+    console.info(`[Viewer] ${model.name}: parse ${model.parseSeconds??"n/a"}s; transfer ${transferMs.toFixed(1)}ms; initial geometry ${(performance.now()-loadStarted-transferMs).toFixed(1)}ms; total ${(performance.now()-loadStarted).toFixed(1)}ms`);
     $("diagnosticsSummary").textContent="Diagnose bei Bedarf aktivieren";
     if($("diagnosticsToggle").checked)showDiagnostics();
     if($("compareToggle").checked)enableComparison();
