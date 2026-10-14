@@ -219,7 +219,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                 elif "BRICKLAYERS BASE PASS" in up or "BRICKLAYERS BASE BLOCK" in up:
                     brick_role = 2
                     brick_base_pass = "BASE PASS" in up
-                    pass_match = re.search(r"BASE PASS\\s+(\\d+)/", up) if brick_base_pass else None
+                    pass_match = re.search(r"BASE PASS\s+(\d+)/", up) if brick_base_pass else None
                     brick_pass_index = int(pass_match.group(1)) if pass_match else 0
                 elif "RESET Z" in up or "BRICKLAYERS CONTOUR E SYNC" in up:
                     brick_role, brick_base_pass, brick_pass_index = None, False, 0
