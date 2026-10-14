@@ -211,7 +211,7 @@ assert(loadBody.indexOf("hopData=nextHops;")>loadBody.indexOf("data=nextData;"))
 assert(viewer.includes('document.addEventListener("keydown", event=>{'));
 assert(viewer.includes('chooseLayer(current+(event.key==="ArrowUp"?1:-1))'));
 assert(viewer.includes('event.key==="ArrowRight"?1:-1'));
-assert(viewer.includes('target?.closest?.("input,select,textarea,[contenteditable], [role=slider]")'));
+assert(viewer.includes('"textarea,select,[contenteditable],input:not([type=range]):not([type=checkbox]):not([type=radio])"'));
 
 const visibilityStart=viewer.indexOf("function updateVisibility() {");
 const visibilityEnd=viewer.indexOf("function ",visibilityStart+1);
@@ -221,6 +221,16 @@ assert(visibilityBody.includes("model.layers[i].z"));
 // Catches the regression that broke the entire viewer/timeline during
 // faded-material reconstruction (no local 'info' exists in this scope).
 assert(!/\binfo\.z\b/.test(visibilityBody));
+// Z-hops follow only the currently selected layer; "Darunter anzeigen"
+// and the underlayer dimming setting affect deposited material, not hops.
+assert(visibilityBody.includes("const hopLayer=model.layers[current]"));
+assert(visibilityBody.includes("if(showHops&&hopLayer.hopCount)"));
+assert(visibilityBody.includes("hopCache.get(current)"));
+assert(visibilityBody.includes("Math.min(hopLayer.hopCount,hopsFinished-hopLayer.hopStart)"));
+assert(visibilityBody.includes("if(!showHops||i!==current)"));
+assert(visibilityBody.includes("if(startIndex===current)"));
+assert(!visibilityBody.includes('keep.add("h"+i)'));
+
 
 
 assert(viewer.includes("vec3 p=basePoint + joinVector*lateral"));
