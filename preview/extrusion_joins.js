@@ -4,7 +4,9 @@ import {profileArea,profileWidth} from "./bead_profile.js";
 export function joinContinuity(read,index,atEnd) {
     const a=read(atEnd?index:index-1),b=read(atEnd?index+1:index);
     if(!a || !b)return null;
-    if(!a.b || !b.a || a.role!==b.role)return null;
+    const sameMaterialGroup=a.role===b.role ||
+        ((a.role===0||a.role===4)&&(b.role===0||b.role===4));
+    if(!a.b || !b.a || !sameMaterialGroup)return null;
     if(Math.hypot(a.b[0]-b.a[0],a.b[1]-b.a[1],a.b[2]-b.a[2])>.012)return null;
     // Tolerate Float32 timestamp quantization on long prints.
     if(b.start-a.end>.08 || b.start<a.end-.12)return null;
