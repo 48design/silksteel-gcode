@@ -177,6 +177,13 @@ assert(tallLoft.bounds.padding>=.9); // culling must include full downward stret
 
 // Playback must not expose a missing end cap when the next G1 is hidden.
 const viewer=readFileSync(join(root,"preview","viewer.js"),"utf-8");
+// Three.js X/Z/Y without a Y sign reversal mirrors the slicer's XY paths.
+assert(viewer.includes("scene.scale.z=-1"));
+assert(viewer.includes("controls.target.set(cx,cz,-cy)"));
+assert(viewer.includes("a.set(p.a[0],p.a[2],-p.a[1]).project(camera)"));
+assert(viewer.includes("b.set(p.b[0],p.b[2],-p.b[1]).project(camera)"));
+assert(viewer.includes('axis==="y"?-position:position'));
+
 // The selected model must never be published before its binary tracks arrive.
 const loadStart=viewer.indexOf("async function loadModel(index) {");
 const loadEnd=viewer.indexOf('modelSelect.addEventListener("change"',loadStart);
