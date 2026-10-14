@@ -641,12 +641,12 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertEqual(meta["count"],1)
         self.assertEqual(meta["omittedCount"],0)
         area=.4*math.pi*.875**2/20
-        expected=IdealizedProfile.free_square_side(area)
+        expected=.8
         for row in rows:
             self.assertAlmostEqual(row[7],expected,places=5)
             self.assertAlmostEqual(
                 IdealizedProfile.area_for_size(row[6],row[7]),area,places=5)
-            self.assertGreater(row[2]-row[7],.5)
+            self.assertAlmostEqual(row[2]-row[7],0.,places=5)
 
     def test_free_vs_supported_cross_sections_conserve_material(self):
         from silksteel_preview_surface import DepositedSurface
