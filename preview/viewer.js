@@ -97,19 +97,16 @@ function applyColor(index, hex) {
     if (!/^#[0-9a-f]{6}$/i.test(hex)) return;
     colors[index] = hex;
     rgb[index].set(hex);
-    for (const group of cache.values()) {
-        for (const mesh of group.children) {
-            if (mesh.userData.role === index)
-                mesh.material.uniforms.uColor.value.copy(rgb[index]);
-        }
-    }
-    if (headMesh.visible) {
-        const current = Number(headMesh.userData.role);
-        if (current === index)
-            headMesh.material.uniforms.uColor.value.copy(rgb[index]);
-    }
-    if(frontierCap.visible && frontierCap.userData.role===index)
-        frontierCap.material.uniforms.uColor.value.copy(rgb[index]);
+    const recolor=mesh=>{
+        if(mesh.userData.role===index)
+            mesh.material.uniforms.uColor.value.copy(rgb[index]);
+        if(index===0)
+            mesh.material.uniforms.uRegularColor.value.copy(rgb[0]);
+    };
+    for(const group of cache.values())
+        for(const mesh of group.children)recolor(mesh);
+    recolor(headMesh);
+    recolor(frontierCap);
     if(index===7 && typeof hopTip!=="undefined"){
         for(const group of hopCache.values())group.material.color.set(hex);
         hopTip.material.color.set(hex);
