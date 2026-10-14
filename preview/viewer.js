@@ -1438,21 +1438,35 @@ function fit() {
     grid.position.set(cx,0,cy);
     grid.scale.set(Math.max(1,size/300),1,Math.max(1,size/300));
 }
+let modelLoadGeneration=0;
 async function loadModel(index) {
+    const generation=++modelLoadGeneration;
     const loadStarted=performance.now();
+    setPlaying(false);
     forgetLayers();
-    model=layout.models[index];
+    model=null;
+    data=null;
+    hopData=null;
+    const requested=layout.models[index];
+    if(!requested)throw new Error("Ungültige G-Code-Version");
     $("progress").hidden=false;
-    $("progress").textContent="Lade "+model.name+" · "+model.count.toLocaleString("de-DE")+" Stränge…";
-    const [response,hopResponse]=await Promise.all([fetch(model.url),fetch(model.hopUrl)]);
+    $("progress").textContent="Lade "+requested.name+" · "+requested.count.toLocaleString("de-DE")+" Stränge…";
+    const [response,hopResponse]=await Promise.all([fetch(requested.url),fetch(requested.hopUrl)]);
     if(!response.ok||!hopResponse.ok)throw Error("HTTP "+response.status+" / "+hopResponse.status);
     const buffers=await Promise.all([response.arrayBuffer(),hopResponse.arrayBuffer()]);
-    data=new DataView(buffers[0]);
-    hopData=new DataView(buffers[1]);
+    // A second model may be selected while these requests are in flight.
+    // Commit metadata and both binary tracks together, never individually.
+    if(generation!==modelLoadGeneration)return;
+    const nextData=new DataView(buffers[0]);
+    const nextHops=new DataView(buffers[1]);
     const transferMs=performance.now()-loadStarted;
-    if(data.byteLength!==model.count*SEGMENT_SIZE || hopData.byteLength!==model.hopCount*HOP_SIZE){
+    if(nextData.byteLength!==requested.count*SEGMENT_SIZE ||
+       nextHops.byteLength!==requested.hopCount*HOP_SIZE){
         throw new Error("G-Code-Vorschau: Ungültiges Binärformat oder Segmentgröße");
     }
+    model=requested;
+    data=nextData;
+    hopData=nextHops;
     $("fileName").textContent=model.filename;
     $("stats").textContent=model.count.toLocaleString("de-DE")+" Extrusionssegmente · "+model.layers.length+" Layer · Filament Ø "+model.filament.toFixed(2)+" mm"+
         (model.omittedCount?" · "+model.omittedCount+" nicht gerenderte Bewegungen":"")+
