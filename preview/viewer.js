@@ -126,6 +126,12 @@ function refreshModelOptions() {
         opt.textContent=item.name;
         modelSelect.append(opt);
     });
+    if(layout.originalAvailable&&!layout.models.some(m=>m.name==="Original")){
+        const opt=document.createElement("option");
+        opt.value="original-pending";
+        opt.textContent="Original (bei Bedarf laden)";
+        modelSelect.append(opt);
+    }
 }
 refreshModelOptions();
 layout.roles.forEach((name, i) => {
@@ -737,12 +743,52 @@ function referenceIndex(){
     const original=layout.models.findIndex((m,i)=>i!==selected&&m.name==="Original");
     return original>=0?original:layout.models.findIndex((_,i)=>i!==selected);
 }
+let originalRequest=null;
+async function ensureOriginal(){
+    const available=layout.models.findIndex(m=>m.name==="Original");
+    if(available>=0)return available;
+    if(!layout.originalAvailable)throw new Error("Keine Originaldatei verfügbar");
+    if(!originalRequest){
+        originalRequest=(async()=>{
+            const response=await fetch("/prepare-original",{method:"POST"});
+            if(!response.ok)throw new Error("Originalanalyse konnte nicht gestartet werden (HTTP "+response.status+")");
+            for(;;){
+                const result=await fetch("/meta.json",{cache:"no-store"});
+                if(!result.ok)throw new Error("Metadaten nicht verfügbar (HTTP "+result.status+")");
+                const next=await result.json();
+                const previous=modelSelect.value;
+                layout.models=next.models;
+                layout.originalState=next.originalState;
+                const index=layout.models.findIndex(m=>m.name==="Original");
+                if(index>=0){
+                    refreshModelOptions();
+                    modelSelect.value=previous==="original-pending"?"0":previous;
+                    return index;
+                }
+                if(next.originalState==="error")
+                    throw new Error(next.originalError||"Originalanalyse fehlgeschlagen");
+                await new Promise(resolve=>setTimeout(resolve,500));
+            }
+        })().catch(error=>{originalRequest=null;throw error;});
+    }
+    return originalRequest;
+}
 async function enableComparison(){
     comparisonSerial++;
     const serial=comparisonSerial;
     clearComparison();
     if(!$("compareToggle").checked || !model || !data)return;
-    const idx=referenceIndex();
+    let idx=referenceIndex();
+    if(idx<0&&layout.originalAvailable){
+        $("comparisonSummary").textContent="Original wird bei Bedarf analysiert…";
+        try{idx=await ensureOriginal();}
+        catch(error){
+            if(serial===comparisonSerial)
+                $("comparisonSummary").textContent="Vergleich nicht möglich: "+error.message;
+            return;
+        }
+    }
+    if(serial!==comparisonSerial||!$("compareToggle").checked)return;
     if(idx<0){
         $("comparisonSummary").textContent="Bitte zuerst Original- und bearbeiteten G-Code laden.";
         return;
@@ -1389,6 +1435,15 @@ async function loadModel(index) {
 }
 modelSelect.addEventListener("change",()=>{
     setPlaying(false);
+    if(modelSelect.value==="original-pending"){
+        const index=layout.models.indexOf(model);
+        modelSelect.value=String(index<0?0:index);
+        ensureOriginal().then(index=>{
+            modelSelect.value=String(index);
+            return loadModel(index);
+        }).catch(showError);
+        return;
+    }
     loadModel(Number(modelSelect.value)).catch(showError);
 });
 slider.addEventListener("input",()=>chooseLayer(Number(slider.value)));
@@ -1657,28 +1712,8 @@ window.addEventListener("drop",event=>{
     document.body.classList.remove("dragging");
     uploadGcode(event.dataTransfer?.files?.[0]);
 });
-async function loadPendingModels(){
-    while(layout.pendingModels>0){
-        await new Promise(resolve=>setTimeout(resolve,1200));
-        if(uploading)return;
-        let next;
-        try{
-            const response=await fetch("/meta.json",{cache:"no-store"});
-            if(!response.ok)return;
-            next=await response.json();
-        }catch{return;}
-        if(next.models.length>layout.models.length){
-            const selected=modelSelect.value;
-            layout.models=next.models;
-            refreshModelOptions();
-            modelSelect.value=selected;
-            if($("compareToggle").checked)enableComparison();
-        }
-        layout.pendingModels=next.pendingModels||0;
-    }
-}
 if(layout.models.length){
-    loadModel(0).then(loadPendingModels).catch(showError);
+    loadModel(0).catch(showError);
 }else{
     $("fileName").textContent="Keine G-Code-Datei geladen";
     $("stats").textContent="G-Code per Drag & Drop oder über „Datei öffnen“ laden.";
