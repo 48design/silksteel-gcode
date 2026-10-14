@@ -3100,6 +3100,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             path_entry_x = position['x']
             path_entry_y = position['y']
             path_tail_x, path_tail_y = path_entry_x, path_entry_y
+            source_cursor_x, source_cursor_y = path_entry_x, path_entry_y
 
             def flush_outer_path():
                 nonlocal path_lines, path_indices, path_entry_x, path_entry_y
@@ -3247,6 +3248,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 is_move = re.match(r'^G0?[01](?:\s|$)', code) is not None
                 params = parse_gcode_line(code) if is_move else None
                 has_xy = is_move and (params['x'] is not None or params['y'] is not None)
+                # The slicer's XY cursor is independent of our alternating
+                # pass endpoint (even pass counts can end at the path start).
+                source_start_x, source_start_y = source_cursor_x, source_cursor_y
+                if has_xy:
+                    if params['x'] is not None:
+                        source_cursor_x = params['x']
+                    if params['y'] is not None:
+                        source_cursor_y = params['y']
                 delta = source_e_deltas[source_idx]
                 is_extrusion = (is_move and has_xy and delta > 0
                                 and params['z'] is None)
@@ -3273,7 +3282,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                     path_indices.append(source_idx)
                 elif is_extrusion or tiny_nonextrusion:
                     if not path_lines:
-                        path_entry_x, path_entry_y = position['x'], position['y']
+                        if math.hypot(position['x'] - source_start_x,
+                                      position['y'] - source_start_y) > 0.002:
+                            # No slicer XY travel followed the reversed last
+                            # pass. Restore the actual source start once, rather
+                            # than extruding a diagonal across the contour.
+                            write_and_track(output_buffer,
+                                f"G0 X{source_start_x:.3f} Y{source_start_y:.3f} F8400 ; Smoothificator source XY restore\n",
+                                recent_output_lines)
+                        path_entry_x, path_entry_y = source_start_x, source_start_y
                         path_tail_x, path_tail_y = path_entry_x, path_entry_y
                     path_lines.append(original)
                     path_indices.append(source_idx)
