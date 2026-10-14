@@ -536,6 +536,25 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertGreater(field.width_for_area(area,.20),.20)
         self.assertLess(field.width_for_area(area,.60),.60)
 
+    def test_descending_nonplanar_infill_keeps_role_until_layer_z(self):
+        lines=[
+            "; layer_height = 0.2", ";LAYER_CHANGE", ";Z:1.040",
+            ";HEIGHT:0.2", ";LAYER:5", ";TYPE:Internal infill",
+            "G90", "M83", "G0 X150.415 Y124.271 Z1.052",
+            "G1 X150.254 Y124.870 Z1.281 E0.07051",
+            "G1 X150.094 Y125.469 Z1.040 E0.02815",
+            "G1 X149.933 Y126.068 Z1.040 E0.02815",
+            "G0 X157.635 Y124.734 Z1.393",
+            "G1 X158.252 Y124.569 Z1.040 E0.02899",
+            "G1 X158.869 Y124.404 Z1.040 E0.02899",
+            "G0 Z1.270", "G1 X159.486 Y124.238 E0.02899",
+        ]
+        meta,rows=self.parse(lines)
+        self.assertEqual(meta["count"],6)
+        self.assertEqual([int(row[8]) for row in rows],[4,4,0,4,0,4])
+        self.assertEqual([int(row[9]) for row in rows],[10,11,12,14,15,17])
+        self.assertEqual(meta["omittedCount"],0)
+
     def test_converter_nonplanar_height_tracks_commanded_z_offset(self):
         # The viewer's analytic substrate is the slicer layer reference.
         # Reversing the same path changes order, never the physical profile
