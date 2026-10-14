@@ -558,9 +558,28 @@ def serve(processed: Path | None = None, original: Path | None = None,
         models = []
         sources_by_url: dict[str, tuple[Path, list[int]]] = {}
         ready = threading.Event()
+        original_state = {"status": "idle" if original is not None else "absent",
+                          "error": ""}
+        original_lock = threading.Lock()
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
+                if self.path == "/prepare-original":
+                    origin = self.headers.get("Origin")
+                    if origin and origin != f"http://127.0.0.1:{server.server_port}":
+                        self.send_error(403, "Invalid origin")
+                        return
+                    with original_lock:
+                        if original_state["status"] == "idle":
+                            original_state["status"] = "parsing"
+                            threading.Thread(target=prepare_original, daemon=True).start()
+                    payload = json.dumps(original_state).encode("utf-8")
+                    self.send_response(202 if original_state["status"] == "parsing" else 200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 if self.path == "/settings/sidebar":
                     origin = self.headers.get("Origin")
                     if origin and origin != f"http://127.0.0.1:{server.server_port}":
@@ -690,7 +709,10 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     payload, mime = b"ok", "text/plain"
                 elif path == "/meta.json":
                     payload = json.dumps(
-                        {"models": models, "roles": ROLES, "colors": read_colors(), "sidebar": read_sidebar(), **state}
+                        {"models": models, "roles": ROLES, "colors": read_colors(), "sidebar": read_sidebar(),
+                         "originalAvailable": original is not None,
+                         "originalState": original_state["status"],
+                         "originalError": original_state["error"], **state}
                     ).encode("utf-8")
                     mime = "application/json"
                 elif path in ("/", "/viewer.js", "/extrusion_joins.js",
@@ -762,55 +784,56 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 # Keep source available to the G-code inspector until server exit.
                 ready.set()
 
+        def prepare_original():
+            if original is None:
+                return
+            try:
+                target = root / "original.bin"
+                offsets = []
+                parser = (convert if
+                    (original.parent / ".silksteel-preview-snapshot").exists()
+                    else convert_cached)
+                model = parser(original, target, source_offsets=offsets)
+                model["name"], model["url"] = "Original", "/" + target.name
+                model["filename"] = original_display_name or original.name
+                model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
+                model["rawUrl"] = "/" + target.with_suffix(".raw.bin").name
+                model["moveUrl"] = "/" + target.with_suffix(".moves.bin").name
+                sources_by_url[model["url"]] = (original, offsets)
+                models.append(model)
+                original_state["status"] = "ready"
+                print("SilkSteel Preview: original ready on demand", flush=True)
+            except Exception as exc:
+                traceback.print_exc()
+                original_state.update(status="error",
+                                      error=f"{type(exc).__name__}: {exc}")
+
         def prepare_files():
             try:
-                sources = [("SilkSteel", processed, display_name or processed.name)] if processed else []
-                if original is not None:
-                    sources.append(("Original", original, original_display_name or original.name))
-                state["pendingModels"] = len(sources)
-                for index, (label, source, display) in enumerate(sources):
-                    state["message"] = f"{label}: {source.name} wird analysiert…"
-                    if index == 0:
-                        state["progress"] = 0
-                    state["lines"] = 0
-
-                    def update(lines, percent, index=index):
-                        if index == 0:
-                            state["lines"] = lines
-                            state["progress"] = percent
-
-                    target = root / (label.lower() + ".bin")
+                if processed is not None:
+                    state.update(message=f"SilkSteel: {processed.name} wird analysiert…",
+                                 progress=0, lines=0)
+                    def update(lines, percent):
+                        state["lines"] = lines
+                        state["progress"] = percent
+                    target = root / "silksteel.bin"
                     offsets = []
-                    try:
-                        # Snapshots change every run and have no useful cache key.
-                        # Only stable, manually supplied paths benefit from caching.
-                        parser = convert if (source.parent / ".silksteel-preview-snapshot").exists() else convert_cached
-                        model = parser(source, target, progress=update, source_offsets=offsets)
-                    except Exception:
-                        if index == 0:
-                            raise
-                        traceback.print_exc()
-                        print(f"SilkSteel Preview: unable to load optional {label}", flush=True)
-                        state["pendingModels"] -= 1
-                        continue
-                    model["name"], model["url"] = label, "/" + target.name
-                    model["filename"] = display
+                    parser = (convert if
+                        (processed.parent / ".silksteel-preview-snapshot").exists()
+                        else convert_cached)
+                    model = parser(processed, target, progress=update, source_offsets=offsets)
+                    model["name"], model["url"] = "SilkSteel", "/" + target.name
+                    model["filename"] = display_name or processed.name
                     model["hopUrl"] = "/" + target.with_suffix(".hops.bin").name
                     model["rawUrl"] = "/" + target.with_suffix(".raw.bin").name
                     model["moveUrl"] = "/" + target.with_suffix(".moves.bin").name
-                    sources_by_url[model["url"]] = (source, offsets)
+                    sources_by_url[model["url"]] = (processed, offsets)
                     models.append(model)
-                    state["pendingModels"] -= 1
-                    # The processed result can be inspected immediately; the
-                    # original is optional and continues preparing afterwards.
-                    if index == 0:
-                        state.update(status="ready", message="Vorschau bereit", progress=100)
                 state.update(status="ready", message="Vorschau bereit", progress=100)
-                print("SilkSteel Preview: finished parsing", flush=True)
+                print("SilkSteel Preview: processed model ready", flush=True)
             except Exception as exc:
                 traceback.print_exc()
-                state.update(status="error", message=f"{type(exc).__name__}: {exc}",
-                             pendingModels=0)
+                state.update(status="error", message=f"{type(exc).__name__}: {exc}")
             finally:
                 ready.set()
 
