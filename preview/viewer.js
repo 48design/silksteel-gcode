@@ -293,7 +293,14 @@ void main(){
  float top=max(n.y,0.0);
  float darkShade=0.40+0.48*diffuse+0.22*fill+0.13*top;
  vec3 mutedColor=vec3(0.018,0.026,0.040)*darkShade;
- gl_FragColor=vec4(mix(vBeadColor*shade,mutedColor,uMuted),uAlpha);
+ // View-dependent, narrow highlights make rounded bead edges readable
+ // without lifting the dark base color or changing normal feature colors.
+ vec3 viewDir=normalize(cameraPosition-vPosition);
+ vec3 halfVec=normalize(light+viewDir);
+ float specular=pow(max(dot(n,halfVec),0.0),52.0);
+ float grazing=pow(1.0-max(dot(n,viewDir),0.0),3.0);
+ vec3 sheen=vec3(0.19,0.25,0.34)*(0.85*specular+0.10*grazing);
+ gl_FragColor=vec4(mix(vBeadColor*shade,mutedColor+sheen,uMuted),uAlpha);
  #include <tonemapping_fragment>
  #include <colorspace_fragment>
 }
