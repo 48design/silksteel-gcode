@@ -464,7 +464,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             "ignored_arcs": ignored_arcs}
 
 
-PREVIEW_CACHE_VERSION = 4
+PREVIEW_CACHE_VERSION = 5
 
 
 def convert_cached(source: Path, destination: Path, progress=None,
