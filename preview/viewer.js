@@ -1237,7 +1237,11 @@ function chooseLayer(index) {
 document.addEventListener("keydown", event=>{
     if(!model||!data||event.altKey||event.ctrlKey||event.metaKey)return;
     const target=event.target;
-    if(target?.isContentEditable || target?.closest?.("input,select,textarea,[contenteditable], [role=slider]"))return;
+    // Range sliders retain focus after mouse interaction. They must not
+    // swallow global layer/time shortcuts; text editing still takes priority.
+    if(target?.isContentEditable || target?.closest?.(
+        "textarea,select,[contenteditable],input:not([type=range]):not([type=checkbox]):not([type=radio])"
+    ))return;
     if(!["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(event.key))return;
     event.preventDefault();
     if(event.key==="ArrowUp"||event.key==="ArrowDown"){
@@ -1247,12 +1251,10 @@ document.addEventListener("keydown", event=>{
         setPlaying(false);
         const [min,max]=activeRange();
         const delta=(event.shiftKey?5:0.5)*(event.key==="ArrowRight"?1:-1);
-        const origin=browsingLayer
-            ? (playbackMode==="layer"?min:currentTime)
-            : currentTime;
+        const origin=currentTime;
         seek(Math.max(min,Math.min(max,origin+delta)));
     }
-});
+}, true);
 
 function markerLabel(text,x,width,onClick) {
     const mark=document.createElement("button");
