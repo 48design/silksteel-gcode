@@ -295,7 +295,7 @@ void main(){
  vec3 mutedColor=vec3(0.018,0.026,0.040)*darkShade;
  // View-dependent, narrow highlights make rounded bead edges readable
  // without lifting the dark base color or changing normal feature colors.
- vec3 viewDir=normalize(cameraPosition-vPosition);
+ vec3 viewDir=normalize(vec3(cameraPosition.x,cameraPosition.y,-cameraPosition.z)-vPosition);
  vec3 halfVec=normalize(light+viewDir);
  float specular=pow(max(dot(n,halfVec),0.0),52.0);
  float grazing=pow(1.0-max(dot(n,viewDir),0.0),3.0);
