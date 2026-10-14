@@ -60,7 +60,14 @@ class IdealizedProfile:
         nozzle_z = (start[2] + end[2]) * 0.5
         reference_z = nozzle_z if layer_z is None else layer_z
 
-        if role == 1 or brick_pass == 2:
+        if layer_z is None and role not in (1, 5, 6) and brick_pass == 0:
+            # Before any slicer layer marker, extrusion is often a purge/prime
+            # line. The only known surface is the print bed (Z=0), *not* a
+            # fictitious nominal-height layer immediately below the nozzle.
+            # At very large clearances, an ordinary low-flow strand cannot
+            # reach the bed: let it retain a rounded free profile instead.
+            height = min(max(0.0, nozzle_z), IdealizedProfile.free_square_side(area))
+        elif role == 1 or brick_pass == 2:
             # Smoothificator / second Bricklayers base pass: already defined
             # by the exact per-pass layer thickness in the processed G-code.
             height = nominal
