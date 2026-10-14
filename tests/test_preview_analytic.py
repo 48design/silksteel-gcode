@@ -48,17 +48,17 @@ class AnalyticViewerTests(unittest.TestCase):
         self.assertAlmostEqual(outline[7], .2,places=6)
         self.assertEqual(meta["omittedCount"],0)
 
-    def test_first_explicit_layer_high_nozzle_uses_real_clearance_cap(self):
-        # A low-flow line at Z=.8 still floats above the bed: its available
-        # material cannot make a .8-mm-tall bead reaching all the way down.
+    def test_first_explicit_layer_uses_exact_nozzle_to_bed_distance(self):
+        # The viewer models the commanded geometry, not physical sagging.
+        # Height is exactly the known Z=.8 even for low extrusion flow.
         area=.4*math.pi*(.875**2)/20
         sections=IdealizedProfile.sections(
             (0.,0.,.8),(20.,0.,.8),area,.2,.2,
             layer_z=.8,role=0,bed_reference=True)
         self.assertEqual(len(sections),1)
         _,_,width,height=sections[0]
-        self.assertAlmostEqual(height,IdealizedProfile.free_square_side(area),places=7)
-        self.assertLess(height,.8)
+        self.assertAlmostEqual(height,.8,places=7)
+        self.assertLess(width,height)
         self.assertAlmostEqual(IdealizedProfile.area_for_size(width,height),
                                area,places=9)
 
