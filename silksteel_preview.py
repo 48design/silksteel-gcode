@@ -742,7 +742,9 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     state["lines"] = lines
                     state["progress"] = percent
                 offsets = []
-                model = convert_cached(upload, target, progress=update, source_offsets=offsets)
+                # A new upload has a unique temporary path: a disk cache only
+                # duplicates its data and cannot accelerate the first preview.
+                model = convert(upload, target, progress=update, source_offsets=offsets)
                 model["name"] = display
                 model["filename"] = display
                 model["url"] = "/" + target.name
@@ -780,7 +782,10 @@ def serve(processed: Path | None = None, original: Path | None = None,
                     target = root / (label.lower() + ".bin")
                     offsets = []
                     try:
-                        model = convert_cached(source, target, progress=update, source_offsets=offsets)
+                        # Snapshots change every run and have no useful cache key.
+                    # Only stable, manually supplied paths benefit from caching.
+                    parser = convert if (source.parent / ".silksteel-preview-snapshot").exists() else convert_cached
+                    model = parser(source, target, progress=update, source_offsets=offsets)
                     except Exception:
                         if index == 0:
                             raise
