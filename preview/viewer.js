@@ -626,17 +626,19 @@ headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
 // XYZ position. Built once and moved, never regenerated during playback.
 function createNozzle(){
     const group=new THREE.Group();
-    const steel=new THREE.MeshStandardMaterial({
-        color:0xd0deea,metalness:.42,roughness:.32,
-        transparent:true,opacity:.24,depthWrite:false,side:THREE.DoubleSide
+    // Lit independently of scene lights, with enough contrast against
+    // both the dark background and bright extrusion colors.
+    const steel=new THREE.MeshBasicMaterial({
+        color:0xe5f4ff,transparent:true,opacity:.48,
+        depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
-    const brass=new THREE.MeshStandardMaterial({
-        color:0xf0c88c,metalness:.55,roughness:.31,
-        transparent:true,opacity:.42,depthWrite:false,side:THREE.DoubleSide
+    const brass=new THREE.MeshBasicMaterial({
+        color:0xffdf8f,transparent:true,opacity:.64,
+        depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
-    const rim=new THREE.MeshStandardMaterial({
-        color:0xf8e5bd,metalness:.45,roughness:.22,
-        transparent:true,opacity:.60,depthWrite:false
+    const rim=new THREE.MeshBasicMaterial({
+        color:0xffffff,transparent:true,opacity:.95,
+        depthTest:false,depthWrite:false
     });
     const parts=[
         [new THREE.CylinderGeometry(.84,.19,1.7,32,1,true),.85,brass],
@@ -663,9 +665,6 @@ function createNozzle(){
     opening.position.y=.007;
     opening.renderOrder=26;
     group.add(opening);
-    const light=new THREE.PointLight(0xffffff,8,8,2);
-    light.position.set(2.3,3.7,2.5);
-    group.add(light);
     group.visible=false;
     return group;
 }
