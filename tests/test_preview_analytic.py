@@ -88,6 +88,8 @@ class AnalyticViewerTests(unittest.TestCase):
             (0,0,.2,.4,.4,.2),   # ordinary layer
             (0,0,.2,.6,.4,.4),   # non-planar/shifted nozzle +0.2 mm
             (0,0,.2,.3,.4,.1),   # valley: nozzle below layer reference
+            (4,0,.2,.6,.4,.2),   # non-planar peak: entire bead follows Z
+            (4,0,.2,.3,.4,.2),   # non-planar valley: no sideways spreading
             (1,0,.1,.3,.4,.1),   # Smoothificator thickness
             (2,1,.15,.4,.4,.2),  # Bricklayers base 1/2
             (2,2,.15,.55,.4,.15),# Bricklayers base 2/2
