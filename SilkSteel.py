@@ -902,7 +902,7 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_lay
     Returns:
         Tuple of (z_min, z_max, layers_until_ceiling, height_until_ceiling):
         - z_min: Floor Z (top of solid region below, or -999 if none)
-        - z_max: Ceiling Z (bottom of solid region above minus one layer, or 999 if none)
+        - z_max: Ceiling Z (underside of a strictly future solid region, or 999 if none)
         - layers_until_ceiling: Number of layers until solid starts above (0 if none)
         - height_until_ceiling: Remaining height in mm from current layer to ceiling (layers_until_ceiling × layer_height)
     """
@@ -917,11 +917,10 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_lay
                 # This solid is below - use its top as our floor
                 local_z_min = max(local_z_min, z_top)
             
-            # Check if this solid region is ON or ABOVE our current layer
-            elif region_start >= current_layer:
-                # This solid is on same layer or above - use its bottom minus layer height as ceiling
-                # (infill must stay in the layer BELOW the solid)
-                candidate_ceiling = z_bottom - base_layer_height
+            # Only a strictly FUTURE solid region is a ceiling.
+            elif region_start > current_layer:
+                # z_bottom is the first solid layer's physical UNDERSIDE.
+                candidate_ceiling = z_bottom
                 if local_z_max == 999:  # Take the LOWEST ceiling
                     local_z_max = candidate_ceiling
                     layers_until_ceiling = region_start - current_layer
@@ -974,9 +973,28 @@ def generate_fractal_noise_3d(shape, res, octaves=1, persistence=0.5, seed=None)
     # Normalize to [-1, 1]
     return noise / max_amplitude
 
+def constrain_noise_vertical_gradient(noise, max_delta):
+    """Limit variation between Z slices without flattening the XY pattern.
+
+    Midpoint of the upper and lower Lipschitz envelopes: independent
+    of the starting Z slice and bounded between the original extrema.
+    """
+    if noise.shape[2] < 2 or max_delta <= 0:
+        return noise
+    lower = noise.copy()
+    upper = noise.copy()
+    for k in range(1, noise.shape[2]):
+        np.maximum(lower[:, :, k], lower[:, :, k - 1] - max_delta, out=lower[:, :, k])
+        np.minimum(upper[:, :, k], upper[:, :, k - 1] + max_delta, out=upper[:, :, k])
+    for k in range(noise.shape[2] - 2, -1, -1):
+        np.maximum(lower[:, :, k], lower[:, :, k + 1] - max_delta, out=lower[:, :, k])
+        np.minimum(upper[:, :, k], upper[:, :, k + 1] + max_delta, out=upper[:, :, k])
+    return (lower + upper) * 0.5
+
+
 def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max, 
                           resolution=1.0, frequency_x=0.5, frequency_y=0.5, frequency_z=0.5,
-                          octaves=3, persistence=0.5, seed=42):
+                          octaves=3, persistence=0.5, seed=42, amplitude=1.0):
     """
     Generate a 3D lookup table for noise/modulation values using Perlin noise.
     
@@ -987,7 +1005,8 @@ def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max,
         octaves: Number of noise octaves for fractal detail
         persistence: How much each octave contributes (0-1)
         seed: Random seed for reproducibility
-    
+        amplitude: Final Z modulation amplitude in mm for vertical slope limiting
+
     Returns:
         Dictionary with grid parameters and the 3D array of values
     """
@@ -1010,6 +1029,12 @@ def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max,
     
     # Generate fractal Perlin noise
     noise = generate_fractal_noise_3d(shape, (res_x, res_y, res_z), octaves, persistence, seed)
+    if amplitude > 0:
+        # Match sine's gentle Z slope, and never allow more than 0.5 mm
+        # offset variation per millimetre of Z (before other clamps/taper).
+        max_slope = min(0.5, amplitude * frequency_z / 3.0)
+        noise = constrain_noise_vertical_gradient(
+            noise, max_slope * resolution / amplitude)
     
     lut = {
         'x_min': x_min, 'x_max': x_max,
@@ -2112,8 +2137,12 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 if solid_layers_at_cell[i] > solid_layers_at_cell[i-1] + 1:
                     # Gap found - end current region
                     region_end = solid_layers_at_cell[i-1]
-                    z_bottom = z_layer_map[region_start]
-                    z_top = z_layer_map[region_end] + base_layer_height
+                    # Slicer layer Z describes material TOP, not bottom.
+                    # Use the previous layer's top as this region's underside.
+                    z_bottom = z_layer_map.get(
+                        region_start - 1,
+                        z_layer_map[region_start] - base_layer_height)
+                    z_top = z_layer_map[region_end]
                     solid_regions.append((region_start, region_end, z_bottom, z_top))
                     
                     # Start new region
@@ -2121,8 +2150,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Don't forget the last region
             region_end = solid_layers_at_cell[-1]
-            z_bottom = z_layer_map[region_start]
-            z_top = z_layer_map[region_end] + base_layer_height
+            z_bottom = z_layer_map.get(
+                region_start - 1,
+                z_layer_map[region_start] - base_layer_height)
+            z_top = z_layer_map[region_end]
             solid_regions.append((region_start, region_end, z_bottom, z_top))
             
             # Store solid regions for this cell
@@ -2453,7 +2484,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 resolution=1.0,  # 1mm grid spacing
                 frequency_x=frequency * 0.1,  # Scale frequency to reasonable range
                 frequency_y=frequency * 0.1,
-                frequency_z=frequency * 0.05  # Less variation in Z direction
+                frequency_z=frequency * 0.05,  # Less variation in Z direction
+                amplitude=amplitude
             )
     else:
         noise_lut = None
