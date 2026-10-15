@@ -82,8 +82,15 @@ class IdealizedProfile:
         elif brick_pass == 1:
             # First base pass starts at the normal layer height.
             height = nominal / 0.75
+        elif role == 4:
+            # Non-planar infill follows a 3D toolpath. Its programmed Z is
+            # the strand TOP, not an extra layer of solid plastic down to
+            # the slicer's planar reference. Keep the nominal cross-section
+            # thickness while shifting the entire strand with the nozzle.
+            # Source delta E already accounts for XYZ path length.
+            height = nominal
         else:
-            # Normal path, shifted perimeter or non-planar extrusion:
+            # Normal path or shifted perimeter:
             # substrate = layer reference minus nominal thickness.
             height = nominal + (nozzle_z - reference_z)
 
