@@ -621,6 +621,57 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertTrue(all(0 < value <= 0.4 for value in e_values))
         self.assertNotIn("Smoothificator E sync", segments)
 
+    def test_safezone_same_layer_is_not_a_ceiling(self):
+        # Source layer-Z is the material TOP. A solid region beginning
+        # ON this layer is lateral geometry, not a roof 1 layer below.
+        current_only = {(4, 6): [(4, 4, 1.04, 1.32)]}
+        z_min, z_max, _, _ = silk.get_safezone_bounds(
+            4, 6, 4, current_only, .28)
+        self.assertEqual((z_min, z_max), (-999, 999))
+
+        # A lower region, a same-layer region and a later region:
+        # only the lower solid top and later solid underside constrain Z.
+        regions = {(4, 6): [
+            (3, 3, .76, 1.04),
+            (4, 4, 1.04, 1.32),
+            (6, 6, 1.60, 1.88),
+        ]}
+        lower, upper, layers, remaining = silk.get_safezone_bounds(
+            4, 6, 4, regions, .28)
+        self.assertAlmostEqual(lower, 1.04)
+        self.assertAlmostEqual(upper, 1.60)
+        self.assertEqual(layers, 2)
+        self.assertAlmostEqual(remaining, .56)
+
+    def test_perlin_z_gradients_preserve_layer_order(self):
+        # The Perlin field must be gentle in the vertical axis like sine,
+        # even if individual noise octaves have sharp Z transitions.
+        amplitude = 1.12
+        hz = .28
+        frequency_z = .4
+        lut = silk.generate_3d_noise_lut(
+            0, 8, 0, 6, 0, 5, resolution=1.0,
+            frequency_x=.8, frequency_y=.8, frequency_z=frequency_z,
+            octaves=3, seed=42, amplitude=amplitude)
+        max_slope = min(.5, amplitude * frequency_z / 3)
+        for x in (.1, 1.3, 2.7, 5.8, 7.4):
+            for y in (.3, 2.1, 4.5):
+                for z in (1.04, 1.32, 2.11, 3.63):
+                    low = silk.calculate_nonplanar_z(
+                        lut, x, y, z, amplitude)
+                    high = silk.calculate_nonplanar_z(
+                        lut, x, y, z + hz, amplitude)
+                    self.assertGreaterEqual(
+                        high-low, hz * (1-max_slope)-1e-6)
+
+    def test_safezone_source_geometry_convention(self):
+        # Regression guard: every precomputed region's material top is
+        # already supplied by z_layer_map; it must not gain a spare layer.
+        import inspect
+        source = inspect.getsource(silk.process_gcode)
+        self.assertNotIn("z_top = z_layer_map[region_end] + base_layer_height", source)
+        self.assertIn("z_top = z_layer_map[region_end]", source)
+
     def test_nonplanar_xyz_extrusion_rising_falling_flat_and_zero_xy(self):
         xy, source_e = 0.64, 0.032
         per_xy_mm = source_e / xy
