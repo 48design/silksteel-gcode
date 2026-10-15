@@ -27,7 +27,7 @@ function boundary(read,id,atEnd,first,last,connected){
     const size=[profileWidth(area,h),h];
     // A diagonal cut through the bead stretches the ring by 1/cos(turn/2).
     // Its longitudinal extent must fit the neighboring path segments.
-    const cosine=len*.5;
+    const cosine=Math.min(1,len*.5);
     const reach=cosine>1e-6
         ?size[0]*.5*Math.sqrt(1/(cosine*cosine)-1):Infinity;
     if(!(len>1e-6)||reach>.45*Math.min(pair.l1,pair.l2)){
