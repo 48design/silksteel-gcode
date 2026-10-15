@@ -564,6 +564,20 @@ function createLayer(index) {
             caps.userData.lodWidth=mesh.userData.lodWidth;
             group.add(caps);
         }
+        if(plan.bevels){
+            const bevelGeometry=base.clone();
+            bindLoftAttributes(bevelGeometry,plan.bevels);
+            const bevel=new THREE.Mesh(bevelGeometry,
+                newMaterial(chunk.role,false,vertexShader,info.z));
+            bevel.frustumCulled=true;
+            bevel.userData.role=chunk.role;
+            bevel.userData.bevel=true;
+            bevel.userData.indices=plan.bevels.indices;
+            bevel.userData.lodVariants=[null,bevelGeometry,null];
+            bevel.userData.lodLevel=1;
+            bevel.userData.lodWidth=plan.bevels.sizes[0];
+            group.add(bevel);
+        }
     }
     group.userData.layer=index;
     const ms=performance.now()-layerStarted;
@@ -1447,13 +1461,25 @@ function updateVisibility() {
         const group=getLayer(i);keep.add(i);activeLayers.push(group);
         if(!group.parent)scene.add(group);
         for(const mesh of group.children){
-            mesh.geometry.instanceCount=withinPrefix(mesh.userData.indices,finished);
-            mesh.visible=mesh.geometry.instanceCount>0&&visibleRoles.has(mesh.userData.role);
+            let count=withinPrefix(mesh.userData.indices,finished);
+            if(mesh.userData.bevel&&!browsingLayer&&finished<model.count){
+                const p=joinRead(finished);
+                if(p&&p.start<=currentTime&&currentTime<p.end)
+                    count=withinPrefix(mesh.userData.indices,finished+1);
+            }
+            mesh.geometry.instanceCount=count;
+            mesh.visible=count>0&&visibleRoles.has(mesh.userData.role);
             const faded=i!==current&&$("ghost").checked;
             if(mesh.userData.faded!==faded){
                 mesh.material.dispose();
                 mesh.material=newMaterial(mesh.userData.role,faded,
                     mesh.userData.cap?capVertexShader:vertexShader,model.layers[i].z);
+                if(mesh.userData.bevel){
+                    // Top faces overlap neighboring tracks at the same Z.
+                    mesh.material.polygonOffset=true;
+                    mesh.material.polygonOffsetFactor=-1;
+                    mesh.material.polygonOffsetUnits=-1;
+                }
                 mesh.userData.faded=faded;
             }
         }

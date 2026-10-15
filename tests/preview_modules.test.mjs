@@ -108,6 +108,45 @@ const joined=planLoft([0,1],i=>corner[i]||null,0,2,true);
 assert.equal(joined.caps.length,2);
 assert(Math.abs(joined.joinsEnd[0]-joined.joinsStart[3])<1e-6);
 assert(Math.abs(joined.joinsEnd[1]-joined.joinsStart[4])<1e-6);
+// The shared ring must represent the diagonal section, including >90°.
+for(const angle of [45,90,110,120,135,150,170]){
+    const radians=angle*Math.PI/180;
+    const beads=[
+        bead([0,0,.2],[10,0,.2],0,0,1),
+        bead([10,0,.2],[10+10*Math.cos(radians),
+                        10*Math.sin(radians),.2],0,1,2)
+    ];
+    const plan=planLoft([0,1],i=>beads[i]||null,0,2,true);
+    assert.equal(plan.caps.length,2,`open corner at ${angle}°`);
+    assert.equal(plan.bevels,null,`unneeded bevel at ${angle}°`);
+    const expected=1/Math.cos(radians*.5);
+    assert(Math.abs(Math.hypot(plan.joinsEnd[0],plan.joinsEnd[1])-expected)<1e-4);
+    for(let k=0;k<3;k++)
+        assert.equal(plan.joinsEnd[k],plan.joinsStart[3+k]);
+}
+// When the miter runs out of segment length, rotate multiple original
+// rings into a rounded junction instead of opening the continuous strand.
+for(const [angle,length,width] of [[90,.2,.55],[175,10,.46],[180,10,.46]]){
+    const radians=angle*Math.PI/180;
+    const beads=[
+        {...bead([0,0,.2],[length,0,.2],0,0,1),w:width},
+        {...bead([length,0,.2],[length+length*Math.cos(radians),
+                                 length*Math.sin(radians),.2],0,1,2),w:width}
+    ];
+    const plan=planLoft([0,1],i=>beads[i]||null,0,2,true);
+    assert.equal(plan.caps.length,2,`open corner at ${angle}°`);
+    assert(plan.bevels && plan.bevels.indices.length>=3);
+    assert(plan.bevels.indices.every(i=>i===1));
+    assert.equal(plan.bevels.joinsStart[0],plan.joinsEnd[0]);
+    assert.equal(plan.bevels.joinsStart[1],plan.joinsEnd[1]);
+    const end=plan.bevels.joinsEnd.length-3;
+    assert.equal(plan.bevels.joinsEnd[end],plan.joinsStart[3]);
+    assert.equal(plan.bevels.joinsEnd[end+1],plan.joinsStart[4]);
+    for(let k=0;k<3;k++){
+        assert.equal(plan.bevels.starts[k],plan.ends[k]);
+        assert.equal(plan.bevels.ends[k],plan.starts[3+k]);
+    }
+}
 // Real consecutive Smoothificator moves 727881–727883 have nearly
 // identical E-per-mm. A noisy supporting raster may give one neighboring
 // G1 a taller profile: this MUST NOT break continuity or create two caps.
@@ -139,12 +178,14 @@ const curvature=[
 ];
 const turn=planLoft([0,1],i=>curvature[i]||null,0,2,true);
 assert.equal(turn.caps.length,2);
-assert(Math.hypot(turn.joinsEnd[0],turn.joinsEnd[1])<=1.42+1e-5);
+assert(turn.bevels && turn.bevels.indices.length>0);
 const reverse=[
     {...bead([0,0,.2],[10,0,.2],0,0,1),line:5},
     {...bead([10,0,.2],[0,0,.2],0,1,2),line:6}
 ];
-assert.equal(planLoft([0,1],i=>reverse[i]||null,0,2,true).caps.length,4);
+const reversal=planLoft([0,1],i=>reverse[i]||null,0,2,true);
+assert.equal(reversal.caps.length,2);
+assert(reversal.bevels && reversal.bevels.indices.length===6);
 const spatial=spatialChunks(0,3,straightRead,40,6000);
 assert.equal(spatial.length,2);
 assert.deepEqual(spatial.flatMap(c=>c.indices).sort((a,b)=>a-b),[0,1,2]);
@@ -260,6 +301,8 @@ assert(!visibilityBody.includes('keep.add("h"+i)'));
 
 
 assert(viewer.includes("vec3 p=basePoint + joinVector*lateral"));
+assert(viewer.includes("if(plan.bevels){"));
+assert(viewer.includes("mesh.userData.bevel&&!browsingLayer"));
 assert(viewer.includes('const base=sectionMesh(4,"mantle")'));
 assert(viewer.includes('const capBase=sectionMesh(4,"cap")'));
 assert(viewer.includes('const headBase=sectionMesh(4,"closed")'));
