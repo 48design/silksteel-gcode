@@ -142,7 +142,7 @@ Notes and heuristics:
 
 **Best for:** All prints, especially with Z-shifting features enabled
 
-### 🌉 Bridge Densifier (Experimental, `-enableBridgeDensifier`)
+### 🌉 Bridge Densifier (Experimental, `-full` oder `-enableBridgeDensifier`)
 Densifies validated bridge raster gaps using **continuous serpentine toolpaths** rather than printing extra strands after the fact and returning with long travel moves.
 
 - Matches consecutive, reverse-parallel bridge spans with short U-turns between them.
@@ -157,7 +157,7 @@ Densifies validated bridge raster gaps using **continuous serpentine toolpaths**
 python SilkSteel.py input.gcode -o bridge_test.gcode -enableBridgeDensifier
 ```
 
-**Caution:** Still experimental and **not enabled by `-full`**. Additional bridge extrusion changes the amount of deposited material. Inspect modified Bridge infill regions in a G-code viewer and validate with a short test print.
+**Caution:** Still experimental and **enabled by `-full`** (disable with `-disableBridgeDensifier`). Additional bridge extrusion changes the amount of deposited material. Inspect modified Bridge infill regions in a G-code viewer and validate with a short test print.
 
 ### 🔧 Gap Fill Removal (Optional, `-enableRemoveGapFill`)
 Removes gap fill sections from G-code:
@@ -214,10 +214,10 @@ python SilkSteel.py input.gcode -o output.gcode -enableBricklayers
 # All features with custom settings
 python SilkSteel.py input.gcode -o output.gcode -full -amplitude 1.5 -frequency 8
 
-# Full mode but disable gap fill removal
-python SilkSteel.py input.gcode -o output.gcode -full -disableRemoveGapFill
+# Full mode but disable Bridge Densifier
+python SilkSteel.py input.gcode -o output.gcode -full -disableBridgeDensifier
 
-# Explicitly enable the experimental bridge densifier (not part of -full)
+# Enable Bridge Densifier without -full
 python SilkSteel.py input.gcode -o output.gcode -enableBridgeDensifier
 
 # Bricklayers with reduced extrusion on shifted blocks
@@ -242,13 +242,13 @@ input_file              Input G-code file (required)
 
 ### Feature Toggles
 ```
--full, --enable-all                Enable Bricklayers and Non-planar plus defaults;
-                                   Bridge Densifier and Gap Fill Removal are opt-in.
+-full, --enable-all                Enable Bricklayers, Non-planar Infill and Bridge Densifier;
+                                   Gap Fill Removal remains opt-in.
 -enableBricklayers                 Enable Bricklayers Z-shifting (default: disabled)
 -disableBricklayers                Disable Bricklayers (overrides -full)
 -enableNonPlanar                   Enable non-planar infill (default: disabled)
 -disableNonPlanar                  Disable non-planar infill (overrides -full)
--enableBridgeDensifier             Enable bridge densifier (default: disabled)
+-enableBridgeDensifier             Enable Bridge Densifier (default: disabled without -full)
 -disableBridgeDensifier            Disable bridge densifier (overrides -full)
 -enableRemoveGapFill               Enable gap fill removal (default: disabled)
 -disableRemoveGapFill              Disable gap fill removal (overrides -full)
