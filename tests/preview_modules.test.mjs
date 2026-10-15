@@ -185,6 +185,11 @@ assert(viewer.includes("vec3 sheen="));
 
 // The translucent nozzle is reusable and follows the extrusion XYZ exactly.
 assert(viewer.includes("function createNozzle(){"));
+assert(viewer.includes("new THREE.CylinderGeometry(.94,.94,.63,6,1,false)"));
+assert(viewer.includes("color:0xf6c95e"));
+assert(viewer.includes("color:0xffe49a"));
+assert(!viewer.includes("new THREE.TorusGeometry(.64,.045"));
+
 assert(viewer.includes("const nozzle=createNozzle()"));
 assert(viewer.includes("function updateNozzle(finished){"));
 assert(viewer.includes("updateNozzle(finished);"));
