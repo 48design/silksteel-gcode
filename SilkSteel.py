@@ -4543,7 +4543,7 @@ if __name__ == "__main__":
                             'Use -o for manual testing to preserve the original file.')
     
     parser.add_argument('-full', '--enable-all', action='store_true', default=False,
-                       help='Enable ALL features: Bricklayers and Non-planar Infill. '
+                       help='Enable ALL features: Bricklayers, Non-planar Infill and Bridge Densifier. '
                             'Smoothificator and Safe Z-hop are already enabled by default. '
                             'Individual feature flags can still override this setting.')
     
@@ -4594,7 +4594,7 @@ if __name__ == "__main__":
                        help=f'Safety margin in mm to add above max Z during travel (default: {DEFAULT_SAFE_Z_HOP_MARGIN})')
     
     parser.add_argument('-enableBridgeDensifier', '--enable-bridge-densifier', action='store_const', const=True, dest='enable_bridge_densifier', default=None,
-                       help='Enable Bridge Densifier to add intermediate lines between bridge extrusions for better bridging (experimental, requires explicit opt-in; not enabled by -full)')
+                       help='Enable Bridge Densifier to add intermediate lines between bridge extrusions (also enabled by -full)')
     parser.add_argument('-disableBridgeDensifier', '--disable-bridge-densifier', action='store_const', const=False, dest='enable_bridge_densifier',
                        help='Disable Bridge Densifier (overrides -full)')
     
@@ -4646,10 +4646,8 @@ if __name__ == "__main__":
             args.enable_bricklayers = True
         if args.enable_non_planar is None:
             args.enable_non_planar = True
-        # Experimental bridge reconstruction has unresolved E-mode bugs.
-        # Require an explicit opt-in rather than enabling it in -full.
         if args.enable_bridge_densifier is None:
-            args.enable_bridge_densifier = False
+            args.enable_bridge_densifier = True
         # Gap fill removal is too buggy, don't enable it with -full
         # Smoothificator and Safe Z-hop are already enabled by default
     
