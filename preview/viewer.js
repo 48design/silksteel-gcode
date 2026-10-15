@@ -626,41 +626,37 @@ headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
 // XYZ position. Built once and moved, never regenerated during playback.
 function createNozzle(){
     const group=new THREE.Group();
-    // Lit independently of scene lights, with enough contrast against
-    // both the dark background and bright extrusion colors.
-    const steel=new THREE.MeshBasicMaterial({
-        color:0xe5f4ff,transparent:true,opacity:.48,
+    const gold=new THREE.MeshBasicMaterial({
+        color:0xf6c95e,transparent:true,opacity:.62,
         depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
-    const brass=new THREE.MeshBasicMaterial({
-        color:0xffdf8f,transparent:true,opacity:.64,
+    const highlight=new THREE.MeshBasicMaterial({
+        color:0xffe49a,transparent:true,opacity:.76,
         depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
-    const rim=new THREE.MeshBasicMaterial({
-        color:0xffffff,transparent:true,opacity:.95,
-        depthTest:false,depthWrite:false
+    const openingMaterial=new THREE.MeshBasicMaterial({
+        color:0x654313,transparent:true,opacity:.80,
+        depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
     const parts=[
-        [new THREE.CylinderGeometry(.84,.19,1.7,32,1,true),.85,brass],
-        [new THREE.CylinderGeometry(1.08,.88,.55,6),1.97,steel],
-        [new THREE.CylinderGeometry(.83,.83,.82,32,1,true),2.65,steel]
+        // Conical brass tip and straight, non-tapered hexagonal head.
+        [new THREE.CylinderGeometry(.60,.18,1.55,32,1,true),.775,gold],
+        [new THREE.CylinderGeometry(.94,.94,.63,6,1,false),1.865,highlight],
+        // Short, smooth collar, deliberately without a threaded shaft.
+        [new THREE.CylinderGeometry(.70,.70,.42,32,1,true),2.39,gold]
     ];
-    for(const [geometry,height,material] of parts){
+    for(const [geometry,y,material] of parts){
         const mesh=new THREE.Mesh(geometry,material);
-        mesh.position.y=height;
+        mesh.position.y=y;
         mesh.renderOrder=25;
         group.add(mesh);
     }
-    const outlet=new THREE.Mesh(new THREE.TorusGeometry(.19,.045,8,28),rim);
+    const outlet=new THREE.Mesh(new THREE.TorusGeometry(.18,.04,8,28),highlight);
     outlet.rotation.x=Math.PI/2;
     outlet.position.y=.035;
     outlet.renderOrder=26;
     group.add(outlet);
-    const opening=new THREE.Mesh(new THREE.CircleGeometry(.13,24),
-        new THREE.MeshBasicMaterial({
-            color:0x26333e,transparent:true,opacity:.65,depthWrite:false,
-            side:THREE.DoubleSide
-        }));
+    const opening=new THREE.Mesh(new THREE.CircleGeometry(.12,24),openingMaterial);
     opening.rotation.x=-Math.PI/2;
     opening.position.y=.007;
     opening.renderOrder=26;
