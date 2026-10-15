@@ -555,10 +555,9 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertEqual([int(row[9]) for row in rows],[10,11,12,14,15,17])
         self.assertEqual(meta["omittedCount"],0)
 
-    def test_converter_nonplanar_height_tracks_commanded_z_offset(self):
-        # The viewer's analytic substrate is the slicer layer reference.
-        # Reversing the same path changes order, never the physical profile
-        # at a given location. No neighboring-strand raster is consulted.
+    def test_converter_nonplanar_profile_follows_commanded_z(self):
+        # Non-planar extrusion keeps the nominal cross-section while the
+        # entire strand follows XYZ. Reverse traversal preserves its profile.
         def build(reverse):
             points=[(i*.5,0.,1.0+i*.12) for i in range(5)]
             if reverse:
@@ -577,10 +576,8 @@ class PreviewGeometryTests(unittest.TestCase):
         for (uw,uh),(dw,dh) in zip(rising,reversed(falling)):
             self.assertAlmostEqual(uw,dw,places=4)
             self.assertAlmostEqual(uh,dh,places=4)
-        self.assertTrue(all(rising[i][1]<rising[i+1][1]
-                            for i in range(len(rising)-1)))
-        self.assertTrue(all(rising[i][0]>rising[i+1][0]
-                            for i in range(len(rising)-1)))
+        self.assertTrue(all(abs(height-.2)<1e-6 for _,height in rising))
+        self.assertTrue(all(abs(width-rising[0][0])<1e-6 for width,_ in rising))
 
     def test_contiguous_ascent_does_not_support_itself_or_differ_from_descent(self):
         from silksteel_preview_surface import DepositedSurface
