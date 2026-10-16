@@ -641,9 +641,39 @@ class GCodeSafetyTests(unittest.TestCase):
         # The LOWER solid ends at 1.04; a new .28-mm strand cannot
         # deposit its TOP below 1.32 without entering that surface.
         self.assertAlmostEqual(lower, 1.32)
-        self.assertAlmostEqual(upper, 1.60)
+        # Room for layer 5 is reserved below the layer-6 solid roof.
+        self.assertAlmostEqual(upper, 1.32)
         self.assertEqual(layers, 2)
         self.assertAlmostEqual(remaining, .56)
+
+    def test_safezone_reserves_height_for_every_intervening_layer(self):
+        # Layer 3 cannot occupy the layer-4 headroom. Fixed-height clamps
+        # previously produced Z1.600 in both layer 3 and layer 4.
+        z_map = {2: .76, 3: 1.04, 4: 1.32, 5: 1.60, 6: 1.88}
+        solid = {(7, 9): [(2, 2, .48, .76),
+                           (6, 6, 1.60, 1.88)]}
+        low3, high3, *_ = silk.get_safezone_bounds(
+            7, 9, 3, solid, .28, z_map)
+        low4, high4, *_ = silk.get_safezone_bounds(
+            7, 9, 4, solid, .28, z_map)
+        self.assertAlmostEqual(low3, 1.04)
+        self.assertAlmostEqual(low4, 1.32)
+        self.assertAlmostEqual(high3, 1.04)
+        self.assertAlmostEqual(high4, 1.32)
+
+    def test_safezone_variable_height_reserves_real_layer_spacing(self):
+        z_map = {1: .35, 2: .65, 3: .95, 4: 1.20, 5: 1.45}
+        solid = {(2, 5): [(1, 1, .2, .35),
+                           (5, 5, 1.20, 1.45)]}
+        lo2, hi2, *_ = silk.get_safezone_bounds(2, 5, 2, solid, .30, z_map)
+        lo3, hi3, *_ = silk.get_safezone_bounds(2, 5, 3, solid, .30, z_map)
+        lo4, hi4, *_ = silk.get_safezone_bounds(2, 5, 4, solid, .25, z_map)
+        self.assertAlmostEqual(lo2, .65)
+        self.assertAlmostEqual(lo3, .95)
+        self.assertAlmostEqual(lo4, 1.20)
+        self.assertAlmostEqual(hi2, .65)
+        self.assertAlmostEqual(hi3, .95)
+        self.assertAlmostEqual(hi4, 1.20)
 
     def test_valley_cannot_penetrate_previous_solid_surface(self):
         # Reproduces the reported Z1.040/Z0.760 problem: last solid top
