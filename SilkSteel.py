@@ -888,7 +888,8 @@ def calculate_grid_bounds(solid_at_grid):
     
     return (grid_x_min, grid_x_max, grid_y_min, grid_y_max, grid_width, grid_height)
 
-def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_layer_height):
+def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions,
+                        base_layer_height, z_layer_map=None):
     """
     Determine which safezone (gap between solid regions) the current layer is in,
     and return the floor and ceiling Z values for that safezone.
@@ -897,7 +898,9 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_lay
         gx, gy: Grid coordinates
         current_layer: Current layer number
         grid_cell_solid_regions: Dictionary mapping (gx, gy) to list of solid regions
-        base_layer_height: Layer height in mm
+        base_layer_height: Fallback layer height in mm
+        z_layer_map: Actual slicer layer-top heights, used to reserve an
+            equal Z-offset budget for every infill layer in one safezone.
     
     Returns:
         Tuple of (z_min, z_max, layers_until_ceiling, height_until_ceiling):
@@ -914,17 +917,28 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_lay
         for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
             # Check if this solid region is BELOW our current layer
             if region_end < current_layer:
-                # z_top is the already-deposited lower material surface.
-                # Commanded G-code Z represents the TOP of the new bead,
-                # so adding its layer thickness avoids driving that bead
-                # INTO the support. This offset was lost in the prior fix.
-                local_z_min = max(local_z_min, z_top + base_layer_height)
+                # Keep the lower solid's displacement bound across all
+                # intervening infill layers, not only the first one.
+                if (z_layer_map is not None and
+                        region_end in z_layer_map and current_layer in z_layer_map):
+                    rise = z_layer_map[current_layer] - z_layer_map[region_end]
+                else:
+                    rise = (current_layer - region_end) * base_layer_height
+                local_z_min = max(local_z_min, z_top + max(0.0, rise))
             
             # Only a strictly FUTURE solid region is a ceiling.
             elif region_start > current_layer:
-                # The upper material begins at z_bottom. A new bead's
-                # commanded TOP must not rise into that future roof.
-                candidate_ceiling = z_bottom
+                # Reserve space for every later infill layer before the
+                # upcoming solid roof. Otherwise different layers clamp to
+                # the SAME top Z despite their nominal layer spacing.
+                if (z_layer_map is not None and
+                        region_start - 1 in z_layer_map and
+                        current_layer in z_layer_map):
+                    reserved = (z_layer_map[region_start - 1] -
+                                z_layer_map[current_layer])
+                else:
+                    reserved = (region_start - current_layer - 1) * base_layer_height
+                candidate_ceiling = z_bottom - max(0.0, reserved)
                 if local_z_max == 999:  # Take the LOWEST ceiling
                     local_z_max = candidate_ceiling
                     layers_until_ceiling = region_start - current_layer
@@ -2494,6 +2508,13 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     else:
         noise_lut = None
     
+    # Track real non-planar bead TOPS from the preceding printed layer.
+    # Unlike immutable solid occupancy, this includes infill and Z hills.
+    nonplanar_surface = None
+    if enable_nonplanar:
+        from tools.nonplanar_layer_surface import NonPlanarLayerSurface
+        nonplanar_surface = NonPlanarLayerSurface(extrusion_width)
+
     # Main processing pass
     logging.info("\n" + "="*70)
     logging.info("PASS 1: Detect and annotate orphan external perimeters")
@@ -3881,6 +3902,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 logging.info(f"[INFILL] Line {i}: SUBDIVIDING from ({x1:.2f},{y1:.2f}) to ({x2:.2f},{y2:.2f}), e_delta={e_delta:.5f}")
                             # Mark as processed ONLY when we actually process it
                             processed_infill_indices.add(i)
+                            nonplanar_surface.enter_layer(current_layer)
                             # Simple subdivision: from where we are (x1, y1) to where we're going (x2, y2)
                             segments = segment_line(x1, y1, x2, y2, segment_length)
                             if debug >= 3:
@@ -3965,7 +3987,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # Get safezone bounds for this grid cell
                                 local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
                                     gx, gy, current_layer, grid_cell_solid_regions,
-                                    current_layer_height or base_layer_height
+                                    current_layer_height or base_layer_height, z_layer_map
                                 )
                                 
                                 # Clamp Z to safe range
@@ -3973,8 +3995,27 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 if local_z_min > -999:  # Valid z_min
                                     z_mod = max(local_z_min, z_mod)
                                 if local_z_max < 999:  # Valid z_max
-                                    #z_mod = min(local_z_max - (layers_until_ceiling * base_layer_height), z_mod)
                                     z_mod = min(local_z_max, z_mod)
+
+                                # The solid Safezone does not include already
+                                # printed INFILL. Test the new bead footprint
+                                # against the actual immediately preceding
+                                # non-planar layer, across the whole XY segment.
+                                segment_x0 = x1 if idx == 0 else prev_segment[0]
+                                segment_y0 = y1 if idx == 0 else prev_segment[1]
+                                previous_top = nonplanar_surface.top_on_path(
+                                    segment_x0, segment_y0, sx, sy)
+                                if previous_top is not None:
+                                    required_z = previous_top + (
+                                        current_layer_height or base_layer_height)
+                                    if local_z_max < 999 and required_z > local_z_max + 1e-5:
+                                        if debug >= 1:
+                                            logging.warning(
+                                                "Nonplanar clearance blocked by roof at layer %d "
+                                                "(%.3f, %.3f): support Z %.3f, roof Z %.3f",
+                                                current_layer, sx, sy,
+                                                previous_top, local_z_max)
+                                    z_mod = max(z_mod, min(required_z, local_z_max))
 
                                 # Use the final, CLAMPED Z. This geometric
                                 # compensation applies to both rising and
@@ -4224,6 +4265,11 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     valley_segments = []
                                     current_e = valley_start_e  # Sync current_e with valley fill
                                 
+                                # Index actual emitted top surfaces for the
+                                # NEXT layer; same-layer joins never self-support.
+                                nonplanar_surface.add(
+                                    segment_x0, segment_y0, prev_z, sx, sy, z_mod)
+
                                 # Update prev_z for next iteration
                                 prev_z = z_mod
                                 
