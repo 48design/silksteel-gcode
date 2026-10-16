@@ -1226,7 +1226,7 @@ def nonplanar_safezone_edge_z(raw_z, layer_z, amplitude, taper_factor,
     The 1/4 scaling limits either interface to half the configured
     peak-to-peak amplitude, avoiding uncontrolled material pillars.
     """
-    if not infill_cell:
+    if not infill_cell or taper_factor <= 0:
         return raw_z
     first = infill_cell.get('is_first_of_safezone', False)
     last = infill_cell.get('is_last_of_safezone', False)
