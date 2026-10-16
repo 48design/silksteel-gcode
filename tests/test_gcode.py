@@ -646,6 +646,40 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertEqual(layers, 2)
         self.assertAlmostEqual(remaining, .56)
 
+    def test_nonplanar_real_previous_infill_prevents_equal_z_layers(self):
+        # No lower solid surface exists under central sparse infill.
+        # Even if the modulator independently requests the same absolute
+        # Z for every layer, overlapping real prior-layer tracks must lift
+        # the following layer by the nominal thickness.
+        with mock.patch.object(
+            silk, 'calculate_nonplanar_z', side_effect=lambda *args: .2
+        ):
+            output = self.process(
+                fixture(), enable_smoothificator=False,
+                enable_nonplanar=True, enable_adaptive_extrusion=False,
+                segment_length=1.0, amplitude=.1)
+
+        heights = {}
+        layer = -1
+        in_infill = False
+        for line in output.splitlines():
+            if line.startswith(";LAYER_CHANGE"):
+                layer += 1
+                in_infill = False
+            elif line.startswith(";TYPE:Internal infill"):
+                in_infill = True
+            elif line.startswith(";TYPE:") and "Internal infill" not in line:
+                in_infill = False
+            if in_infill:
+                match = re.match(
+                    r"G1 X5\\.000 Y5\\.000 Z([-+]?[\\d.]+) E", line)
+                if match:
+                    heights[layer] = float(match.group(1))
+        self.assertEqual(set(heights), {0, 1, 2})
+        self.assertAlmostEqual(heights[0], .2, places=3)
+        self.assertGreaterEqual(heights[1], heights[0] + .2 - .001)
+        self.assertGreaterEqual(heights[2], heights[1] + .2 - .001)
+
     def test_safezone_reserves_height_for_every_intervening_layer(self):
         # Layer 3 cannot occupy the layer-4 headroom. Fixed-height clamps
         # previously produced Z1.600 in both layer 3 and layer 4.
