@@ -672,7 +672,7 @@ class GCodeSafetyTests(unittest.TestCase):
                 in_infill = False
             if in_infill:
                 match = re.match(
-                    r"G1 X5\\.000 Y5\\.000 Z([-+]?[\\d.]+) E", line)
+                    r"G1 X5\.000 Y5\.000 Z([-+]?[\d.]+) E", line)
                 if match:
                     heights[layer] = float(match.group(1))
         self.assertEqual(set(heights), {0, 1, 2})
