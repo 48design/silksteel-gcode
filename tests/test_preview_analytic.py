@@ -117,7 +117,7 @@ class AnalyticViewerTests(unittest.TestCase):
         peak = IdealizedProfile.sections(
             (142.192, 101.165, 1.6),
             (142.644, 101.617, 1.6), area, .28, .2,
-            layer_z=1.04, role=4, source_width=.45)
+            layer_z=1.04, role=4)
         self.assertEqual(len(peak), 1)
         _, _, width, height = peak[0]
         self.assertAlmostEqual(height, min(.84,
@@ -131,7 +131,7 @@ class AnalyticViewerTests(unittest.TestCase):
         nominal_area = IdealizedProfile.area_for_size(.45, .28)
         unboosted = IdealizedProfile.sections(
             (0, 0, 1.6), (1, 0, 1.6), nominal_area, .28, .2,
-            layer_z=1.04, role=4, source_width=.45)[0]
+            layer_z=1.04, role=4)[0]
         self.assertAlmostEqual(unboosted[3],
             DepositedSurface.gravity_height(nominal_area,30),places=7)
 
@@ -139,7 +139,7 @@ class AnalyticViewerTests(unittest.TestCase):
         # tall pillar even if local nozzle Z is below the layer datum.
         valley = IdealizedProfile.sections(
             (0, 0, .76), (1, 0, .76), nominal_area, .28, .2,
-            layer_z=1.04, role=4, source_width=.45)[0]
+            layer_z=1.04, role=4)[0]
         self.assertAlmostEqual(valley[3], .14, places=7)
 
     def test_all_extrusion_roles_share_speed_sensitive_flow(self):
@@ -219,8 +219,12 @@ class AnalyticViewerTests(unittest.TestCase):
             rows=[PACK.unpack_from(data,i) for i in range(0,len(data),PACK.size)]
         self.assertEqual(meta["count"],8)
         self.assertEqual([int(p[8]) for p in rows],[0,1,1,2,2,4,6,5])
-        for row,expected in zip(rows[:6],[.2,.1,.1,.2,.15,.65]):
+        for row,expected in zip(rows[:5],[.2,.1,.1,.2,.15]):
             self.assertAlmostEqual(row[7],expected,places=5)
+        # Raised non-planar flow is free-strand/clearance limited, not
+        # automatically stretched all the way down to the layer plane.
+        self.assertGreater(rows[5][7], .2)
+        self.assertLess(rows[5][7], .65)
         self.assertAlmostEqual(rows[7][7],.1,places=5)
         for row in rows:
             self.assertTrue(0<row[6]<=40 and 0<row[7]<=40)
