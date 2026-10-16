@@ -652,12 +652,17 @@ function createNozzle(){
         color:0x654313,transparent:true,opacity:.80,
         depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
+    // Dimensions in millimetres: M6 x 5 thread, 13 overall, SW6 hex.
+    const threadLength=5, overallLength=13, hexWidth=6;
+    const hexRadius=hexWidth/Math.sqrt(3);
+    const shoulderY=overallLength-threadLength;
+    const tipLength=2.5;
     const parts=[
-        // Conical brass tip and straight, non-tapered hexagonal head.
-        [new THREE.CylinderGeometry(.60,.18,1.55,32,1,true),.775,gold],
-        [new THREE.CylinderGeometry(.94,.94,.63,6,1,false),1.865,highlight],
-        // Short, smooth collar, deliberately without a threaded shaft.
-        [new THREE.CylinderGeometry(.70,.70,.42,32,1,true),2.39,gold]
+        [new THREE.CylinderGeometry(2.5,.18,tipLength,32,1,false),tipLength/2,gold],
+        [new THREE.CylinderGeometry(hexRadius,hexRadius,shoulderY-tipLength,6,1,false),
+            (tipLength+shoulderY)/2,highlight],
+        [new THREE.CylinderGeometry(2.88,2.88,threadLength,32,1,false),
+            shoulderY+threadLength/2,gold]
     ];
     for(const [geometry,y,material] of parts){
         const mesh=new THREE.Mesh(geometry,material);
@@ -665,6 +670,23 @@ function createNozzle(){
         mesh.renderOrder=25;
         group.add(mesh);
     }
+    // Simplified M6 coarse thread (1 mm pitch), with a 6 mm outer diameter.
+    const helix=[];
+    const steps=240, turns=threadLength;
+    for(let i=0;i<=steps;i++){
+        const t=i/steps, angle=t*turns*Math.PI*2;
+        helix.push(new THREE.Vector3(
+            2.89*Math.cos(angle),
+            shoulderY+.12+t*(threadLength-.24),
+            2.89*Math.sin(angle)
+        ));
+    }
+    const thread=new THREE.Mesh(
+        new THREE.TubeGeometry(new THREE.CatmullRomCurve3(helix),steps,.10,5,false),
+        highlight
+    );
+    thread.renderOrder=26;
+    group.add(thread);
     const outlet=new THREE.Mesh(new THREE.TorusGeometry(.18,.04,8,28),highlight);
     outlet.rotation.x=Math.PI/2;
     outlet.position.y=.035;
