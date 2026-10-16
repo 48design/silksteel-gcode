@@ -2578,14 +2578,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     else:
         noise_lut = None
     
-    # Track real non-planar bead TOPS from the preceding printed layer.
-    # Unlike immutable solid occupancy, this includes infill and Z hills.
-    nonplanar_surface = None
-    nonplanar_roof_conflicts = 0
-    if enable_nonplanar:
-        from tools.nonplanar_layer_surface import NonPlanarLayerSurface
-        nonplanar_surface = NonPlanarLayerSurface(extrusion_width)
-
     # Main processing pass
     logging.info("\n" + "="*70)
     logging.info("PASS 1: Detect and annotate orphan external perimeters")
@@ -2767,6 +2759,28 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Use annotated lines for Pass 2
     lines = annotated_lines
     source_e_deltas, source_e_targets, source_relative_modes = scan_source_extrusion(lines)
+
+    # Compute the whole sparse infill lattice before emitting G-code. Unlike
+    # the previous greedy online clamp this can lower earlier hills to
+    # protect future valleys and keep upper layers visibly non-planar.
+    nonplanar_planned_z = {}
+    nonplanar_taper_cache = {}
+    if enable_nonplanar:
+        nonplanar_planned_z, nonplanar_plan = build_nonplanar_path_plan(
+            lines, source_e_deltas, z_layer_map, noise_lut, solid_at_grid,
+            grid_cell_solid_regions, grid_resolution, segment_length,
+            extrusion_width, amplitude, base_layer_height)
+        logging.info(
+            "Nonplanar lookahead: %d segments, %d hills lowered, %d floor "
+            "repairs, %d geometric conflicts",
+            len(nonplanar_planned_z), nonplanar_plan.downward,
+            nonplanar_plan.upward, len(nonplanar_plan.conflicts))
+        if nonplanar_plan.conflicts:
+            for conflict in nonplanar_plan.conflicts[:5]:
+                logging.warning("Nonplanar plan conflict: %s", conflict)
+            print("WARNING: %d Non-planar constraints remain unsatisfied; "
+                  "inspect the G-code before printing!" %
+                  len(nonplanar_plan.conflicts))
     
     # Main processing pass
     logging.info("\n" + "="*70)
@@ -3973,7 +3987,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 logging.info(f"[INFILL] Line {i}: SUBDIVIDING from ({x1:.2f},{y1:.2f}) to ({x2:.2f},{y2:.2f}), e_delta={e_delta:.5f}")
                             # Mark as processed ONLY when we actually process it
                             processed_infill_indices.add(i)
-                            nonplanar_surface.enter_layer(current_layer)
                             # Simple subdivision: from where we are (x1, y1) to where we're going (x2, y2)
                             segments = segment_line(x1, y1, x2, y2, segment_length)
                             if debug >= 3:
@@ -4011,49 +4024,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # the Z modulation/clamp below, calculate the
                                 # true XYZ distance and scale E accordingly.
                                 
-                                # Calculate distance to nearest perimeter/solid to taper modulation
-                                # Check surrounding grid cells for solid material at current layer
-                                # Use floor division to match grid building method
-                                gx = int(sx / grid_resolution)
-                                gy = int(sy / grid_resolution)
-                                
-                                # Find minimum distance to any solid cell at this layer
-                                min_dist_to_solid = float('inf')
-                                search_radius = 5  # Check cells within 5mm
-                                for dx in range(-search_radius, search_radius + 1):
-                                    for dy in range(-search_radius, search_radius + 1):
-                                        check_gx = gx + dx
-                                        check_gy = gy + dy
-                                        # Check if this cell has solid at current layer
-                                        cell_key = (check_gx, check_gy, current_layer)
-                                        if cell_key in solid_at_grid and solid_at_grid[cell_key].get('solid', False):
-                                            # Calculate distance to this solid cell center
-                                            solid_x = check_gx * grid_resolution
-                                            solid_y = check_gy * grid_resolution
-                                            dist = ((sx - solid_x)**2 + (sy - solid_y)**2)**0.5
-                                            min_dist_to_solid = min(min_dist_to_solid, dist)
-                                
-                                # Calculate tapering factor based on distance to walls
-                                # Within 2mm of wall: taper to 0
-                                # Beyond 3mm from wall: full modulation
-                                taper_distance_start = 2.0  # Start tapering at 2mm from wall
-                                taper_distance_full = 3.0   # Full modulation beyond 3mm
-                                
-                                if min_dist_to_solid < taper_distance_start:
-                                    # Very close to wall - no modulation
-                                    taper_factor = 0.0
-                                elif min_dist_to_solid > taper_distance_full:
-                                    # Far from wall - full modulation
-                                    taper_factor = 1.0
-                                else:
-                                    # Transition zone - smooth interpolation
-                                    # Linear interpolation between start and full distances
-                                    t = (min_dist_to_solid - taper_distance_start) / (taper_distance_full - taper_distance_start)
-                                    # Smooth using cosine for gentler transition
-                                    taper_factor = (1.0 - math.cos(t * math.pi)) / 2.0
-                                
+                                # Same exact geometric wall-taper as lookahead.
+                                taper_factor = nonplanar_wall_taper(
+                                    sx, sy, current_layer, solid_at_grid,
+                                    grid_resolution, nonplanar_taper_cache)
+
                                 # Calculate non-planar Z using helper function
-                                z_mod = calculate_nonplanar_z(noise_lut, sx, sy, layer_z, amplitude, taper_factor)
+                                z_mod = nonplanar_planned_z.get(
+                                    (i, idx), calculate_nonplanar_z(
+                                        noise_lut, sx, sy, layer_z, amplitude,
+                                        taper_factor))
                                 
                                 # Get safezone bounds for this grid cell
                                 local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
@@ -4068,29 +4048,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 if local_z_max < 999:  # Valid z_max
                                     z_mod = min(local_z_max, z_mod)
 
-                                # The solid Safezone does not include already
-                                # printed INFILL. Test the new bead footprint
-                                # against the actual immediately preceding
-                                # non-planar layer, across the whole XY segment.
-                                segment_x0 = x1 if idx == 0 else prev_segment[0]
-                                segment_y0 = y1 if idx == 0 else prev_segment[1]
-                                previous_top = nonplanar_surface.top_on_path(
-                                    segment_x0, segment_y0, sx, sy)
-                                if previous_top is not None:
-                                    required_z = previous_top + (
-                                        current_layer_height or base_layer_height)
-                                    if local_z_max < 999 and required_z > local_z_max + 1e-5:
-                                        nonplanar_roof_conflicts += 1
-                                        # Never silently claim an unsatisfiable
-                                        # pair of bounds is collision-free.
-                                        if nonplanar_roof_conflicts <= 5:
-                                            logging.warning(
-                                                "Nonplanar clearance blocked by roof at layer %d "
-                                                "(%.3f, %.3f): support Z %.3f, roof Z %.3f",
-                                                current_layer, sx, sy,
-                                                previous_top, local_z_max)
-                                    z_mod = max(z_mod, min(required_z, local_z_max))
-
+                                # Inter-layer geometry was resolved from
+                                # future to earlier layers BEFORE this move.
+                                # Do not propagate lower hills upward here.
                                 # Use the final, CLAMPED Z. This geometric
                                 # compensation applies to both rising and
                                 # falling segments, even outside safezones.
@@ -4339,11 +4299,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     valley_segments = []
                                     current_e = valley_start_e  # Sync current_e with valley fill
                                 
-                                # Index actual emitted top surfaces for the
-                                # NEXT layer; same-layer joins never self-support.
-                                nonplanar_surface.add(
-                                    segment_x0, segment_y0, prev_z, sx, sy, z_mod)
-
                                 # Update prev_z for next iteration
                                 prev_z = z_mod
                                 
@@ -4420,15 +4375,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         else:
             write_and_track(output_buffer, line, recent_output_lines)
             i += 1
-
-    if nonplanar_roof_conflicts:
-        warning = (
-            f"WARNING: {nonplanar_roof_conflicts} non-planar segments could not "
-            "maintain interlayer clearance beneath a solid roof. "
-            "Inspect the G-code before printing."
-        )
-        logging.error(warning)
-        print(warning)
 
     # File may end inside the final bridge TYPE section.
     if enable_bridge_densifier and in_bridge_section:
