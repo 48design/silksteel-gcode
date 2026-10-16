@@ -109,8 +109,9 @@ Modulates Z height during infill printing to create 3D wave patterns:
 - Infill lines undulate up and down, creating mechanical anchors
 - Automatically detects solid layers above/below and respects safe Z boundaries
 - Keeps the original solid occupancy and safezone limits, but **plans all non-planar infill tracks before extrusion** instead of accumulating corrections layer by layer
+- Shapes the safezone **complementarily**: first infill layer receives positive, limited hill offsets (adaptive support material); last infill layer receives negative, limited valley offsets (for Valley Filling); middle layers retain the original 3D sine/Perlin field
 - Resolves actual XY footprint intersections **from upper to lower layers**: an over-high lower hill is shortened before printing, preserving the later layer's valleys and thus the upper Valley-Filling opportunity
-- Performs a bounded forward repair only if a solid floor prevents the needed downward correction; reports any geometrically impossible floor/roof/strand constraints before printing
+- Performs a forward repair only if a solid floor prevents the needed downward correction; reports any geometrically impossible floor/roof/strand constraints before printing
 - Uses a sparse sliding spatial index while solving the layers; final XYZ-length E compensation and adaptive first-layer flow are applied **after** the planned Z adjustment
 - Two pattern modes: sine waves or Perlin noise
 - Compensates extrusion using the true XYZ length of each Z-modulated segment (upward and downward, after Z clamping)
