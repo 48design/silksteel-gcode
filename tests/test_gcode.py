@@ -638,10 +638,25 @@ class GCodeSafetyTests(unittest.TestCase):
         ]}
         lower, upper, layers, remaining = silk.get_safezone_bounds(
             4, 6, 4, regions, .28)
-        self.assertAlmostEqual(lower, 1.04)
+        # The LOWER solid ends at 1.04; a new .28-mm strand cannot
+        # deposit its TOP below 1.32 without entering that surface.
+        self.assertAlmostEqual(lower, 1.32)
         self.assertAlmostEqual(upper, 1.60)
         self.assertEqual(layers, 2)
         self.assertAlmostEqual(remaining, .56)
+
+    def test_valley_cannot_penetrate_previous_solid_surface(self):
+        # Reproduces the reported Z1.040/Z0.760 problem: last solid top
+        # is 0.760, but the new non-planar bead itself is 0.280 high.
+        regions = {(10, 20): [(2, 2, .48, .76)]}
+        lower, upper, *_ = silk.get_safezone_bounds(
+            10, 20, 3, regions, .28)
+        self.assertAlmostEqual(lower, 1.04)
+        self.assertEqual(upper, 999)
+        self.assertAlmostEqual(max(.76, lower), 1.04)
+        # Variable-height layers must use their current bead height too.
+        low_020, *_ = silk.get_safezone_bounds(10, 20, 3, regions, .20)
+        self.assertAlmostEqual(low_020, .96)
 
     def test_perlin_z_gradients_preserve_layer_order(self):
         # The Perlin field must be gentle in the vertical axis like sine,
