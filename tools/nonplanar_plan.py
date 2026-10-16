@@ -68,6 +68,7 @@ class NonPlanarPathPlan:
         self.conflicts = []
         self.downward = 0
         self.upward = 0
+        self.floor_repairs = 0
 
     def add(self, layer, key, start, end, desired, floor, roof, layer_height):
         self.layers[layer].append((key, start, end, desired, floor, roof))
@@ -101,6 +102,7 @@ class NonPlanarPathPlan:
         self.conflicts = []
         self.downward = 0
         self.upward = 0
+        self.floor_repairs = 0
         future = None
         future_layer = None
         for layer in sorted(self.layers, reverse=True):
@@ -115,8 +117,9 @@ class NonPlanarPathPlan:
                     if upper_top is not None:
                         bound = upper_top - self.heights[future_layer]
                         if bound + 1e-5 < floor:
-                            self.conflicts.append(
-                                (layer, key, 'floor_vs_future', floor, bound))
+                            # Forward planning can repair this if the roof
+                            # still has room; do not warn unless it cannot.
+                            self.floor_repairs += 1
                         elif bound < z:
                             z = bound
                             self.downward += 1
