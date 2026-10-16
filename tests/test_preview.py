@@ -125,9 +125,10 @@ class PreviewGeometryTests(unittest.TestCase):
         actual=IdealizedProfile.sections
 
         def patched(start,end,area,nominal,first_layer,layer_z=None,speed=30.,
-                    *,role=0,brick_pass=0):
+                    *,role=0,brick_pass=0,bed_reference=False):
             result=actual(start,end,area,nominal,first_layer,layer_z,speed,
-                          role=role,brick_pass=brick_pass)
+                          role=role,brick_pass=brick_pass,
+                          bed_reference=bed_reference)
             if len(result)==1:
                 t0,t1,w,h=result[0]
                 return [(0.,.5,41.,h),(.5,1.,w,h)]
@@ -555,7 +556,7 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertEqual([int(row[9]) for row in rows],[10,11,12,14,15,17])
         self.assertEqual(meta["omittedCount"],0)
 
-    def test_converter_adaptive_nonplanar_hill_uses_slicer_width(self):
+    def test_converter_raised_high_flow_extrusion_uses_universal_profile(self):
         lines = [
             "; layer_height = 0.28",
             "; extrusion_width = 0.45",
@@ -568,12 +569,16 @@ class PreviewGeometryTests(unittest.TestCase):
         meta, rows = self.parse(lines)
         self.assertEqual(meta["count"], 1)
         self.assertEqual(int(rows[0][8]), 4)
-        self.assertAlmostEqual(rows[0][7], .84, places=5)
+        # No feature-specific source-width override: real F1500 -> 25 mm/s.
+        from silksteel_preview_surface import DepositedSurface
+        area = .13046 * math.pi * (.875 ** 2) / math.hypot(.452,.452)
+        self.assertAlmostEqual(rows[0][7],
+            min(.84,DepositedSurface.gravity_height(area,25)),places=5)
         self.assertLess(rows[0][6], .8)
 
-    def test_converter_nonplanar_profile_follows_commanded_z(self):
-        # Non-planar extrusion keeps the nominal cross-section while the
-        # entire strand follows XYZ. Reverse traversal preserves its profile.
+    def test_converter_nonplanar_flow_is_direction_symmetric(self):
+        # The same XYZ/E/speed profile is identical in both directions;
+        # section height comes from area and F, not a fixed role thickness.
         def build(reverse):
             points=[(i*.5,0.,1.0+i*.12) for i in range(5)]
             if reverse:
@@ -592,8 +597,11 @@ class PreviewGeometryTests(unittest.TestCase):
         for (uw,uh),(dw,dh) in zip(rising,reversed(falling)):
             self.assertAlmostEqual(uw,dw,places=4)
             self.assertAlmostEqual(uh,dh,places=4)
-        self.assertTrue(all(abs(height-.2)<1e-6 for _,height in rising))
-        self.assertTrue(all(abs(width-rising[0][0])<1e-6 for width,_ in rising))
+        self.assertTrue(all(abs(height-rising[0][1])<1e-6
+                            for _,height in rising))
+        self.assertTrue(all(abs(width-rising[0][0])<1e-6
+                            for width,_ in rising))
+        self.assertGreater(rising[0][1],.2)
 
     def test_contiguous_ascent_does_not_support_itself_or_differ_from_descent(self):
         from silksteel_preview_surface import DepositedSurface
