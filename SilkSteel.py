@@ -1259,6 +1259,10 @@ def build_nonplanar_path_plan(lines, source_e_deltas, z_layer_map, noise_lut,
                     noise_lut, sx, sy, base_z, amplitude, taper)
                 floor, roof, _, _ = get_safezone_bounds(
                     gx, gy, layer, solid_regions, layer_h, z_layer_map)
+                # The build plate is an unconditional real substrate.
+                # Guard against negative first-layer Z when no local solid
+                # region is recorded in the coarse occupancy raster.
+                floor = max(floor, layer_h)
                 plan.add(layer, (index, part), previous, (sx, sy),
                          desired, floor, roof, layer_h)
                 previous = (sx, sy)
