@@ -901,12 +901,12 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_lay
     
     Returns:
         Tuple of (z_min, z_max, layers_until_ceiling, height_until_ceiling):
-        - z_min: Floor Z (top of solid region below, or -999 if none)
+        - z_min: Minimum nozzle-top Z (lower solid top + new bead height, or -999)
         - z_max: Ceiling Z (underside of a strictly future solid region, or 999 if none)
         - layers_until_ceiling: Number of layers until solid starts above (0 if none)
         - height_until_ceiling: Remaining height in mm from current layer to ceiling (layers_until_ceiling × layer_height)
     """
-    local_z_min = -999  # Floor (top of solid below)
+    local_z_min = -999  # Minimum Z for a new bead above lower solid
     local_z_max = 999   # Ceiling (bottom of solid above)
     layers_until_ceiling = 0
     
@@ -914,12 +914,16 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_lay
         for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
             # Check if this solid region is BELOW our current layer
             if region_end < current_layer:
-                # This solid is below - use its top as our floor
-                local_z_min = max(local_z_min, z_top)
+                # z_top is the already-deposited lower material surface.
+                # Commanded G-code Z represents the TOP of the new bead,
+                # so adding its layer thickness avoids driving that bead
+                # INTO the support. This offset was lost in the prior fix.
+                local_z_min = max(local_z_min, z_top + base_layer_height)
             
             # Only a strictly FUTURE solid region is a ceiling.
             elif region_start > current_layer:
-                # z_bottom is the first solid layer's physical UNDERSIDE.
+                # The upper material begins at z_bottom. A new bead's
+                # commanded TOP must not rise into that future roof.
                 candidate_ceiling = z_bottom
                 if local_z_max == 999:  # Take the LOWEST ceiling
                     local_z_max = candidate_ceiling
@@ -3960,7 +3964,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 
                                 # Get safezone bounds for this grid cell
                                 local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
-                                    gx, gy, current_layer, grid_cell_solid_regions, base_layer_height
+                                    gx, gy, current_layer, grid_cell_solid_regions,
+                                    current_layer_height or base_layer_height
                                 )
                                 
                                 # Clamp Z to safe range
