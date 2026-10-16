@@ -13,7 +13,7 @@ from collections import defaultdict
 
 
 class _Footprint:
-    def __init__(self, width, cell_size=0.35):
+    def __init__(self, width, cell_size=0.50):
         self.cell_size = cell_size
         self.inv = 1 / cell_size
         self.step = min(0.17, cell_size / 2)
