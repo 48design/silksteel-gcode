@@ -899,8 +899,8 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions,
         current_layer: Current layer number
         grid_cell_solid_regions: Dictionary mapping (gx, gy) to list of solid regions
         base_layer_height: Fallback layer height in mm
-        z_layer_map: Actual slicer layer-top heights, used to reserve an
-            equal Z-offset budget for every infill layer in one safezone.
+        z_layer_map: Actual slicer layer-top heights, used to reserve
+            headroom below an upcoming solid roof for later infill layers.
     
     Returns:
         Tuple of (z_min, z_max, layers_until_ceiling, height_until_ceiling):
@@ -917,14 +917,11 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions,
         for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
             # Check if this solid region is BELOW our current layer
             if region_end < current_layer:
-                # Keep the lower solid's displacement bound across all
-                # intervening infill layers, not only the first one.
-                if (z_layer_map is not None and
-                        region_end in z_layer_map and current_layer in z_layer_map):
-                    rise = z_layer_map[current_layer] - z_layer_map[region_end]
-                else:
-                    rise = (current_layer - region_end) * base_layer_height
-                local_z_min = max(local_z_min, z_top + max(0.0, rise))
+                # Only the physical solid surface is an unconditional
+                # floor. A missing previous-layer infill path leaves room
+                # for a valley; where it IS printed, the deposited-path
+                # lookup below enforces the missing interlayer thickness.
+                local_z_min = max(local_z_min, z_top + base_layer_height)
             
             # Only a strictly FUTURE solid region is a ceiling.
             elif region_start > current_layer:
