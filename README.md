@@ -108,9 +108,10 @@ Strengthens parts by creating a brick-like interlocking pattern with internal pe
 Modulates Z height during infill printing to create 3D wave patterns:
 - Infill lines undulate up and down, creating mechanical anchors
 - Automatically detects solid layers above/below and respects safe Z boundaries
-- Pre-calculates solid occupancy and safezone bounds; reserves Z headroom for later infill layers beneath solid roofs
-- Tracks the actual top Z of previously extruded non-planar paths in a small sparse XY index (current + immediately preceding layer) and preserves the new bead's thickness wherever their footprints overlap
-- Reports remaining collisions where prior material and a solid roof leave insufficient clearance; inspect these warnings before printing
+- Keeps the original solid occupancy and safezone limits, but **plans all non-planar infill tracks before extrusion** instead of accumulating corrections layer by layer
+- Resolves actual XY footprint intersections **from upper to lower layers**: an over-high lower hill is shortened before printing, preserving the later layer's valleys and thus the upper Valley-Filling opportunity
+- Performs a bounded forward repair only if a solid floor prevents the needed downward correction; reports any geometrically impossible floor/roof/strand constraints before printing
+- Uses a sparse sliding spatial index while solving the layers; final XYZ-length E compensation and adaptive first-layer flow are applied **after** the planned Z adjustment
 - Two pattern modes: sine waves or Perlin noise
 - Compensates extrusion using the true XYZ length of each Z-modulated segment (upward and downward, after Z clamping)
 - Preserves the slicer's extrusion amount for horizontal segments; optional adaptive safezone extrusion remains additional
@@ -419,7 +420,7 @@ python SilkSteel.py model.gcode -o output.gcode -full
    - Subdivides infill lines into small segments
    - Applies sine wave or Perlin noise pattern to calculate target Z
    - Clamps Z values to safe range for each grid cell
-   - **Valley Detection**: When Z drops below layer height, enters valley mode
+   - **Valley Detection**: After reverse non-planar planning, when final Z is below the nominal layer Z, enters valley mode
    - **Valley Filling**: Collects all segments in valley, then fills with multiple passes
    - **Crossing Detection**: Skips valley fill at infill crossing points (except last one)
    - **Smart Gaps**: Creates gaps where infill lines cross to prevent collisions
