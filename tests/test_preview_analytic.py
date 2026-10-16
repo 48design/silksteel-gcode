@@ -6,6 +6,7 @@ import unittest
 
 from silksteel_preview import PACK, convert
 from silksteel_preview_ideal import IdealizedProfile
+from silksteel_preview_surface import DepositedSurface
 
 
 class AnalyticViewerTests(unittest.TestCase):
@@ -49,15 +50,16 @@ class AnalyticViewerTests(unittest.TestCase):
         self.assertEqual(meta["omittedCount"],0)
 
     def test_first_explicit_layer_uses_exact_nozzle_to_bed_distance(self):
-        # The viewer models the commanded geometry, not physical sagging.
-        # Height is exactly the known Z=.8 even for low extrusion flow.
+        # The bed is a HARD upper limit on thickness, not a demand to
+        # fill the whole nozzle-to-bed gap with low-flow material.
         area=.4*math.pi*(.875**2)/20
         sections=IdealizedProfile.sections(
             (0.,0.,.8),(20.,0.,.8),area,.2,.2,
             layer_z=.8,role=0,bed_reference=True)
         self.assertEqual(len(sections),1)
         _,_,width,height=sections[0]
-        self.assertAlmostEqual(height,.8,places=7)
+        self.assertAlmostEqual(height, min(.8,
+            DepositedSurface.gravity_height(area,30.)), places=7)
         self.assertLess(width,height)
         self.assertAlmostEqual(IdealizedProfile.area_for_size(width,height),
                                area,places=9)
@@ -88,13 +90,13 @@ class AnalyticViewerTests(unittest.TestCase):
             (0,0,.2,.4,.4,.2),   # ordinary layer
             (0,0,.2,.6,.4,.4),   # non-planar/shifted nozzle +0.2 mm
             (0,0,.2,.3,.4,.1),   # valley: nozzle below layer reference
-            (4,0,.2,.6,.4,.2),   # non-planar peak: entire bead follows Z
-            (4,0,.2,.3,.4,.2),   # non-planar valley: no sideways spreading
+            (4,0,.2,.6,.4,.4),   # non-planar peak: same substrate gap as role 0
+            (4,0,.2,.3,.4,.1),   # non-planar valley: same gap as role 0
             (1,0,.1,.3,.4,.1),   # Smoothificator thickness
             (2,1,.15,.4,.4,.2),  # Bricklayers base 1/2
             (2,2,.15,.55,.4,.15),# Bricklayers base 2/2
             (5,0,.2,.4,.4,.1),   # valley filling stroke
-            (6,0,.2,.4,.4,IdealizedProfile.free_square_side(area)),
+            (6,0,.2,.4,.4,DepositedSurface.gravity_height(area,30.)),
         ]
         for role,brick_pass,nominal,z,ref,expected in cases:
             with self.subTest(role=role,brick_pass=brick_pass,z=z):
@@ -107,7 +109,7 @@ class AnalyticViewerTests(unittest.TestCase):
                 self.assertAlmostEqual(IdealizedProfile.area_for_size(width,height),
                                        area,places=9)
 
-    def test_adaptive_hill_volume_fills_height_not_width(self):
+    def test_high_flow_hill_fills_height_without_role_specific_rules(self):
         # Actual non-planar segment near output line 13200: 0.13046 mm
         # filament over 0.639 mm XYZ at Z1.600 (base layer Z1.040).
         path_length = math.hypot(.452, .452)
@@ -118,25 +120,61 @@ class AnalyticViewerTests(unittest.TestCase):
             layer_z=1.04, role=4, source_width=.45)
         self.assertEqual(len(peak), 1)
         _, _, width, height = peak[0]
-        self.assertAlmostEqual(height, .84, places=6)
+        self.assertAlmostEqual(height, min(.84,
+            DepositedSurface.gravity_height(area,30)),places=6)
         self.assertLess(width, .8)
         self.assertAlmostEqual(
             IdealizedProfile.area_for_size(width, height), area, places=8)
 
-        # Plain Z-following material (no adaptive E) MUST NOT become a
-        # tall narrow strand just because its nozzle Z was raised.
+        # Ordinary E at the same raised Z follows the SAME speed/flow
+        # law. Low flow cannot magically fill all of the free gap.
         nominal_area = IdealizedProfile.area_for_size(.45, .28)
         unboosted = IdealizedProfile.sections(
             (0, 0, 1.6), (1, 0, 1.6), nominal_area, .28, .2,
             layer_z=1.04, role=4, source_width=.45)[0]
-        self.assertAlmostEqual(unboosted[3], .28)
+        self.assertAlmostEqual(unboosted[3],
+            DepositedSurface.gravity_height(nominal_area,30),places=7)
 
         # Descending into a valley never converts nominal area to a
         # tall pillar even if local nozzle Z is below the layer datum.
         valley = IdealizedProfile.sections(
             (0, 0, .76), (1, 0, .76), nominal_area, .28, .2,
             layer_z=1.04, role=4, source_width=.45)[0]
-        self.assertAlmostEqual(valley[3], .28)
+        self.assertAlmostEqual(valley[3], .05, places=7)
+
+    def test_all_extrusion_roles_share_speed_sensitive_flow(self):
+        # Same physical XYZ path, E per distance and feedrate MUST imply
+        # the same profile for ordinary infill, non-planar and bridges
+        # when all three have sufficient clearance.
+        area = .36
+        samples = {}
+        for role in (0, 4, 6):
+            slow = IdealizedProfile.sections(
+                (0, 0, 1.2), (10, 0, 1.2), area, .28, .2,
+                layer_z=.28, speed=8, role=role)[0]
+            fast = IdealizedProfile.sections(
+                (0, 0, 1.2), (10, 0, 1.2), area, .28, .2,
+                layer_z=.28, speed=90, role=role)[0]
+            self.assertGreater(slow[3], fast[3])
+            self.assertLess(slow[2], fast[2])
+            for case in (slow, fast):
+                self.assertAlmostEqual(
+                    IdealizedProfile.area_for_size(case[2],case[3]),
+                    area, places=8)
+            samples[role]=(slow[2:],fast[2:])
+        self.assertEqual(samples[0],samples[4])
+        self.assertEqual(samples[0],samples[6])
+
+    def test_supported_paths_limit_height_for_every_role(self):
+        area = .36
+        for role in (0, 4):
+            supported = IdealizedProfile.sections(
+                (0,0,.28),(10,0,.28),area,.28,.2,
+                layer_z=.28,speed=8,role=role)[0]
+            self.assertAlmostEqual(supported[3],.28,places=7)
+            self.assertAlmostEqual(
+                IdealizedProfile.area_for_size(supported[2],supported[3]),
+                area,places=8)
 
     def test_analytical_profile_does_not_depend_on_prior_paths(self):
         area=.08
