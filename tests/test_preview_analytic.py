@@ -107,6 +107,37 @@ class AnalyticViewerTests(unittest.TestCase):
                 self.assertAlmostEqual(IdealizedProfile.area_for_size(width,height),
                                        area,places=9)
 
+    def test_adaptive_hill_volume_fills_height_not_width(self):
+        # Actual non-planar segment near output line 13200: 0.13046 mm
+        # filament over 0.639 mm XYZ at Z1.600 (base layer Z1.040).
+        path_length = math.hypot(.452, .452)
+        area = .13046 * math.pi * (.875 ** 2) / path_length
+        peak = IdealizedProfile.sections(
+            (142.192, 101.165, 1.6),
+            (142.644, 101.617, 1.6), area, .28, .2,
+            layer_z=1.04, role=4, source_width=.45)
+        self.assertEqual(len(peak), 1)
+        _, _, width, height = peak[0]
+        self.assertAlmostEqual(height, .84, places=6)
+        self.assertLess(width, .8)
+        self.assertAlmostEqual(
+            IdealizedProfile.area_for_size(width, height), area, places=8)
+
+        # Plain Z-following material (no adaptive E) MUST NOT become a
+        # tall narrow strand just because its nozzle Z was raised.
+        nominal_area = IdealizedProfile.area_for_size(.45, .28)
+        unboosted = IdealizedProfile.sections(
+            (0, 0, 1.6), (1, 0, 1.6), nominal_area, .28, .2,
+            layer_z=1.04, role=4, source_width=.45)[0]
+        self.assertAlmostEqual(unboosted[3], .28)
+
+        # Descending into a valley never converts nominal area to a
+        # tall pillar even if local nozzle Z is below the layer datum.
+        valley = IdealizedProfile.sections(
+            (0, 0, .76), (1, 0, .76), nominal_area, .28, .2,
+            layer_z=1.04, role=4, source_width=.45)[0]
+        self.assertAlmostEqual(valley[3], .28)
+
     def test_analytical_profile_does_not_depend_on_prior_paths(self):
         area=.08
         first=IdealizedProfile.sections(
