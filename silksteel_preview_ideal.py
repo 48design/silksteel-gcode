@@ -1,13 +1,15 @@
-"""Analytical extrusion profiles for the G-code viewer.
+"""Analytical volume-conserving flow profiles for every G-code extrusion.
 
-The viewer depicts the commanded material deposit, not a simulated collision
-with previously deposited beads. The layer plane is the default substrate;
-SilkSteel's explicit multi-pass annotations take precedence. This deliberately
-does not maintain or sample a spatial occupancy raster.
+The nozzle speed and deposited material per millimetre determine the free
+strand's idealized height. Available space below the nozzle compresses this
+profile, conserving cross-sectional area by expanding its width. The preview
+does not simulate prior-bead collisions or maintain a spatial occupancy raster.
 """
 from __future__ import annotations
 
 import math
+
+from silksteel_preview_surface import DepositedSurface
 
 CORNER_LOSS = (4.0 - math.pi) * 0.4 ** 2
 
@@ -45,7 +47,6 @@ class IdealizedProfile:
         role: int = 0,
         brick_pass: int = 0,
         bed_reference: bool = False,
-        source_width: float | None = None,
     ) -> list[tuple[float, float, float, float]]:
         """Return (t0, t1, width, height); never subdivide to probe support.
 
@@ -62,49 +63,39 @@ class IdealizedProfile:
         nozzle_z = (start[2] + end[2]) * 0.5
         reference_z = nozzle_z if layer_z is None else layer_z
 
-        if (layer_z is None or bed_reference) and role not in (1, 5, 6) and brick_pass == 0:
-            # Before the first slicer layer *and* in the actual first layer,
-            # the only known substrate is the print bed (Z=0). A nominal
-            # layer must not be imagined 0.2 mm below an elevated prime line.
-            # This is an intentional geometry abstraction: Z gives the
-            # nozzle-to-bed gap, regardless of extrusion amount. Cross-section
-            # area determines width; do not invent a free-strand height cap.
-            height = nozzle_z
-        elif role == 1 or brick_pass == 2:
-            # Smoothificator / second Bricklayers base pass: already defined
-            # by the exact per-pass layer thickness in the processed G-code.
-            height = nominal
-        elif role == 6:
-            # A bridge is assumed to span air, with a rounded free strand.
-            height = IdealizedProfile.free_square_side(area)
-        elif role == 5:
-            # Valley fill is deliberately emitted as <= 0.1 mm Z increments.
-            height = min(nominal, 0.1)
-        elif brick_pass == 1:
-            # First base pass starts at the normal layer height.
-            height = nominal / 0.75
-        elif role == 4:
-            # Non-planar Z is the upper surface of the bead. Plain XYZ
-            # compensation keeps E / path length unchanged, so its bead
-            # remains nominal height. Adaptive E is intentionally additional
-            # material for raised, first-safezone infill: represent that
-            # EXTRA volume mainly by filling DOWN into the lift, rather than
-            # manufacturing a very wide, nominal-height ribbon.
-            height = nominal
-            lift = max(0.0, nozzle_z - reference_z)
-            if lift > 0 and source_width is not None and source_width > 0:
-                normal_area = IdealizedProfile.area_for_size(source_width, nominal)
-                if normal_area > 0 and area > normal_area:
-                    extra_height = nominal * (area / normal_area - 1.0)
-                    height += min(lift, extra_height)
-        else:
-            # Normal path or shifted perimeter:
-            # substrate = layer reference minus nominal thickness.
-            height = nominal + (nozzle_z - reference_z)
+        # One flow model for ALL roles: E / XYZ distance supplies the
+        # cross-sectional area, and actual feedrate determines the idealized
+        # free-strand shape. Only the available nozzle-to-support gap varies
+        # with the feature and its explicitly known pass geometry.
+        free_height = DepositedSurface.gravity_height(area, speed)
 
-        # A negative deep valley offset would otherwise produce a negative
-        # cross-section. Keep its volume represented by a finite thin strand.
-        height = max(0.05, nominal * 0.5, height)
+        if (layer_z is None or bed_reference) and role not in (1, 5, 6) and brick_pass == 0:
+            # The only known substrate of an unmarked/first-layer extrusion
+            # is the bed at Z=0, not a fictitious nominal-thickness plane.
+            available_height = nozzle_z
+        elif role == 6:
+            # A freely suspended bridge has no supporting substrate.
+            available_height = math.inf
+        elif role == 1 or brick_pass == 2:
+            # Multi-pass paths have an explicit deposited pass thickness.
+            available_height = nominal
+        elif role == 5:
+            # Valley-filling passes use increments <= 0.1 mm.
+            available_height = min(nominal, 0.1)
+        elif brick_pass == 1:
+            available_height = nominal / 0.75
+        else:
+            # This applies identically to ordinary and non-planar paths.
+            # Elevated Z provides more space for extra E to flow DOWN;
+            # it doesn't automatically imply an equally tall bead.
+            available_height = nominal + (nozzle_z - reference_z)
+
+        height = min(free_height, available_height)
+        # Avoid unstable or inverted meshes in exceptionally deep valleys;
+        # the same minimum applies to every profile (except thin fill passes).
+        height = max(0.05, height)
+        if role != 5:
+            height = max(nominal * 0.5, height)
         width = IdealizedProfile.width_for_area(area, height)
         if not (math.isfinite(width) and math.isfinite(height) and
                 0 < width <= 40 and 0 < height <= 40):
