@@ -641,8 +641,9 @@ class GCodeSafetyTests(unittest.TestCase):
         # The LOWER solid ends at 1.04; a new .28-mm strand cannot
         # deposit its TOP below 1.32 without entering that surface.
         self.assertAlmostEqual(lower, 1.32)
-        # Room for layer 5 is reserved below the layer-6 solid roof.
-        self.assertAlmostEqual(upper, 1.32)
+        # The solid roof stays fixed; collapsing it to this layer's
+        # nominal Z would erase all non-planar hills.
+        self.assertAlmostEqual(upper, 1.60)
         self.assertEqual(layers, 2)
         self.assertAlmostEqual(remaining, .56)
 
@@ -680,9 +681,10 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertGreaterEqual(heights[1], heights[0] + .2 - .001)
         self.assertGreaterEqual(heights[2], heights[1] + .2 - .001)
 
-    def test_safezone_reserves_height_for_every_intervening_layer(self):
-        # Layer 3 cannot occupy the layer-4 headroom. Fixed-height clamps
-        # previously produced Z1.600 in both layer 3 and layer 4.
+    def test_safezone_preserves_nonplanar_modulation_between_solids(self):
+        # Regression: subtracting the reserved thickness of all future
+        # sparse infill layers makes every Z ceiling equal its planar Z.
+        # That disables non-planar motion, despite plenty of empty space.
         z_map = {2: .76, 3: 1.04, 4: 1.32, 5: 1.60, 6: 1.88}
         solid = {(7, 9): [(2, 2, .48, .76),
                            (6, 6, 1.60, 1.88)]}
@@ -694,10 +696,15 @@ class GCodeSafetyTests(unittest.TestCase):
         # No unconditional floor from intervening *sparse* infill.
         # Its real deposited footprint is checked separately.
         self.assertAlmostEqual(low4, 1.04)
-        self.assertAlmostEqual(high3, 1.04)
-        self.assertAlmostEqual(high4, 1.32)
+        self.assertAlmostEqual(high3, 1.60)
+        self.assertAlmostEqual(high4, 1.60)
+        self.assertGreater(high3 - low3, .28)
+        # Two different Noise Z samples should survive the solid clamps;
+        # layer-to-layer interference is handled by the printed path map.
+        self.assertAlmostEqual(max(low3, min(high3, 1.30)), 1.30)
+        self.assertAlmostEqual(max(low4, min(high4, 1.48)), 1.48)
 
-    def test_safezone_variable_height_reserves_real_layer_spacing(self):
+    def test_safezone_variable_height_preserves_modulation_room(self):
         z_map = {1: .35, 2: .65, 3: .95, 4: 1.20, 5: 1.45}
         solid = {(2, 5): [(1, 1, .2, .35),
                            (5, 5, 1.20, 1.45)]}
@@ -707,9 +714,11 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertAlmostEqual(lo2, .65)
         self.assertAlmostEqual(lo3, .65)
         self.assertAlmostEqual(lo4, .60)
-        self.assertAlmostEqual(hi2, .65)
-        self.assertAlmostEqual(hi3, .95)
+        self.assertAlmostEqual(hi2, 1.20)
+        self.assertAlmostEqual(hi3, 1.20)
         self.assertAlmostEqual(hi4, 1.20)
+        self.assertGreater(hi2, lo2)
+        self.assertGreater(hi3, lo3)
 
     def test_valley_cannot_penetrate_previous_solid_surface(self):
         # Reproduces the reported Z1.040/Z0.760 problem: last solid top
