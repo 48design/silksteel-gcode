@@ -118,6 +118,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
     xyz_absolute, e_absolute = True, True
     arc_center_absolute, arc_plane = False, "G17"
     filament, layer_height, first_height = 1.75, 0.2, None
+    default_width = source_width = 0.45
     layer_z = 0.0
     layer_no = -1
     brick_base_pass = False
@@ -168,6 +169,10 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                     m = FLOAT.search(comment.partition("=")[2])
                     if m and float(m.group(1)) > 0:
                         filament = float(m.group(1))
+                elif up.startswith("EXTRUSION_WIDTH") and "=" in comment:
+                    m = FLOAT.search(comment.partition("=")[2])
+                    if m and float(m.group(1)) > 0:
+                        default_width = source_width = float(m.group(1))
                 elif up.startswith("LAYER_HEIGHT") and "=" in comment:
                     m = FLOAT.search(comment.partition("=")[2])
                     if m and float(m.group(1)) > 0:
@@ -198,6 +203,10 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                                 layer["height"] = h
                     except ValueError:
                         pass
+                elif up.startswith("WIDTH:"):
+                    m = FLOAT.search(comment.partition(":")[2])
+                    if m and float(m.group(1)) > 0:
+                        source_width = float(m.group(1))
                 elif up.startswith("Z:") and layer:
                     try:
                         layer_z = float(comment.partition(":")[2])
@@ -206,6 +215,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         pass
                 elif up.startswith("TYPE:"):
                     role_type = up[5:].strip()
+                    source_width = default_width
                     brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
                     brick_pass_index = 0
                 if "SMOOTHIFICATOR START:" in up:
@@ -400,7 +410,8 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                             layer_z=layer["z"] if explicit_layers or len(layers) > 1 else None,
                             speed=feedrate / 60.0, role=role,
                             brick_pass=brick_pass_index,
-                            bed_reference=explicit_layers and layer_no == 0 and role == 0
+                            bed_reference=explicit_layers and layer_no == 0 and role == 0,
+                            **({"source_width": source_width} if role == 4 else {})
                         )
                         # Reject only the invalid SUBSECTION, never its valid
                         # neighbors or an entire otherwise valid G-code move.
