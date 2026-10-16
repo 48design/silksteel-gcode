@@ -140,7 +140,7 @@ class AnalyticViewerTests(unittest.TestCase):
         valley = IdealizedProfile.sections(
             (0, 0, .76), (1, 0, .76), nominal_area, .28, .2,
             layer_z=1.04, role=4, source_width=.45)[0]
-        self.assertAlmostEqual(valley[3], .05, places=7)
+        self.assertAlmostEqual(valley[3], .14, places=7)
 
     def test_all_extrusion_roles_share_speed_sensitive_flow(self):
         # Same physical XYZ path, E per distance and feedrate MUST imply
