@@ -888,8 +888,7 @@ def calculate_grid_bounds(solid_at_grid):
     
     return (grid_x_min, grid_x_max, grid_y_min, grid_y_max, grid_width, grid_height)
 
-def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions,
-                        base_layer_height, z_layer_map=None):
+def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions, base_layer_height):
     """
     Determine which safezone (gap between solid regions) the current layer is in,
     and return the floor and ceiling Z values for that safezone.
@@ -898,19 +897,16 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions,
         gx, gy: Grid coordinates
         current_layer: Current layer number
         grid_cell_solid_regions: Dictionary mapping (gx, gy) to list of solid regions
-        base_layer_height: Fallback layer height in mm
-        z_layer_map: Optional slicer layer-top heights (retained for call
-            compatibility; static solid limits do not reserve each infill
-            layer's full nominal thickness).
+        base_layer_height: Layer height in mm
     
     Returns:
         Tuple of (z_min, z_max, layers_until_ceiling, height_until_ceiling):
-        - z_min: Minimum nozzle-top Z (lower solid top + new bead height, or -999)
-        - z_max: Ceiling Z (underside of a strictly future solid region, or 999 if none)
+        - z_min: Floor Z (top of solid region below, or -999 if none)
+        - z_max: Ceiling Z (bottom of solid region above minus one layer, or 999 if none)
         - layers_until_ceiling: Number of layers until solid starts above (0 if none)
         - height_until_ceiling: Remaining height in mm from current layer to ceiling (layers_until_ceiling × layer_height)
     """
-    local_z_min = -999  # Minimum Z for a new bead above lower solid
+    local_z_min = -999  # Floor (top of solid below)
     local_z_max = 999   # Ceiling (bottom of solid above)
     layers_until_ceiling = 0
     
@@ -918,20 +914,14 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions,
         for region_start, region_end, z_bottom, z_top in grid_cell_solid_regions[(gx, gy)]:
             # Check if this solid region is BELOW our current layer
             if region_end < current_layer:
-                # Only the physical solid surface is an unconditional
-                # floor. A missing previous-layer infill path leaves room
-                # for a valley; where it IS printed, the deposited-path
-                # lookup below enforces the missing interlayer thickness.
-                local_z_min = max(local_z_min, z_top + base_layer_height)
+                # This solid is below - use its top as our floor
+                local_z_min = max(local_z_min, z_top)
             
-            # Only a strictly FUTURE solid region is a ceiling.
-            elif region_start > current_layer:
-                # Do NOT subtract the height of all intervening infill
-                # layers. That collapses the available interval to the
-                # planar Z of each layer and completely disables non-planar
-                # modulation. Real overlap with the preceding infill layer
-                # is handled by the deposited-path clearance check.
-                candidate_ceiling = z_bottom
+            # Check if this solid region is ON or ABOVE our current layer
+            elif region_start >= current_layer:
+                # This solid is on same layer or above - use its bottom minus layer height as ceiling
+                # (infill must stay in the layer BELOW the solid)
+                candidate_ceiling = z_bottom - base_layer_height
                 if local_z_max == 999:  # Take the LOWEST ceiling
                     local_z_max = candidate_ceiling
                     layers_until_ceiling = region_start - current_layer
@@ -984,28 +974,9 @@ def generate_fractal_noise_3d(shape, res, octaves=1, persistence=0.5, seed=None)
     # Normalize to [-1, 1]
     return noise / max_amplitude
 
-def constrain_noise_vertical_gradient(noise, max_delta):
-    """Limit variation between Z slices without flattening the XY pattern.
-
-    Midpoint of the upper and lower Lipschitz envelopes: independent
-    of the starting Z slice and bounded between the original extrema.
-    """
-    if noise.shape[2] < 2 or max_delta <= 0:
-        return noise
-    lower = noise.copy()
-    upper = noise.copy()
-    for k in range(1, noise.shape[2]):
-        np.maximum(lower[:, :, k], lower[:, :, k - 1] - max_delta, out=lower[:, :, k])
-        np.minimum(upper[:, :, k], upper[:, :, k - 1] + max_delta, out=upper[:, :, k])
-    for k in range(noise.shape[2] - 2, -1, -1):
-        np.maximum(lower[:, :, k], lower[:, :, k + 1] - max_delta, out=lower[:, :, k])
-        np.minimum(upper[:, :, k], upper[:, :, k + 1] + max_delta, out=upper[:, :, k])
-    return (lower + upper) * 0.5
-
-
 def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max, 
                           resolution=1.0, frequency_x=0.5, frequency_y=0.5, frequency_z=0.5,
-                          octaves=3, persistence=0.5, seed=42, amplitude=1.0):
+                          octaves=3, persistence=0.5, seed=42):
     """
     Generate a 3D lookup table for noise/modulation values using Perlin noise.
     
@@ -1016,8 +987,7 @@ def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max,
         octaves: Number of noise octaves for fractal detail
         persistence: How much each octave contributes (0-1)
         seed: Random seed for reproducibility
-        amplitude: Final Z modulation amplitude in mm for vertical slope limiting
-
+    
     Returns:
         Dictionary with grid parameters and the 3D array of values
     """
@@ -1040,12 +1010,6 @@ def generate_3d_noise_lut(x_min, x_max, y_min, y_max, z_min, z_max,
     
     # Generate fractal Perlin noise
     noise = generate_fractal_noise_3d(shape, (res_x, res_y, res_z), octaves, persistence, seed)
-    if amplitude > 0:
-        # Match sine's gentle Z slope, and never allow more than 0.5 mm
-        # offset variation per millimetre of Z (before other clamps/taper).
-        max_slope = min(0.5, amplitude * frequency_z / 3.0)
-        noise = constrain_noise_vertical_gradient(
-            noise, max_slope * resolution / amplitude)
     
     lut = {
         'x_min': x_min, 'x_max': x_max,
@@ -1188,113 +1152,6 @@ def calculate_nonplanar_z(noise_lut, x, y, layer_base_z, amplitude, taper_factor
     z_actual = layer_base_z + z_offset
     
     return z_actual
-
-
-def nonplanar_wall_taper(x, y, layer, solid_at_grid, grid_resolution, cache=None):
-    """Identical taper for preplanning and final G-code generation."""
-    gx, gy = int(x / grid_resolution), int(y / grid_resolution)
-    key = (gx, gy, layer)
-    neighbors = cache.get(key) if cache is not None else None
-    if neighbors is None:
-        neighbors = []
-        for dx in range(-5, 6):
-            for dy in range(-5, 6):
-                px, py = gx + dx, gy + dy
-                cell = solid_at_grid.get((px, py, layer))
-                if cell and cell.get('solid', False):
-                    neighbors.append((px * grid_resolution, py * grid_resolution))
-        if cache is not None:
-            cache[key] = neighbors
-    if not neighbors:
-        return 1.0
-    distance = min(math.hypot(x - px, y - py) for px, py in neighbors)
-    if distance <= 2.0:
-        return 0.0
-    if distance >= 3.0:
-        return 1.0
-    return (1.0 - math.cos((distance - 2.0) * math.pi)) / 2.0
-
-
-def nonplanar_safezone_edge_z(raw_z, layer_z, amplitude, taper_factor,
-                               infill_cell):
-    """Make the safezone's bottom and top complementary, not both hills.
-
-    First infill layer: a positive offset creates support-connecting hills,
-    compensated by adaptive extrusion. Last infill layer: a negative offset
-    creates valleys for the already existing Valley Filling pass. Other
-    layers use the original coherent 3D sine/Perlin field unchanged.
-    The 1/4 scaling limits either interface to half the configured
-    peak-to-peak amplitude, avoiding uncontrolled material pillars.
-    """
-    if not infill_cell or taper_factor <= 0:
-        return raw_z
-    first = infill_cell.get('is_first_of_safezone', False)
-    last = infill_cell.get('is_last_of_safezone', False)
-    if first == last:
-        return raw_z  # Neither, or only one infill layer in this gap.
-    amount = amplitude * taper_factor
-    offset = raw_z - layer_z
-    return layer_z + ((offset + amount) if first else (offset - amount)) * 0.25
-
-
-def build_nonplanar_path_plan(lines, source_e_deltas, z_layer_map, noise_lut,
-                              solid_at_grid, solid_regions, infill_at_grid,
-                              grid_resolution,
-                              segment_length, extrusion_width, amplitude,
-                              fallback_layer_height):
-    """Resolve layer-to-layer conflicts from the roof DOWN, before extrusion."""
-    from tools.nonplanar_plan import NonPlanarPathPlan
-    plan = NonPlanarPathPlan(extrusion_width)
-    x = y = 0.0
-    layer = -1
-    in_infill = False
-    taper_cache = {}
-    for index, line in enumerate(lines):
-        if ';LAYER_CHANGE' in line:
-            layer += 1
-            in_infill = False
-        if ';LAYER:' in line:
-            marker = re.search(r';LAYER:(\d+)', line)
-            if marker:
-                layer = int(marker.group(1))
-        if ';TYPE:Internal infill' in line:
-            in_infill = True
-        elif ';TYPE:' in line:
-            in_infill = False
-        if not line.startswith(('G0 ', 'G1 ', 'G00 ', 'G01 ')):
-            continue
-        params = parse_gcode_line(line)
-        nx = x if params['x'] is None else params['x']
-        ny = y if params['y'] is None else params['y']
-        if (in_infill and line.startswith(('G1 ', 'G01 ')) and
-                index < len(source_e_deltas) and source_e_deltas[index] > 0 and
-                math.hypot(nx - x, ny - y) > 1e-7 and layer in z_layer_map):
-            base_z = z_layer_map[layer]
-            layer_h = max(0.01, base_z - z_layer_map.get(
-                layer - 1, base_z - fallback_layer_height))
-            previous = (x, y)
-            for part, (sx, sy) in enumerate(segment_line(x, y, nx, ny,
-                                                         segment_length)):
-                gx, gy = int(sx / grid_resolution), int(sy / grid_resolution)
-                taper = nonplanar_wall_taper(
-                    sx, sy, layer, solid_at_grid, grid_resolution, taper_cache)
-                desired = calculate_nonplanar_z(
-                    noise_lut, sx, sy, base_z, amplitude, taper)
-                desired = nonplanar_safezone_edge_z(
-                    desired, base_z, amplitude, taper,
-                    infill_at_grid.get((gx, gy, layer)))
-                floor, roof, _, _ = get_safezone_bounds(
-                    gx, gy, layer, solid_regions, layer_h, z_layer_map)
-                # The build plate is an unconditional real substrate.
-                # Guard against negative first-layer Z when no local solid
-                # region is recorded in the coarse occupancy raster.
-                floor = max(floor, layer_h)
-                plan.add(layer, (index, part), previous, (sx, sy),
-                         desired, floor, roof, layer_h)
-                previous = (sx, sy)
-        x, y = nx, ny
-    return plan.solve(), plan
-
 
 def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_resolution, 
                                 solid_at_grid, grid_cell_solid_regions, script_dir, logging):
@@ -2255,12 +2112,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 if solid_layers_at_cell[i] > solid_layers_at_cell[i-1] + 1:
                     # Gap found - end current region
                     region_end = solid_layers_at_cell[i-1]
-                    # Slicer layer Z describes material TOP, not bottom.
-                    # Use the previous layer's top as this region's underside.
-                    z_bottom = z_layer_map.get(
-                        region_start - 1,
-                        z_layer_map[region_start] - base_layer_height)
-                    z_top = z_layer_map[region_end]
+                    z_bottom = z_layer_map[region_start]
+                    z_top = z_layer_map[region_end] + base_layer_height
                     solid_regions.append((region_start, region_end, z_bottom, z_top))
                     
                     # Start new region
@@ -2268,10 +2121,8 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
             
             # Don't forget the last region
             region_end = solid_layers_at_cell[-1]
-            z_bottom = z_layer_map.get(
-                region_start - 1,
-                z_layer_map[region_start] - base_layer_height)
-            z_top = z_layer_map[region_end]
+            z_bottom = z_layer_map[region_start]
+            z_top = z_layer_map[region_end] + base_layer_height
             solid_regions.append((region_start, region_end, z_bottom, z_top))
             
             # Store solid regions for this cell
@@ -2602,8 +2453,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 resolution=1.0,  # 1mm grid spacing
                 frequency_x=frequency * 0.1,  # Scale frequency to reasonable range
                 frequency_y=frequency * 0.1,
-                frequency_z=frequency * 0.05,  # Less variation in Z direction
-                amplitude=amplitude
+                frequency_z=frequency * 0.05  # Less variation in Z direction
             )
     else:
         noise_lut = None
@@ -2789,28 +2639,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Use annotated lines for Pass 2
     lines = annotated_lines
     source_e_deltas, source_e_targets, source_relative_modes = scan_source_extrusion(lines)
-
-    # Compute the whole sparse infill lattice before emitting G-code. Unlike
-    # the previous greedy online clamp this can lower earlier hills to
-    # protect future valleys and keep upper layers visibly non-planar.
-    nonplanar_planned_z = {}
-    nonplanar_taper_cache = {}
-    if enable_nonplanar:
-        nonplanar_planned_z, nonplanar_plan = build_nonplanar_path_plan(
-            lines, source_e_deltas, z_layer_map, noise_lut, solid_at_grid,
-            grid_cell_solid_regions, infill_at_grid, grid_resolution, segment_length,
-            extrusion_width, amplitude, base_layer_height)
-        logging.info(
-            "Nonplanar lookahead: %d segments, %d hills lowered, %d floor "
-            "repairs, %d geometric conflicts",
-            len(nonplanar_planned_z), nonplanar_plan.downward,
-            nonplanar_plan.upward, len(nonplanar_plan.conflicts))
-        if nonplanar_plan.conflicts:
-            for conflict in nonplanar_plan.conflicts[:5]:
-                logging.warning("Nonplanar plan conflict: %s", conflict)
-            print("WARNING: %d Non-planar constraints remain unsatisfied; "
-                  "inspect the G-code before printing!" %
-                  len(nonplanar_plan.conflicts))
     
     # Main processing pass
     logging.info("\n" + "="*70)
@@ -4054,25 +3882,53 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 # the Z modulation/clamp below, calculate the
                                 # true XYZ distance and scale E accordingly.
                                 
-                                # Same exact geometric wall-taper as lookahead.
-                                taper_factor = nonplanar_wall_taper(
-                                    sx, sy, current_layer, solid_at_grid,
-                                    grid_resolution, nonplanar_taper_cache)
-
+                                # Calculate distance to nearest perimeter/solid to taper modulation
+                                # Check surrounding grid cells for solid material at current layer
+                                # Use floor division to match grid building method
+                                gx = int(sx / grid_resolution)
+                                gy = int(sy / grid_resolution)
+                                
+                                # Find minimum distance to any solid cell at this layer
+                                min_dist_to_solid = float('inf')
+                                search_radius = 5  # Check cells within 5mm
+                                for dx in range(-search_radius, search_radius + 1):
+                                    for dy in range(-search_radius, search_radius + 1):
+                                        check_gx = gx + dx
+                                        check_gy = gy + dy
+                                        # Check if this cell has solid at current layer
+                                        cell_key = (check_gx, check_gy, current_layer)
+                                        if cell_key in solid_at_grid and solid_at_grid[cell_key].get('solid', False):
+                                            # Calculate distance to this solid cell center
+                                            solid_x = check_gx * grid_resolution
+                                            solid_y = check_gy * grid_resolution
+                                            dist = ((sx - solid_x)**2 + (sy - solid_y)**2)**0.5
+                                            min_dist_to_solid = min(min_dist_to_solid, dist)
+                                
+                                # Calculate tapering factor based on distance to walls
+                                # Within 2mm of wall: taper to 0
+                                # Beyond 3mm from wall: full modulation
+                                taper_distance_start = 2.0  # Start tapering at 2mm from wall
+                                taper_distance_full = 3.0   # Full modulation beyond 3mm
+                                
+                                if min_dist_to_solid < taper_distance_start:
+                                    # Very close to wall - no modulation
+                                    taper_factor = 0.0
+                                elif min_dist_to_solid > taper_distance_full:
+                                    # Far from wall - full modulation
+                                    taper_factor = 1.0
+                                else:
+                                    # Transition zone - smooth interpolation
+                                    # Linear interpolation between start and full distances
+                                    t = (min_dist_to_solid - taper_distance_start) / (taper_distance_full - taper_distance_start)
+                                    # Smooth using cosine for gentler transition
+                                    taper_factor = (1.0 - math.cos(t * math.pi)) / 2.0
+                                
                                 # Calculate non-planar Z using helper function
-                                original_z = calculate_nonplanar_z(
-                                    noise_lut, sx, sy, layer_z, amplitude,
-                                    taper_factor)
-                                fallback_z = nonplanar_safezone_edge_z(
-                                    original_z, layer_z, amplitude, taper_factor,
-                                    infill_at_grid.get((gx, gy, current_layer)))
-                                z_mod = nonplanar_planned_z.get((i, idx),
-                                                               fallback_z)
+                                z_mod = calculate_nonplanar_z(noise_lut, sx, sy, layer_z, amplitude, taper_factor)
                                 
                                 # Get safezone bounds for this grid cell
                                 local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
-                                    gx, gy, current_layer, grid_cell_solid_regions,
-                                    current_layer_height or base_layer_height, z_layer_map
+                                    gx, gy, current_layer, grid_cell_solid_regions, base_layer_height
                                 )
                                 
                                 # Clamp Z to safe range
@@ -4080,11 +3936,9 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                 if local_z_min > -999:  # Valid z_min
                                     z_mod = max(local_z_min, z_mod)
                                 if local_z_max < 999:  # Valid z_max
+                                    #z_mod = min(local_z_max - (layers_until_ceiling * base_layer_height), z_mod)
                                     z_mod = min(local_z_max, z_mod)
 
-                                # Inter-layer geometry was resolved from
-                                # future to earlier layers BEFORE this move.
-                                # Do not propagate lower hills upward here.
                                 # Use the final, CLAMPED Z. This geometric
                                 # compensation applies to both rising and
                                 # falling segments, even outside safezones.
