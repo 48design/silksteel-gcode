@@ -640,16 +640,16 @@ headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
 // XYZ position. Built once and moved, never regenerated during playback.
 function createNozzle(){
     const dimensions={
-        overallLength:13,
+        overallLength:10,
         threadLength:5,
         hexHeight:3,
-        hexWidth:6,
-        threadDiameter:6,
+        hexWidth:6.5,
+        threadDiameter:4.7,
         threadPitch:1,
-        threadCoreDiameter:5.1,
-        threadRidgeRadius:.09,
+        threadCoreDiameter:4.5,
+        threadRidgeRadius:.1,
         coneTopDiameter:4.4,
-        tipFlatDiameter:.7,
+        tipFlatDiameter:.85,
         outletDiameter:.4
     };
     const d=dimensions;
@@ -660,11 +660,11 @@ function createNozzle(){
     const hexRadius=d.hexWidth/Math.sqrt(3);
     const group=new THREE.Group();
     const gold=new THREE.MeshBasicMaterial({
-        color:0xf6c95e,transparent:true,opacity:.62,
+        color:0xf6c95e,transparent:true,opacity:.65,
         depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
     const highlight=new THREE.MeshBasicMaterial({
-        color:0xffe49a,transparent:true,opacity:.76,
+        color:0xffe49a,transparent:true,opacity:.65,
         depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
     const openingMaterial=new THREE.MeshBasicMaterial({
