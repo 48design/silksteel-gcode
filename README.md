@@ -108,7 +108,9 @@ Strengthens parts by creating a brick-like interlocking pattern with internal pe
 Modulates Z height during infill printing to create 3D wave patterns:
 - Infill lines undulate up and down, creating mechanical anchors
 - Automatically detects solid layers above/below and respects safe Z boundaries
-- Pre-calculates 3D occupancy grid to prevent nozzle collisions
+- Pre-calculates solid occupancy and safezone bounds; reserves Z headroom for later infill layers beneath solid roofs
+- Tracks the actual top Z of previously extruded non-planar paths in a small sparse XY index (current + immediately preceding layer) and preserves the new bead's thickness wherever their footprints overlap
+- Reports remaining collisions where prior material and a solid roof leave insufficient clearance; inspect these warnings before printing
 - Two pattern modes: sine waves or Perlin noise
 - Compensates extrusion using the true XYZ length of each Z-modulated segment (upward and downward, after Z clamping)
 - Preserves the slicer's extrusion amount for horizontal segments; optional adaptive safezone extrusion remains additional
