@@ -1189,6 +1189,83 @@ def calculate_nonplanar_z(noise_lut, x, y, layer_base_z, amplitude, taper_factor
     
     return z_actual
 
+
+def nonplanar_wall_taper(x, y, layer, solid_at_grid, grid_resolution, cache=None):
+    """Identical taper for preplanning and final G-code generation."""
+    gx, gy = int(x / grid_resolution), int(y / grid_resolution)
+    key = (gx, gy, layer)
+    neighbors = cache.get(key) if cache is not None else None
+    if neighbors is None:
+        neighbors = []
+        for dx in range(-5, 6):
+            for dy in range(-5, 6):
+                px, py = gx + dx, gy + dy
+                cell = solid_at_grid.get((px, py, layer))
+                if cell and cell.get('solid', False):
+                    neighbors.append((px * grid_resolution, py * grid_resolution))
+        if cache is not None:
+            cache[key] = neighbors
+    if not neighbors:
+        return 1.0
+    distance = min(math.hypot(x - px, y - py) for px, py in neighbors)
+    if distance <= 2.0:
+        return 0.0
+    if distance >= 3.0:
+        return 1.0
+    return (1.0 - math.cos((distance - 2.0) * math.pi)) / 2.0
+
+
+def build_nonplanar_path_plan(lines, source_e_deltas, z_layer_map, noise_lut,
+                              solid_at_grid, solid_regions, grid_resolution,
+                              segment_length, extrusion_width, amplitude,
+                              fallback_layer_height):
+    """Resolve layer-to-layer conflicts from the roof DOWN, before extrusion."""
+    from tools.nonplanar_plan import NonPlanarPathPlan
+    plan = NonPlanarPathPlan(extrusion_width)
+    x = y = 0.0
+    layer = -1
+    in_infill = False
+    taper_cache = {}
+    for index, line in enumerate(lines):
+        if ';LAYER_CHANGE' in line:
+            layer += 1
+            in_infill = False
+        if ';LAYER:' in line:
+            marker = re.search(r';LAYER:(\d+)', line)
+            if marker:
+                layer = int(marker.group(1))
+        if ';TYPE:Internal infill' in line:
+            in_infill = True
+        elif ';TYPE:' in line:
+            in_infill = False
+        if not line.startswith(('G0 ', 'G1 ', 'G00 ', 'G01 ')):
+            continue
+        params = parse_gcode_line(line)
+        nx = x if params['x'] is None else params['x']
+        ny = y if params['y'] is None else params['y']
+        if (in_infill and line.startswith(('G1 ', 'G01 ')) and
+                index < len(source_e_deltas) and source_e_deltas[index] > 0 and
+                math.hypot(nx - x, ny - y) > 1e-7 and layer in z_layer_map):
+            base_z = z_layer_map[layer]
+            layer_h = max(0.01, base_z - z_layer_map.get(
+                layer - 1, base_z - fallback_layer_height))
+            previous = (x, y)
+            for part, (sx, sy) in enumerate(segment_line(x, y, nx, ny,
+                                                         segment_length)):
+                gx, gy = int(sx / grid_resolution), int(sy / grid_resolution)
+                taper = nonplanar_wall_taper(
+                    sx, sy, layer, solid_at_grid, grid_resolution, taper_cache)
+                desired = calculate_nonplanar_z(
+                    noise_lut, sx, sy, base_z, amplitude, taper)
+                floor, roof, _, _ = get_safezone_bounds(
+                    gx, gy, layer, solid_regions, layer_h, z_layer_map)
+                plan.add(layer, (index, part), previous, (sx, sy),
+                         desired, floor, roof, layer_h)
+                previous = (sx, sy)
+        x, y = nx, ny
+    return plan.solve(), plan
+
+
 def generate_lut_visualization(layer_num, layer_z, noise_lut, amplitude, grid_resolution, 
                                 solid_at_grid, grid_cell_solid_regions, script_dir, logging):
     """
