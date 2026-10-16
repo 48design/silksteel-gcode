@@ -639,6 +639,25 @@ headMesh.frustumCulled=false;headMesh.visible=false;scene.add(headMesh);
 // A lightweight, translucent nozzle whose tip sits at the programmed G-code
 // XYZ position. Built once and moved, never regenerated during playback.
 function createNozzle(){
+    const dimensions={
+        overallLength:13,
+        threadLength:5,
+        hexHeight:3,
+        hexWidth:6,
+        threadDiameter:6,
+        threadPitch:1,
+        threadCoreDiameter:5.1,
+        threadRidgeRadius:.09,
+        coneTopDiameter:4.4,
+        tipFlatDiameter:.7,
+        outletDiameter:.4
+    };
+    const d=dimensions;
+    const coneLength=d.overallLength-d.threadLength-d.hexHeight;
+    if(coneLength<=0)throw new Error("Invalid nozzle dimensions");
+    const hexBottom=coneLength;
+    const threadBottom=hexBottom+d.hexHeight;
+    const hexRadius=d.hexWidth/Math.sqrt(3);
     const group=new THREE.Group();
     const gold=new THREE.MeshBasicMaterial({
         color:0xf6c95e,transparent:true,opacity:.62,
@@ -652,17 +671,13 @@ function createNozzle(){
         color:0x654313,transparent:true,opacity:.80,
         depthTest:false,depthWrite:false,side:THREE.DoubleSide
     });
-    // Dimensions in millimetres: M6 x 5 thread, 13 overall, SW6 hex.
-    const threadLength=5, overallLength=13, hexWidth=6;
-    const hexRadius=hexWidth/Math.sqrt(3);
-    const shoulderY=overallLength-threadLength;
-    const tipLength=2.5;
     const parts=[
-        [new THREE.CylinderGeometry(2.5,.18,tipLength,32,1,false),tipLength/2,gold],
-        [new THREE.CylinderGeometry(hexRadius,hexRadius,shoulderY-tipLength,6,1,false),
-            (tipLength+shoulderY)/2,highlight],
-        [new THREE.CylinderGeometry(2.88,2.88,threadLength,32,1,false),
-            shoulderY+threadLength/2,gold]
+        [new THREE.CylinderGeometry(d.coneTopDiameter/2,d.tipFlatDiameter/2,coneLength,32),
+            coneLength/2,gold],
+        [new THREE.CylinderGeometry(hexRadius,hexRadius,d.hexHeight,6),
+            hexBottom+d.hexHeight/2,highlight],
+        [new THREE.CylinderGeometry(d.threadCoreDiameter/2,d.threadCoreDiameter/2,d.threadLength,32),
+            threadBottom+d.threadLength/2,gold]
     ];
     for(const [geometry,y,material] of parts){
         const mesh=new THREE.Mesh(geometry,material);
@@ -670,32 +685,39 @@ function createNozzle(){
         mesh.renderOrder=25;
         group.add(mesh);
     }
-    // Simplified M6 coarse thread (1 mm pitch), with a 6 mm outer diameter.
+    const turns=d.threadLength/d.threadPitch;
+    const steps=Math.max(48,Math.ceil(turns*48));
+    const ridgeRadius=d.threadDiameter/2-d.threadRidgeRadius;
+    const endMargin=Math.min(d.threadPitch*.12,d.threadLength*.1);
     const helix=[];
-    const steps=240, turns=threadLength;
     for(let i=0;i<=steps;i++){
-        const t=i/steps, angle=t*turns*Math.PI*2;
+        const t=i/steps,angle=t*turns*Math.PI*2;
         helix.push(new THREE.Vector3(
-            2.89*Math.cos(angle),
-            shoulderY+.12+t*(threadLength-.24),
-            2.89*Math.sin(angle)
+            ridgeRadius*Math.cos(angle),
+            threadBottom+endMargin+t*(d.threadLength-2*endMargin),
+            ridgeRadius*Math.sin(angle)
         ));
     }
     const thread=new THREE.Mesh(
-        new THREE.TubeGeometry(new THREE.CatmullRomCurve3(helix),steps,.10,5,false),
+        new THREE.TubeGeometry(new THREE.CatmullRomCurve3(helix),steps,d.threadRidgeRadius,6,false),
         highlight
     );
     thread.renderOrder=26;
     group.add(thread);
-    const outlet=new THREE.Mesh(new THREE.TorusGeometry(.18,.04,8,28),highlight);
+    const rimWidth=Math.max(.015,Math.min(.035,(d.tipFlatDiameter-d.outletDiameter)/8));
+    const outlet=new THREE.Mesh(
+        new THREE.TorusGeometry(d.tipFlatDiameter/2-rimWidth,rimWidth,8,28),highlight
+    );
     outlet.rotation.x=Math.PI/2;
-    outlet.position.y=.035;
+    outlet.position.y=.02;
     outlet.renderOrder=26;
     group.add(outlet);
-    const opening=new THREE.Mesh(new THREE.CircleGeometry(.12,24),openingMaterial);
+    const opening=new THREE.Mesh(
+        new THREE.CircleGeometry(d.outletDiameter/2,24),openingMaterial
+    );
     opening.rotation.x=-Math.PI/2;
     opening.position.y=.007;
-    opening.renderOrder=26;
+    opening.renderOrder=27;
     group.add(opening);
     group.visible=false;
     return group;
