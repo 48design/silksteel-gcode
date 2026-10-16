@@ -1215,8 +1215,31 @@ def nonplanar_wall_taper(x, y, layer, solid_at_grid, grid_resolution, cache=None
     return (1.0 - math.cos((distance - 2.0) * math.pi)) / 2.0
 
 
+def nonplanar_safezone_edge_z(raw_z, layer_z, amplitude, taper_factor,
+                               infill_cell):
+    """Make the safezone's bottom and top complementary, not both hills.
+
+    First infill layer: a positive offset creates support-connecting hills,
+    compensated by adaptive extrusion. Last infill layer: a negative offset
+    creates valleys for the already existing Valley Filling pass. Other
+    layers use the original coherent 3D sine/Perlin field unchanged.
+    The 1/4 scaling limits either interface to half the configured
+    peak-to-peak amplitude, avoiding uncontrolled material pillars.
+    """
+    if not infill_cell:
+        return raw_z
+    first = infill_cell.get('is_first_of_safezone', False)
+    last = infill_cell.get('is_last_of_safezone', False)
+    if first == last:
+        return raw_z  # Neither, or only one infill layer in this gap.
+    amount = amplitude * taper_factor
+    offset = raw_z - layer_z
+    return layer_z + ((offset + amount) if first else (offset - amount)) * 0.25
+
+
 def build_nonplanar_path_plan(lines, source_e_deltas, z_layer_map, noise_lut,
-                              solid_at_grid, solid_regions, grid_resolution,
+                              solid_at_grid, solid_regions, infill_at_grid,
+                              grid_resolution,
                               segment_length, extrusion_width, amplitude,
                               fallback_layer_height):
     """Resolve layer-to-layer conflicts from the roof DOWN, before extrusion."""
@@ -1257,6 +1280,9 @@ def build_nonplanar_path_plan(lines, source_e_deltas, z_layer_map, noise_lut,
                     sx, sy, layer, solid_at_grid, grid_resolution, taper_cache)
                 desired = calculate_nonplanar_z(
                     noise_lut, sx, sy, base_z, amplitude, taper)
+                desired = nonplanar_safezone_edge_z(
+                    desired, base_z, amplitude, taper,
+                    infill_at_grid.get((gx, gy, layer)))
                 floor, roof, _, _ = get_safezone_bounds(
                     gx, gy, layer, solid_regions, layer_h, z_layer_map)
                 # The build plate is an unconditional real substrate.
@@ -2772,7 +2798,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     if enable_nonplanar:
         nonplanar_planned_z, nonplanar_plan = build_nonplanar_path_plan(
             lines, source_e_deltas, z_layer_map, noise_lut, solid_at_grid,
-            grid_cell_solid_regions, grid_resolution, segment_length,
+            grid_cell_solid_regions, infill_at_grid, grid_resolution, segment_length,
             extrusion_width, amplitude, base_layer_height)
         logging.info(
             "Nonplanar lookahead: %d segments, %d hills lowered, %d floor "
@@ -4034,10 +4060,14 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     grid_resolution, nonplanar_taper_cache)
 
                                 # Calculate non-planar Z using helper function
-                                z_mod = nonplanar_planned_z.get(
-                                    (i, idx), calculate_nonplanar_z(
-                                        noise_lut, sx, sy, layer_z, amplitude,
-                                        taper_factor))
+                                original_z = calculate_nonplanar_z(
+                                    noise_lut, sx, sy, layer_z, amplitude,
+                                    taper_factor)
+                                fallback_z = nonplanar_safezone_edge_z(
+                                    original_z, layer_z, amplitude, taper_factor,
+                                    infill_at_grid.get((gx, gy, current_layer)))
+                                z_mod = nonplanar_planned_z.get((i, idx),
+                                                               fallback_z)
                                 
                                 # Get safezone bounds for this grid cell
                                 local_z_min, local_z_max, layers_until_ceiling, height_until_ceiling = get_safezone_bounds(
