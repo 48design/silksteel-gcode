@@ -899,8 +899,9 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions,
         current_layer: Current layer number
         grid_cell_solid_regions: Dictionary mapping (gx, gy) to list of solid regions
         base_layer_height: Fallback layer height in mm
-        z_layer_map: Actual slicer layer-top heights, used to reserve
-            headroom below an upcoming solid roof for later infill layers.
+        z_layer_map: Optional slicer layer-top heights (retained for call
+            compatibility; static solid limits do not reserve each infill
+            layer's full nominal thickness).
     
     Returns:
         Tuple of (z_min, z_max, layers_until_ceiling, height_until_ceiling):
@@ -925,17 +926,12 @@ def get_safezone_bounds(gx, gy, current_layer, grid_cell_solid_regions,
             
             # Only a strictly FUTURE solid region is a ceiling.
             elif region_start > current_layer:
-                # Reserve space for every later infill layer before the
-                # upcoming solid roof. Otherwise different layers clamp to
-                # the SAME top Z despite their nominal layer spacing.
-                if (z_layer_map is not None and
-                        region_start - 1 in z_layer_map and
-                        current_layer in z_layer_map):
-                    reserved = (z_layer_map[region_start - 1] -
-                                z_layer_map[current_layer])
-                else:
-                    reserved = (region_start - current_layer - 1) * base_layer_height
-                candidate_ceiling = z_bottom - max(0.0, reserved)
+                # Do NOT subtract the height of all intervening infill
+                # layers. That collapses the available interval to the
+                # planar Z of each layer and completely disables non-planar
+                # modulation. Real overlap with the preceding infill layer
+                # is handled by the deposited-path clearance check.
+                candidate_ceiling = z_bottom
                 if local_z_max == 999:  # Take the LOWEST ceiling
                     local_z_max = candidate_ceiling
                     layers_until_ceiling = region_start - current_layer
