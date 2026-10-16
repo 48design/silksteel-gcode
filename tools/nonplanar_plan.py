@@ -23,13 +23,14 @@ class _Footprint:
                                math.ceil(radius / cell_size) + 1)
         self.cells = defaultdict(list)
 
-    def add(self, x0, y0, x1, y1, z):
+    def add(self, x0, y0, z0, x1, y1, z1):
         length = math.hypot(x1 - x0, y1 - y0)
         count = max(1, math.ceil(length / self.step))
         for n in range(count + 1):
             t = n / count
             x = x0 + (x1 - x0) * t
             y = y0 + (y1 - y0) * t
+            z = z0 + (z1 - z0) * t
             cell = (math.floor(x * self.inv), math.floor(y * self.inv))
             # Keep the full path instead of replacing crossings with a
             # single cell max; multiple nearby tracks may differ in height.
@@ -74,8 +75,17 @@ class NonPlanarPathPlan:
 
     def _footprint(self, records, values):
         surface = _Footprint(self.width)
+        last_end = None
+        last_top = None
         for key, start, end, _, _, _ in records:
-            surface.add(*start, *end, values[key])
+            top = values[key]
+            attached = (last_end is not None and
+                        math.hypot(start[0] - last_end[0],
+                                   start[1] - last_end[1]) < 0.002)
+            # Do not extend the last path's Z through a travel gap.
+            bottom = last_top if attached else top
+            surface.add(*start, bottom, *end, top)
+            last_end, last_top = end, top
         return surface
 
     def solve(self):
@@ -96,6 +106,9 @@ class NonPlanarPathPlan:
         for layer in sorted(self.layers, reverse=True):
             rows = self.layers[layer]
             for key, start, end, desired, floor, roof in rows:
+                if floor > roof + 1e-5:
+                    self.conflicts.append(
+                        (layer, key, 'solid_floor_vs_roof', floor, roof))
                 z = max(floor, min(desired, roof))
                 if future is not None and future_layer == layer + 1:
                     upper_top = future.nearby(*start, *end, minimum=True)
