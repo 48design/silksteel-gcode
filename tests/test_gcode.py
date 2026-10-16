@@ -647,6 +647,56 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertEqual(layers, 2)
         self.assertAlmostEqual(remaining, .56)
 
+    def test_safezone_first_hills_and_last_valleys_are_complementary(self):
+        # Same 3D noise sample and amplitude, but complementary geometry
+        # at both interfaces; ordinary middle layers keep the raw noise.
+        for raw_noise in (-1, -.5, 0, .5, 1):
+            with self.subTest(raw_noise=raw_noise):
+                base_z, amplitude, taper = 1.32, 1.12, 1.0
+                original = base_z + amplitude * raw_noise
+                bottom = silk.nonplanar_safezone_edge_z(
+                    original, base_z, amplitude, taper,
+                    {'is_first_of_safezone': True})
+                top = silk.nonplanar_safezone_edge_z(
+                    original, base_z, amplitude, taper,
+                    {'is_last_of_safezone': True})
+                middle = silk.nonplanar_safezone_edge_z(
+                    original, base_z, amplitude, taper, None)
+                self.assertGreaterEqual(bottom, base_z - 1e-9)
+                self.assertLessEqual(bottom, base_z + amplitude / 2 + 1e-9)
+                self.assertLessEqual(top, base_z + 1e-9)
+                self.assertGreaterEqual(top, base_z - amplitude / 2 - 1e-9)
+                self.assertAlmostEqual(middle, original)
+                self.assertAlmostEqual(
+                    silk.nonplanar_safezone_edge_z(
+                        original, base_z, amplitude, 0,
+                        {'is_last_of_safezone': True}),
+                    original)
+
+        # A one-layer safezone cannot create both an upward hill and an
+        # opposing valley in that same extrusion.
+        self.assertAlmostEqual(
+            silk.nonplanar_safezone_edge_z(
+                1.53, 1.32, 1.12, 1.0,
+                {'is_first_of_safezone': True,
+                 'is_last_of_safezone': True}), 1.53)
+
+    def test_preplan_protects_last_layer_valley(self):
+        # Real generation pipeline: first layer initially wants a hill,
+        # the following layer a valley. The backward plan must lower the
+        # earlier hill rather than flattening the future valley.
+        from tools.nonplanar_plan import NonPlanarPathPlan
+        plan = NonPlanarPathPlan(.45)
+        plan.add(3, (10, 0), (100, 100), (100.6, 100),
+                 1.60, 1.04, 1.60, .28)
+        plan.add(4, (20, 0), (100, 100.2), (100.6, 100.2),
+                 1.40, 1.04, 1.60, .28)
+        corrected = plan.solve()
+        self.assertAlmostEqual(corrected[20, 0], 1.40)
+        self.assertLessEqual(corrected[10, 0], 1.12 + 1e-4)
+        self.assertEqual(plan.upward, 0)
+        self.assertFalse(plan.conflicts)
+
     def test_nonplanar_real_previous_infill_prevents_equal_z_layers(self):
         # No lower solid surface exists under central sparse infill.
         # Even if the modulator independently requests the same absolute
