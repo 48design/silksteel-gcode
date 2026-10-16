@@ -17,7 +17,10 @@ class NonPlanarLayerSurface:
         # A pair of bead footprints intersects when their CENTERLINES are
         # within half-width + half-width. Keep actual sampled XY coordinates
         # instead of treating whole raster cells as occupied.
-        self.radius_sq = max(0.2, extrusion_width) ** 2
+        radius = max(0.2, extrusion_width)
+        self.radius_sq = radius ** 2
+        self.neighborhood = range(-math.ceil(radius / cell_size),
+                                  math.ceil(radius / cell_size) + 1)
         self.layer: int | None = None
         self.current: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
         self.previous: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
@@ -76,8 +79,8 @@ class NonPlanarLayerSurface:
             y = y0 + (y1 - y0) * t
             cx = math.floor(x * self.inv_cell)
             cy = math.floor(y * self.inv_cell)
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
+            for dx in self.neighborhood:
+                for dy in self.neighborhood:
                     for px, py, pz in self.previous.get((cx + dx, cy + dy), ()):
                         if (x - px)**2 + (y - py)**2 <= self.radius_sq:
                             if top is None or pz > top:
