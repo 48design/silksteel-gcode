@@ -657,7 +657,9 @@ class GCodeSafetyTests(unittest.TestCase):
         low4, high4, *_ = silk.get_safezone_bounds(
             7, 9, 4, solid, .28, z_map)
         self.assertAlmostEqual(low3, 1.04)
-        self.assertAlmostEqual(low4, 1.32)
+        # No unconditional floor from intervening *sparse* infill.
+        # Its real deposited footprint is checked separately.
+        self.assertAlmostEqual(low4, 1.04)
         self.assertAlmostEqual(high3, 1.04)
         self.assertAlmostEqual(high4, 1.32)
 
@@ -669,8 +671,8 @@ class GCodeSafetyTests(unittest.TestCase):
         lo3, hi3, *_ = silk.get_safezone_bounds(2, 5, 3, solid, .30, z_map)
         lo4, hi4, *_ = silk.get_safezone_bounds(2, 5, 4, solid, .25, z_map)
         self.assertAlmostEqual(lo2, .65)
-        self.assertAlmostEqual(lo3, .95)
-        self.assertAlmostEqual(lo4, 1.20)
+        self.assertAlmostEqual(lo3, .65)
+        self.assertAlmostEqual(lo4, .60)
         self.assertAlmostEqual(hi2, .65)
         self.assertAlmostEqual(hi3, .95)
         self.assertAlmostEqual(hi4, 1.20)
