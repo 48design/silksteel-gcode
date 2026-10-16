@@ -2508,6 +2508,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Track real non-planar bead TOPS from the preceding printed layer.
     # Unlike immutable solid occupancy, this includes infill and Z hills.
     nonplanar_surface = None
+    nonplanar_roof_conflicts = 0
     if enable_nonplanar:
         from tools.nonplanar_layer_surface import NonPlanarLayerSurface
         nonplanar_surface = NonPlanarLayerSurface(extrusion_width)
@@ -4006,7 +4007,10 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     required_z = previous_top + (
                                         current_layer_height or base_layer_height)
                                     if local_z_max < 999 and required_z > local_z_max + 1e-5:
-                                        if debug >= 1:
+                                        nonplanar_roof_conflicts += 1
+                                        # Never silently claim an unsatisfiable
+                                        # pair of bounds is collision-free.
+                                        if nonplanar_roof_conflicts <= 5:
                                             logging.warning(
                                                 "Nonplanar clearance blocked by roof at layer %d "
                                                 "(%.3f, %.3f): support Z %.3f, roof Z %.3f",
@@ -4343,6 +4347,15 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         else:
             write_and_track(output_buffer, line, recent_output_lines)
             i += 1
+
+    if nonplanar_roof_conflicts:
+        warning = (
+            f"WARNING: {nonplanar_roof_conflicts} non-planar segments could not "
+            "maintain interlayer clearance beneath a solid roof. "
+            "Inspect the G-code before printing."
+        )
+        logging.error(warning)
+        print(warning)
 
     # File may end inside the final bridge TYPE section.
     if enable_bridge_densifier and in_bridge_section:
