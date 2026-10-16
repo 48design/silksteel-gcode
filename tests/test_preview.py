@@ -555,6 +555,22 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertEqual([int(row[9]) for row in rows],[10,11,12,14,15,17])
         self.assertEqual(meta["omittedCount"],0)
 
+    def test_converter_adaptive_nonplanar_hill_uses_slicer_width(self):
+        lines = [
+            "; layer_height = 0.28",
+            "; extrusion_width = 0.45",
+            ";LAYER_CHANGE", ";Z:1.04", ";HEIGHT:0.28",
+            ";LAYER:3", ";TYPE:Internal infill", ";WIDTH:0.45",
+            "G90", "M83",
+            "G0 X142.192 Y101.165 Z1.600",
+            "G1 X142.644 Y101.617 Z1.600 E0.13046 F1500",
+        ]
+        meta, rows = self.parse(lines)
+        self.assertEqual(meta["count"], 1)
+        self.assertEqual(int(rows[0][8]), 4)
+        self.assertAlmostEqual(rows[0][7], .84, places=5)
+        self.assertLess(rows[0][6], .8)
+
     def test_converter_nonplanar_profile_follows_commanded_z(self):
         # Non-planar extrusion keeps the nominal cross-section while the
         # entire strand follows XYZ. Reverse traversal preserves its profile.
