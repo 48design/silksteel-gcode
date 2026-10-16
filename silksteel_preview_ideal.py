@@ -45,6 +45,7 @@ class IdealizedProfile:
         role: int = 0,
         brick_pass: int = 0,
         bed_reference: bool = False,
+        source_width: float | None = None,
     ) -> list[tuple[float, float, float, float]]:
         """Return (t0, t1, width, height); never subdivide to probe support.
 
@@ -83,12 +84,19 @@ class IdealizedProfile:
             # First base pass starts at the normal layer height.
             height = nominal / 0.75
         elif role == 4:
-            # Non-planar infill follows a 3D toolpath. Its programmed Z is
-            # the strand TOP, not an extra layer of solid plastic down to
-            # the slicer's planar reference. Keep the nominal cross-section
-            # thickness while shifting the entire strand with the nozzle.
-            # Source delta E already accounts for XYZ path length.
+            # Non-planar Z is the upper surface of the bead. Plain XYZ
+            # compensation keeps E / path length unchanged, so its bead
+            # remains nominal height. Adaptive E is intentionally additional
+            # material for raised, first-safezone infill: represent that
+            # EXTRA volume mainly by filling DOWN into the lift, rather than
+            # manufacturing a very wide, nominal-height ribbon.
             height = nominal
+            lift = max(0.0, nozzle_z - reference_z)
+            if lift > 0 and source_width is not None and source_width > 0:
+                normal_area = IdealizedProfile.area_for_size(source_width, nominal)
+                if normal_area > 0 and area > normal_area:
+                    extra_height = nominal * (area / normal_area - 1.0)
+                    height += min(lift, extra_height)
         else:
             # Normal path or shifted perimeter:
             # substrate = layer reference minus nominal thickness.
