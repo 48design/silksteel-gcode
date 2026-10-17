@@ -83,14 +83,19 @@ def constrain_perlin_vertical_gradient(noise, max_delta):
     """
     if max_delta <= 0 or noise.shape[2] < 2:
         return noise
-    low = noise.copy()
-    high = noise.copy()
+    forward = noise.copy()
+    # The source is newly generated for this LUT and may be updated in place.
+    # Reuse it for the reverse projection: only one auxiliary 3D array.
     for z in range(1, noise.shape[2]):
-        low[:, :, z] = low[:, :, z].clip(
-            low[:, :, z - 1] - max_delta,
-            low[:, :, z - 1] + max_delta)
+        forward[:, :, z].clip(
+            forward[:, :, z - 1] - max_delta,
+            forward[:, :, z - 1] + max_delta,
+            out=forward[:, :, z])
     for z in range(noise.shape[2] - 2, -1, -1):
-        high[:, :, z] = high[:, :, z].clip(
-            high[:, :, z + 1] - max_delta,
-            high[:, :, z + 1] + max_delta)
-    return (low + high) * 0.5
+        noise[:, :, z].clip(
+            noise[:, :, z + 1] - max_delta,
+            noise[:, :, z + 1] + max_delta,
+            out=noise[:, :, z])
+    forward += noise
+    forward *= 0.5
+    return forward
