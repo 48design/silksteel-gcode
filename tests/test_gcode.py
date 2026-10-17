@@ -621,6 +621,67 @@ class GCodeSafetyTests(unittest.TestCase):
         self.assertTrue(all(0 < value <= 0.4 for value in e_values))
         self.assertNotIn("Smoothificator E sync", segments)
 
+    def test_nonplanar_static_safezone_prevents_clamped_layer_plateaus(self):
+        # Full G-code regression: stacked infill between original solid
+        # layers, with deliberately excessive signed noise amplitudes.
+        # A legacy absolute-Z clamp placed several consecutive layers at
+        # exactly the same Z. The new offset envelope must not do that.
+        h = .28
+        lines = [
+            "; layer_height = 0.28", "; first_layer_height = 0.28",
+            "; extrusion_width = 0.45", "G90", "M83",
+        ]
+        for lay in range(9):
+            z = round((lay + 1) * h, 5)
+            lines.extend([
+                ";LAYER_CHANGE", f";Z:{z}", ";HEIGHT:0.28",
+                f";LAYER:{lay}", f"G1 Z{z:.3f} F8400",
+                ";TYPE:Solid infill" if lay in (0, 8)
+                    else ";TYPE:Internal infill",
+                "G0 X0 Y5 F8400", "G1 X10 Y5 E0.40 F1200",
+            ])
+        source = "\n".join(lines) + "\n"
+
+        def emitted_heights(output):
+            result = {}
+            layer = -1
+            for line in output.splitlines():
+                if line.startswith(";LAYER:"):
+                    layer = int(line.partition(":")[2])
+                if line.startswith("G1 X") and " Y5.000 " in line \\
+                        and " Z" in line and " E" in line:
+                    z = silk.extract_z(line)
+                    if z is not None:
+                        result.setdefault(layer, []).append(z)
+            return result
+
+        for sign in (-1, 1):
+            with self.subTest(sign=sign), mock.patch.object(
+                silk, "calculate_nonplanar_z",
+                side_effect=lambda lut, x, y, z, a, taper: z + sign * 1.12 * taper
+            ):
+                output = self.process(
+                    source, enable_nonplanar=True,
+                    enable_smoothificator=False, enable_bricklayers=False,
+                    enable_safe_z_hop=False, enable_adaptive_extrusion=False,
+                    amplitude=4, segment_length=1.0)
+                heights = emitted_heights(output)
+                # Strictly separated layers, and preserved middle-layer
+                # deformation instead of globally planar output.
+                for lay in range(2, 8):
+                    self.assertIn(lay, heights)
+                    self.assertIn(lay-1, heights)
+                    self.assertGreater(
+                        min(heights[lay]) - max(heights[lay-1]), .05)
+                first = heights[1][0]
+                last = heights[7][-1]
+                if sign < 0:
+                    self.assertAlmostEqual(first, 2 * h, places=3)
+                    self.assertLess(last, 8 * h)
+                else:
+                    self.assertGreater(first, 2 * h)
+                    self.assertAlmostEqual(last, 8 * h, places=3)
+
     def test_nonplanar_xyz_extrusion_rising_falling_flat_and_zero_xy(self):
         xy, source_e = 0.64, 0.032
         per_xy_mm = source_e / xy
