@@ -116,6 +116,18 @@ Modulates Z height during infill printing to create 3D wave patterns:
 
 **Best for:** Large flat surfaces, parts with sparse infill, structural components
 
+### Experimental: static Safezone envelope (feature branch only)
+
+Branch: `feature/nonplanar-safezone-planar-fallback` — **not merged into main**.
+
+- The slicer's original Solid-layer Z heights are the only static floor/roof references; no adjusted Non-Planar path is used as the next layer's floor.
+- Instead of pushing several layers onto the same absolute Z clamp, the *signed Noise displacement* fades toward planar with a limited slope near the physical Solid boundaries. Bottom-layer hills and top-layer valleys remain possible; a one-layer Safezone falls back to planar.
+- Both sine and Perlin LUTs receive a one-time Z-gradient limit. The runtime still processes infill segment by segment; there is **no multi-layer planner** or new deposited-material map.
+- The original adaptive first-infill extrusion, XYZ-distance E compensation, and upper Valley Filling remain unchanged.
+- **Experimental limitation:** Static envelope bounds prevent the repeated-Z clamp plateaus, but are not a full collision test for arbitrary crossing/overlapping XY extrusion footprints or abrupt layer-dependent wall taper changes. Verify the result in a G-code viewer and on a sacrificial print before production use.
+
+The feature adds `tests/test_nonplanar_safezone.py` and a G-code processing regression in `tests/test_gcode.py`.
+
 ### 🏔️ Valley Filling (Automatic with Non-planar Infill)
 Intelligently fills the gaps (valleys) created by non-planar infill:
 - Detects when infill dips below the current layer height
