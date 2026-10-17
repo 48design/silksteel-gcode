@@ -648,8 +648,8 @@ class GCodeSafetyTests(unittest.TestCase):
             for line in output.splitlines():
                 if line.startswith(";LAYER:"):
                     layer = int(line.partition(":")[2])
-                if line.startswith("G1 X") and " Y5.000 " in line \\
-                        and " Z" in line and " E" in line:
+                if (line.startswith("G1 X") and " Y5.000 " in line
+                        and " Z" in line and " E" in line):
                     z = silk.extract_z(line)
                     if z is not None:
                         result.setdefault(layer, []).append(z)
