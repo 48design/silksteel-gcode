@@ -33,6 +33,9 @@ import os
 import argparse
 import math
 import numpy as np  # For 3D noise lookup table
+from tools.nonplanar_safezone import (
+    solid_surfaces, bound_offset, constrain_perlin_vertical_gradient
+)
 from io import StringIO
 
 # Check PIL/Pillow availability once at module level (for debug visualization)
@@ -2455,6 +2458,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                 frequency_y=frequency * 0.1,
                 frequency_z=frequency * 0.05  # Less variation in Z direction
             )
+        # Constrain vertical variation of BOTH sine and Perlin only once
+        # at LUT generation, not during G-code segment processing. The
+        # static boundary envelope also has a limited Z slope: together
+        # they prevent the hard-clamp identical-Z plateaus.
+        if amplitude > 0:
+            max_gradient_mm_per_mm = 0.10
+            max_delta = (max_gradient_mm_per_mm *
+                         noise_lut['resolution'] / amplitude)
+            noise_lut['data'] = constrain_perlin_vertical_gradient(
+                noise_lut['data'], max_delta)
     else:
         noise_lut = None
     
@@ -3931,13 +3944,27 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                                     gx, gy, current_layer, grid_cell_solid_regions, base_layer_height
                                 )
                                 
-                                # Clamp Z to safe range
+                                # Static safezone envelope: the slicer's
+                                # original Solid layer TOPS, never previously
+                                # modulated non-planar infill, define the
+                                # available range. Limit signed Noise offsets
+                                # rather than clamping every layer to one
+                                # absolute Z (which caused penetrations).
                                 z_mod_original = z_mod
-                                if local_z_min > -999:  # Valid z_min
-                                    z_mod = max(local_z_min, z_mod)
-                                if local_z_max < 999:  # Valid z_max
-                                    #z_mod = min(local_z_max - (layers_until_ceiling * base_layer_height), z_mod)
-                                    z_mod = min(local_z_max, z_mod)
+                                original_surfaces = solid_surfaces(
+                                    gx, gy, current_layer,
+                                    grid_cell_solid_regions, z_layer_map,
+                                    current_layer_height or base_layer_height)
+                                if original_surfaces is None:
+                                    # Slicer Solid occupies this XY cell:
+                                    # normal planar printing is safer.
+                                    z_mod = layer_z
+                                else:
+                                    floor_z, roof_z = original_surfaces
+                                    z_mod = bound_offset(
+                                        z_mod, layer_z,
+                                        current_layer_height or base_layer_height,
+                                        floor_z, roof_z)
 
                                 # Use the final, CLAMPED Z. This geometric
                                 # compensation applies to both rising and
