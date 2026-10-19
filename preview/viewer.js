@@ -1945,11 +1945,88 @@ const timelineResize=new ResizeObserver(()=>{
     if(model)updateTimelineMarkers();
 });
 timelineResize.observe($("timelineMarkers"));
+// Diagnostics are opt-in via ?debug; never expose UI in normal mode.
+const debugEnabled=new URLSearchParams(location.search).has("debug");
+let debugPanel=null,debugReadout=null,debugBoxes=false;
+let debugLast=0,debugFrames=0,debugFrameDuration=0,debugPrev=0,debugLodMs=0;
+const debugFrustum=new THREE.Frustum(),debugProjection=new THREE.Matrix4();
+const debugHelpers=new THREE.Group();debugHelpers.name="Debug chunk bounds";
+if(debugEnabled){
+    scene.add(debugHelpers);
+    debugPanel=document.createElement("aside");
+    debugPanel.style.cssText="position:fixed;right:12px;top:12px;z-index:1000;width:300px;max-width:90vw;max-height:70vh;overflow:auto;padding:12px;background:#111b26ef;color:#e4edff;border:1px solid #55687d;border-radius:9px;box-shadow:0 8px 28px #0008;font:12px/1.5 monospace";
+    const heading=document.createElement("strong");heading.textContent="SilkSteel · Live Debug";
+    const boxLabel=document.createElement("label");
+    boxLabel.style.cssText="display:flex;align-items:center;justify-content:flex-start;gap:8px;margin:8px 0";
+    const checkbox=document.createElement("input");checkbox.type="checkbox";
+    checkbox.addEventListener("change",()=>{debugBoxes=checkbox.checked;if(!debugBoxes)clearDebugHelpers();});
+    boxLabel.append(checkbox,document.createTextNode("Chunk-Boxen anzeigen"));
+    debugReadout=document.createElement("pre");
+    debugReadout.style.cssText="margin:0;white-space:pre-wrap;font:inherit";
+    debugPanel.append(heading,boxLabel,debugReadout);
+    document.body.append(debugPanel);
+}
+function clearDebugHelpers(){
+    for(const helper of [...debugHelpers.children]){
+        debugHelpers.remove(helper);helper.geometry.dispose();helper.material.dispose();
+    }
+}
+function renderDebugStats(now){
+    if(!debugEnabled)return;
+    debugFrames++;
+    if(debugPrev)debugFrameDuration+=now-debugPrev;
+    debugPrev=now;
+    if(now-debugLast<500)return;
+    camera.updateMatrixWorld();
+    debugFrustum.setFromProjectionMatrix(
+        debugProjection.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse));
+    let visible=0,culled=0,hidden=0,instances=0;
+    const lod=[0,0,0],lodInstances=[0,0,0];
+    if(debugBoxes)clearDebugHelpers();
+    for(const group of activeLayers){
+        if(!group.visible)continue;
+        for(const mesh of group.children){
+            if(!mesh.userData.lodVariants)continue;
+            if(!mesh.visible||mesh.geometry.instanceCount<1){hidden++;continue;}
+            mesh.updateWorldMatrix(true,false);
+            const inView=debugFrustum.intersectsObject(mesh);
+            if(inView){
+                visible++;instances+=mesh.geometry.instanceCount;
+                const level=mesh.userData.lodLevel;
+                lod[level]++;lodInstances[level]+=mesh.geometry.instanceCount;
+            }else culled++;
+            if(debugBoxes&&debugHelpers.children.length<160&&mesh.geometry.boundingBox){
+                const helper=new THREE.Box3Helper(mesh.geometry.boundingBox,inView?0x69d4b0:0xd98270);
+                helper.matrixAutoUpdate=false;
+                helper.matrix.copy(mesh.matrixWorld);
+                debugHelpers.add(helper);
+            }
+        }
+    }
+    const count=n=>Math.round(n).toLocaleString("de-DE");
+    const info=renderer.info.render;
+    const fps=debugFrameDuration>0?1000*debugFrames/debugFrameDuration:0;
+    debugReadout.textContent=[
+        "FPS             "+fps.toFixed(1),
+        "Draw calls      "+count(info.calls),
+        "Triangles       "+count(info.triangles),
+        "Visible chunks  "+count(visible),
+        "Culled chunks   "+count(culled),
+        "Hidden chunks   "+count(hidden),
+        "Instances       "+count(instances),
+        "LOD chunks      "+lod.join(" / ")+"  (diamond / 2 / 4)",
+        "LOD instances   "+lodInstances.map(count).join(" / "),
+        "LOD update      "+debugLodMs.toFixed(2)+" ms",
+        "Debug boxes     "+debugHelpers.children.length+" (max 160)"
+    ].join("\n");
+    debugLast=now;debugFrames=0;debugFrameDuration=0;
+}
 let lastLodUpdate=0;
 renderer.setAnimationLoop(()=>{
     const now=performance.now();
     if(now-lastLodUpdate>200){
-        updateLoftLods();
+        if(debugEnabled){const started=performance.now();updateLoftLods();debugLodMs=performance.now()-started;}
+        else updateLoftLods();
         lastLodUpdate=now;
     }
     if(playing&&model&&data){
@@ -1962,6 +2039,7 @@ renderer.setAnimationLoop(()=>{
         previousFrame=now;
     }
     controls.update();renderer.render(scene,camera);
+    if(debugEnabled)renderDebugStats(now);
 });
 // The detached Python server releases its temporary binary files after inactivity.
 setInterval(() => fetch("/ping", {cache:"no-store"}).catch(() => {}), 20000);
