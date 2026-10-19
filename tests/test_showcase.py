@@ -151,6 +151,28 @@ class ShowcaseTests(unittest.TestCase):
         deltas, _, _ = silk.scan_source_extrusion(output.splitlines())
         self.assertEqual([round(d, 3) for d in deltas if d > 1e-8], [0.4, 0.4])
 
+    def test_retract_prime_pressure_survives_deleted_wall(self):
+        source = "\n".join([
+            "; bottom_solid_layers = 1", "G90", "M82", "G92 E0",
+            ";LAYER:0", ";TYPE:Solid infill",
+            "G1 X10 Y0 E0.5",
+            "G1 E-0.5 F1800 ; retained retract",
+            ";TYPE:External perimeter",
+            "G0 X12 Y12",
+            "G1 E0.5 F1800 ; wall prime",
+            "G1 X20 Y12 E1.0",
+            ";TYPE:Internal infill",
+            "G0 X0 Y5", "G1 X10 Y5 E1.5",
+        ]) + "\n"
+        output, _ = filter_showcase_gcode(source)
+        self.assertNotIn("G0 X12 Y12", output)
+        self.assertNotIn("G1 X20 Y12 E1.0", output)
+        self.assertIn("G1 E-0.5 F1800", output)
+        self.assertIn("G1 E0.5 F1800", output)
+        deltas, _, _ = silk.scan_source_extrusion(output.splitlines())
+        self.assertEqual([round(d, 2) for d in deltas if abs(d) > 1e-8],
+                         [0.5, -1.0, 1.0, 0.5])
+
     def test_requires_printable_bottom(self):
         with self.assertRaisesRegex(ValueError, "bottom solid"):
             filter_showcase_gcode(
