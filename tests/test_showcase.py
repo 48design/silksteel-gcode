@@ -151,7 +151,7 @@ class ShowcaseTests(unittest.TestCase):
         deltas, _, _ = silk.scan_source_extrusion(output.splitlines())
         self.assertEqual([round(d, 3) for d in deltas if d > 1e-8], [0.4, 0.4])
 
-    def test_retract_prime_pressure_survives_deleted_wall(self):
+    def test_deleted_wall_pressure_and_sync_commands_do_not_survive(self):
         source = "\n".join([
             "; bottom_solid_layers = 1", "G90", "M82", "G92 E0",
             ";LAYER:0", ";TYPE:Solid infill",
@@ -167,11 +167,55 @@ class ShowcaseTests(unittest.TestCase):
         output, _ = filter_showcase_gcode(source)
         self.assertNotIn("G0 X12 Y12", output)
         self.assertNotIn("G1 X20 Y12 E1.0", output)
-        self.assertIn("G1 E-0.5 F1800", output)
-        self.assertIn("G1 E0.5 F1800", output)
+        self.assertNotIn("retained retract", output)
+        self.assertNotIn("wall prime", output)
+        self.assertNotIn("showcase pressure", output)
         deltas, _, _ = silk.scan_source_extrusion(output.splitlines())
         self.assertEqual([round(d, 2) for d in deltas if abs(d) > 1e-8],
-                         [0.5, -1.0, 1.0, 0.5])
+                         [0.5, 0.5])
+
+    def test_no_smoothificator_bricklayers_pressure_ghosts(self):
+        source = "\n".join([
+            "; layer_height = 0.28", "; bottom_solid_layers = 1",
+            "G90", "M82", "G92 E0",
+            ";LAYER_CHANGE", ";Z:0.28", ";HEIGHT:0.28", ";LAYER:0",
+            ";TYPE:Solid infill", "G0 X0 Y0", "G1 X10 Y0 E0.3",
+            ";LAYER_CHANGE", ";Z:0.56", ";HEIGHT:0.28", ";LAYER:1",
+            "G92 E0", "G1 E-10.000000 F3900", "M117 Time Left 0h22m33s",
+            "G1 E0.000000 F3900",
+            ";TYPE:External perimeter",
+            "; ====== SMOOTHIFICATOR START: 3 passes at 0.0933mm each ======",
+            "; Smoothificator pass 1/3",
+            "G1 X100 Y100 E2.09026",
+            "; Smoothificator pass 2/3",
+            "G92 E2.09026 ; SilkSteel: showcase E sync",
+            "G1 E2.09026 ; SilkSteel: showcase pressure",
+            "; Smoothificator pass 3/3",
+            "G92 E4.18052 ; SilkSteel: showcase E sync",
+            "G1 E4.18052 ; SilkSteel: showcase pressure",
+            "G92 E6.27078 ; Smoothificator E sync",
+            "; ====== SMOOTHIFICATOR END ======",
+            ";WIPE_START", ";WIPE_END",
+            ";TYPE:Internal perimeter",
+            "G92 E12.40327 ; Bricklayers contour E sync",
+            "G1 X120 Y100 E13.4",
+            "G92 E18.39416 ; Bricklayers contour E sync",
+            "G92 E0", "G1 E-10 F3900", "G1 E0 F3900",
+            ";TYPE:Internal infill",
+            "G0 X20 Y20", "G1 X30 Y20 Z0.56 E0.35",
+        ]) + "\n"
+        result, stats = filter_showcase_gcode(source)
+        self.assertGreater(stats["removed_extrusions"], 0)
+        for garbage in ("SMOOTHIFICATOR", "Smoothificator pass",
+                        "Bricklayers", "showcase pressure",
+                        "G1 E2.09026", "G1 E4.18052",
+                        "G1 E-10", "M117 Time Left"):
+            self.assertNotIn(garbage, result)
+        self.assertNotIn(";TYPE:External perimeter", result)
+        self.assertNotIn(";TYPE:Internal perimeter", result)
+        self.assertEqual(result.count("G92 E"), 2)  # startup + one infill rebase
+        deltas, _, _ = silk.scan_source_extrusion(result.splitlines())
+        self.assertEqual([round(d, 3) for d in deltas if abs(d) > 1e-8], [0.3, 0.35])
 
     def test_requires_printable_bottom(self):
         with self.assertRaisesRegex(ValueError, "bottom solid"):
