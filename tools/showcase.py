@@ -109,6 +109,7 @@ def filter_showcase_gcode(gcode, bottom_layers=None):
     emitted_e, e_mode_rel = 0.0, False
     removed, removed_motion, empty_layers, reconnections = 0, 0, 0, 0
     end_code = False
+    last_fan_command = None
 
     def emit_move(target, relative, speed=8400):
         """Reposition with one direct movement instead of replaying wall path."""
@@ -206,7 +207,8 @@ def filter_showcase_gcode(gcode, bottom_layers=None):
             if re.search(r'smoothificator|bricklayers|\bWIPE_(?:START|END)|\bCONTINUED across layer', item['stripped'], re.I):
                 continue
             if in_start or end_code or retained or (
-                    printed_layer and not item['stripped'].startswith(';TYPE:')):
+                    printed_layer and item['stripped'].startswith(
+                        (';LAYER_CHANGE', ';LAYER:', ';Z:', ';HEIGHT:'))):
                 out.append(line)
             continue
         if _G92.match(code):
@@ -221,6 +223,12 @@ def filter_showcase_gcode(gcode, bottom_layers=None):
             continue
         if re.match(r'^M117\s+Time Left\b', code, re.I) and not in_start and not end_code:
             continue
+        if re.match(r'^M10[67](?:\s|$)', code, re.I):
+            # Repeated slicer fan commands around deleted wall blocks add
+            # noise, but *changes* in fan speed must remain in order.
+            if code == last_fan_command and not end_code:
+                continue
+            last_fan_command = code
         if _M82.match(code):
             e_mode_rel = False
         elif _M83.match(code):
