@@ -116,6 +116,32 @@ Modulates Z height during infill printing to create 3D wave patterns:
 
 **Best for:** Large flat surfaces, parts with sparse infill, structural components
 
+### 🧪 Infill-only showcase (`-showcase`)
+
+Render and print a fully open infill structure, supported by the bottom solid layers:
+
+```powershell
+python SilkSteel.py input.gcode -showcase -o showcase.gcode -preview
+```
+
+Slice **normally** with perimeters, bottom solid layers and top layers enabled.
+SilkSteel first computes full non-planar infill using the unmodified wall/solid
+geometry, then removes **all wall/perimeter and gap-fill extrusion**, as well as
+solid/top/bridge infill above the initial bottom layers. The bottom solid layers
+and all internal infill remain. Removed wall paths are changed into consolidated
+non-extruding travels with E-coordinate synchronization; collision-aware Safe
+Z-hop is applied to the resulting printed geometry.
+
+`-showcase` automatically enables non-planar infill unless explicitly disabled.
+The bottom-layer count comes from the slicer's `bottom_solid_layers` metadata
+(fallback: 3); override it with `-showcaseBottomLayers 4`.
+The command fails if no bottom solid extrusion is available. The first layers
+may have exposed edges because **even bottom perimeters are removed**.
+
+**Important:** This is a deliberately open showcase, not a structural print.
+Check nozzle clearance, bed adhesion, extrusion/travels and first layers in the
+preview before attempting a physical print.
+
 ### Experimental: static Safezone envelope (feature branch only)
 
 Branch: `feature/nonplanar-safezone-planar-fallback` — **not merged into main**.
