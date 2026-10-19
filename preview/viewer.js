@@ -2009,7 +2009,7 @@ function renderDebugStats(now){
             const corners=[];
             for(let k=0;k<8;k++){
                 point.set(k&1?box.max.x:box.min.x,k&2?box.max.y:box.min.y,k&4?box.max.z:box.min.z);
-                corners.push(point.clone().applyMatrix4(mesh.matrixWorld));
+                corners.push(scene.worldToLocal(point.clone().applyMatrix4(mesh.matrixWorld)));
             }
             let edge=0;
             for(const [a,b] of debugBoxEdges){
