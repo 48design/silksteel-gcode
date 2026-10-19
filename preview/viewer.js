@@ -1950,26 +1950,26 @@ const debugEnabled=new URLSearchParams(location.search).has("debug");
 let debugPanel=null,debugReadout=null,debugBoxes=false;
 let debugLast=0,debugFrames=0,debugFrameDuration=0,debugPrev=0,debugLodMs=0;
 const debugFrustum=new THREE.Frustum(),debugProjection=new THREE.Matrix4();
-const debugHelpers=new THREE.Group();debugHelpers.name="Debug chunk bounds";
+// Debug overlay uses ONE line draw call; never thousands of Box3Helpers.
+const debugBoxEdges=[[0,1],[0,2],[0,4],[1,3],[1,5],[2,3],[2,6],[3,7],[4,5],[4,6],[5,7],[6,7]];
+const debugBoxGeometry=new THREE.BufferGeometry();
+const debugBoxMaterial=new THREE.LineBasicMaterial({color:0x69d4b0,depthTest:false,depthWrite:false,transparent:true,opacity:.75});
+const debugBoxLines=new THREE.LineSegments(debugBoxGeometry,debugBoxMaterial);
+debugBoxLines.frustumCulled=false;debugBoxLines.renderOrder=28;debugBoxLines.visible=false;
 if(debugEnabled){
-    scene.add(debugHelpers);
+    scene.add(debugBoxLines);
     debugPanel=document.createElement("aside");
-    debugPanel.style.cssText="position:fixed;right:12px;top:12px;z-index:1000;width:300px;max-width:90vw;max-height:70vh;overflow:auto;padding:12px;background:#111b26ef;color:#e4edff;border:1px solid #55687d;border-radius:9px;box-shadow:0 8px 28px #0008;font:12px/1.5 monospace";
+    debugPanel.style.cssText="position:fixed;right:12px;top:12px;z-index:1000;width:310px;max-width:90vw;max-height:70vh;overflow:auto;padding:12px;background:#111b26ef;color:#e4edff;border:1px solid #55687d;border-radius:9px;box-shadow:0 8px 28px #0008;font:12px/1.5 monospace";
     const heading=document.createElement("strong");heading.textContent="SilkSteel · Live Debug";
     const boxLabel=document.createElement("label");
     boxLabel.style.cssText="display:flex;align-items:center;justify-content:flex-start;gap:8px;margin:8px 0";
     const checkbox=document.createElement("input");checkbox.type="checkbox";
-    checkbox.addEventListener("change",()=>{debugBoxes=checkbox.checked;if(!debugBoxes)clearDebugHelpers();});
-    boxLabel.append(checkbox,document.createTextNode("Chunk-Boxen anzeigen"));
+    checkbox.addEventListener("change",()=>{debugBoxes=checkbox.checked;if(!debugBoxes)debugBoxLines.visible=false;});
+    boxLabel.append(checkbox,document.createTextNode("Sichtbare Chunk-Boxen"));
     debugReadout=document.createElement("pre");
     debugReadout.style.cssText="margin:0;white-space:pre-wrap;font:inherit";
     debugPanel.append(heading,boxLabel,debugReadout);
     document.body.append(debugPanel);
-}
-function clearDebugHelpers(){
-    for(const helper of [...debugHelpers.children]){
-        debugHelpers.remove(helper);helper.geometry.dispose();helper.material.dispose();
-    }
 }
 function renderDebugStats(now){
     if(!debugEnabled)return;
@@ -1982,7 +1982,7 @@ function renderDebugStats(now){
         debugProjection.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse));
     let visible=0,culled=0,hidden=0,instances=0;
     const lod=[0,0,0],lodInstances=[0,0,0];
-    if(debugBoxes)clearDebugHelpers();
+    const boxMeshes=debugBoxes?[]:null;
     for(const group of activeLayers){
         if(!group.visible)continue;
         for(const mesh of group.children){
@@ -1994,14 +1994,35 @@ function renderDebugStats(now){
                 visible++;instances+=mesh.geometry.instanceCount;
                 const level=mesh.userData.lodLevel;
                 lod[level]++;lodInstances[level]+=mesh.geometry.instanceCount;
+                if(boxMeshes&&mesh.geometry.boundingBox)boxMeshes.push(mesh);
             }else culled++;
-            if(debugBoxes&&debugHelpers.children.length<160&&mesh.geometry.boundingBox){
-                const helper=new THREE.Box3Helper(mesh.geometry.boundingBox,inView?0x69d4b0:0xd98270);
-                helper.matrixAutoUpdate=false;
-                helper.matrix.copy(mesh.matrixWorld);
-                debugHelpers.add(helper);
-            }
         }
+    }
+    let boxesDrawn=0;
+    if(boxMeshes){
+        // Evenly sample in-frustum boxes, so we do not draw only the first layer/chunk.
+        const maxBoxes=1200,stride=Math.max(1,Math.ceil(boxMeshes.length/maxBoxes));
+        const positions=new Float32Array(Math.ceil(boxMeshes.length/stride)*72);
+        const point=new THREE.Vector3();
+        for(let i=0;i<boxMeshes.length;i+=stride){
+            const mesh=boxMeshes[i],box=mesh.geometry.boundingBox;
+            const corners=[];
+            for(let k=0;k<8;k++){
+                point.set(k&1?box.max.x:box.min.x,k&2?box.max.y:box.min.y,k&4?box.max.z:box.min.z);
+                corners.push(point.clone().applyMatrix4(mesh.matrixWorld));
+            }
+            let edge=0;
+            for(const [a,b] of debugBoxEdges){
+                const o=boxesDrawn*72+edge++*6;
+                positions.set(corners[a].toArray(),o);
+                positions.set(corners[b].toArray(),o+3);
+            }
+            boxesDrawn++;
+        }
+        debugBoxGeometry.setAttribute("position",new THREE.BufferAttribute(
+            positions.subarray(0,boxesDrawn*72),3));
+        debugBoxGeometry.computeBoundingSphere();
+        debugBoxLines.visible=boxesDrawn>0;
     }
     const count=n=>Math.round(n).toLocaleString("de-DE");
     const info=renderer.info.render;
@@ -2017,7 +2038,7 @@ function renderDebugStats(now){
         "LOD chunks      "+lod.join(" / ")+"  (diamond / 2 / 4)",
         "LOD instances   "+lodInstances.map(count).join(" / "),
         "LOD update      "+debugLodMs.toFixed(2)+" ms",
-        "Debug boxes     "+debugHelpers.children.length+" (max 160)"
+        "Debug boxes     "+count(boxesDrawn)+" (sampled, 1 call)"
     ].join("\n");
     debugLast=now;debugFrames=0;debugFrameDuration=0;
 }
