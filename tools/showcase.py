@@ -160,47 +160,23 @@ def filter_showcase_gcode(gcode, bottom_layers=None):
                                              if item['rel_xyz'] else axes[axis])
                 continue
             if not retained:
-                # Preserve pressure changes in printed layers even when their
-                # wall path is gone. A preceding retained retract may otherwise
-                # be left without its prime, causing infill under-extrusion.
-                if printed_layer and 'E' in axes and not item['depositing']:
-                    if not e_mode_rel and abs(emitted_e - item['e_before']) > 0.00001:
-                        out.append(f'G92 E{item["e_before"]:.5f} ; SilkSteel: showcase E sync\n')
-                        emitted_e = item['e_before']
-                    if any(axis in axes for axis in 'XYZ'):
-                        feed = re.search(r'(?<![A-Za-z])F([-+]?\d+(?:\.\d+)?)', code)
-                        suffix = f' F{feed.group(1)}' if feed else ''
-                        out.append(f'G1 E{axes["E"]:.5f}{suffix} ; SilkSteel: showcase pressure\n')
-                    else:
-                        out.append(line)
-                    emitted_e = emitted_e + axes['E'] if e_mode_rel else axes['E']
-                    removed_motion += 1
-                    continue
+                # Never forward retracts/primes or extrusion-only commands
+                # belonging to a deleted feature. In absolute E mode even
+                # G1 E+2 without XY is a potentially enormous filament dump.
                 removed_motion += 1
                 if item['depositing']:
                     removed += 1
                 continue
             if not item['depositing']:
-                # Slicer Z-hops, wipe travels and path tracing are discarded.
-                # One safe direct travel will replace them at the next deposit.
-                if 'E' not in axes:
-                    # Preserve feed-only commands, not XY/Z motion.
-                    if not any(axis in axes for axis in 'XYZ') and re.search(r'\bF[-+]?\d', code):
-                        out.append(line)
-                    else:
-                        removed_motion += 1
-                    continue
-                # Keep retract/unretract in a retained print feature, without
-                # recreating any stale travel or Z motion attached to it.
-                if not e_mode_rel and abs(emitted_e - item['e_before']) > 0.00001:
-                    out.append(f'G92 E{item["e_before"]:.5f} ; SilkSteel: showcase E sync\n')
-                    emitted_e = item['e_before']
-                if any(axis in axes for axis in 'XYZ'):
-                    out.append(f'G1 E{axes["E"]:.5f}\n')
-                    removed_motion += 1
-                else:
+                # Reconstruct only the actual printable segments. Discard
+                # slicer retract/prime, wipe and Z-hop sequences (including
+                # those that straddle TYPE boundaries), rather than leaving
+                # unpaired pressure changes when neighboring walls are gone.
+                # G92 is restored just before the next kept extrusion.
+                if 'E' not in axes and not any(axis in axes for axis in 'XYZ') and re.search(r'\bF[-+]?\d', code):
                     out.append(line)
-                emitted_e = emitted_e + axes['E'] if e_mode_rel else axes['E']
+                else:
+                    removed_motion += 1
                 continue
             # The only remaining XY paths are genuine filament deposition.
             # Return directly to the original start, not deleted wall paths.
@@ -225,14 +201,25 @@ def filter_showcase_gcode(gcode, bottom_layers=None):
         if _ROLE.match(item['stripped']) and not retained and not in_start and not end_code:
             continue
         if not code:
-            if in_start or end_code or retained or (printed_layer and not item['stripped'].startswith(';TYPE:')):
+            # Smoothificator/Bricklayers comments, wipes and toolpath notes
+            # have no meaning without the eliminated geometry.
+            if re.search(r'smoothificator|bricklayers|\bWIPE_(?:START|END)|\bCONTINUED across layer', item['stripped'], re.I):
+                continue
+            if in_start or end_code or retained or (
+                    printed_layer and not item['stripped'].startswith(';TYPE:')):
                 out.append(line)
             continue
         if _G92.match(code):
-            if 'E' in axes:
-                emitted_e = axes['E']
-            emitted_pos.update({a: axes[a] for a in 'XYZ' if a in axes})
-            out.append(line)
+            # Full-feature processing adds many wall-only G92 E syncs.
+            # Ignore them, including Bricklayers/Non-planar syncs. Source E
+            # stays tracked by records(); the next retained extrusion gets
+            # one rebase if needed, without any physical filament movement.
+            xyz = [a for a in 'XYZ' if a in axes]
+            if xyz:
+                emitted_pos.update({a: axes[a] for a in xyz})
+                out.append('G92 ' + ' '.join(f'{a}{axes[a]:g}' for a in xyz) + '\n')
+            continue
+        if re.match(r'^M117\s+Time Left\b', code, re.I) and not in_start and not end_code:
             continue
         if _M82.match(code):
             e_mode_rel = False
