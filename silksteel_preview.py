@@ -558,7 +558,8 @@ def source_context(source: Path, offsets: list[int], line: int,
 
 
 def serve(processed: Path | None = None, original: Path | None = None,
-          display_name: str | None = None, original_display_name: str | None = None) -> None:
+          display_name: str | None = None, original_display_name: str | None = None,
+          debug: bool = False) -> None:
     """Open the browser before parsing; make failures observable to the user."""
     assets = Path(__file__).resolve().parent / "preview"
     with tempfile.TemporaryDirectory(prefix="silksteel-preview-") as tmp:
@@ -870,7 +871,7 @@ def serve(processed: Path | None = None, original: Path | None = None,
         else:
             threading.Thread(target=prepare_files, daemon=True).start()
         threading.Thread(target=idle_watchdog, daemon=True).start()
-        url = f"http://127.0.0.1:{server.server_port}/"
+        url = f"http://127.0.0.1:{server.server_port}/" + ("?debug" if debug else "")
         print(f"SilkSteel Preview: {url}", flush=True)
 
         opened = webbrowser.open(url, new=1)
@@ -894,11 +895,13 @@ if __name__ == "__main__":
     parser.add_argument("--display-name")
     parser.add_argument("--original-display-name")
     parser.add_argument("--snapshot-dir", type=Path)
+    parser.add_argument("-debug", "--debug", action="store_true", help="Launch the viewer with ?debug live diagnostics")
     arguments = parser.parse_args()
     try:
         serve(arguments.processed.resolve() if arguments.processed else None,
               arguments.original.resolve() if arguments.original else None,
-              arguments.display_name, arguments.original_display_name)
+              arguments.display_name, arguments.original_display_name,
+              debug=arguments.debug)
     finally:
         if arguments.snapshot_dir:
             path = arguments.snapshot_dir.resolve()
