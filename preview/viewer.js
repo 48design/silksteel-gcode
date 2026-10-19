@@ -220,13 +220,50 @@ function sectionMesh(steps=4,mode="mantle"){
     geometry.setIndex(indices);
     return geometry;
 }
+// Four-vertex cross-section for subpixel distant beads.
+function diamondMesh(mode="mantle"){
+    const geometry=new THREE.InstancedBufferGeometry();
+    const corners=[[1,0,1,0],[0,1,0,1],[-1,0,-1,0],[0,-1,0,-1]];
+    const vertices=[],indices=[];
+    const add=(side,top,cos,sin,end,cap)=>{
+        vertices.push(side,top,cos,sin,end,cap);
+        return vertices.length/6-1;
+    };
+    const ring=(end,cap)=>corners.map(v=>add(...v,end,cap));
+    if(mode!=="cap"){
+        const a=ring(0,0),b=ring(1,0);
+        for(let i=0;i<4;i++){
+            const j=(i+1)%4;
+            indices.push(a[i],b[i],a[j],b[i],b[j],a[j]);
+        }
+    }
+    if(mode!=="mantle"){
+        for(const end of mode==="cap"?[0]:[0,1]){
+            const r=ring(end,1),center=add(0,0,0,0,end,2);
+            for(let i=0;i<4;i++){
+                const j=(i+1)%4;
+                if(end===0)indices.push(center,r[i],r[j]);
+                else indices.push(center,r[j],r[i]);
+            }
+        }
+    }
+    for(let attr=0;attr<6;attr++){
+        if(mode==="cap"&&attr===4)continue;
+        const values=new Float32Array(vertices.length/6);
+        for(let i=0;i<values.length;i++)values[i]=vertices[i*6+attr];
+        geometry.setAttribute(["aSide","aTop","aCos","aSin","aEnd","aCap"][attr],
+            new THREE.Float32BufferAttribute(values,1));
+    }
+    geometry.setIndex(indices);
+    return geometry;
+}
 const base=sectionMesh(4,"mantle");
 const capBase=sectionMesh(4,"cap");
 const headBase=sectionMesh(4,"closed");
 // Low/high profile templates only contain shared vertices/indices. Per-instance
 // attributes are reused across LODs: no duplicate path data on the GPU.
-const mantleLods=[sectionMesh(2,"mantle"),base,sectionMesh(7,"mantle")];
-const capLods=[sectionMesh(2,"cap"),capBase,sectionMesh(7,"cap")];
+const mantleLods=[diamondMesh("mantle"),sectionMesh(2,"mantle"),base];
+const capLods=[diamondMesh("cap"),sectionMesh(2,"cap"),capBase];
 const vertexShader = `
 precision highp float;
 attribute float aSide, aTop, aCos, aSin, aEnd, aCap;
@@ -457,6 +494,10 @@ function boundLoft(geometry,bounds){
     const dx=(hi[0]-lo[0])*.5+padding;
     const dy=(hi[2]-lo[2])*.5+padding;
     const dz=(hi[1]-lo[1])*.5+padding;
+    geometry.boundingBox=new THREE.Box3(
+        new THREE.Vector3(center.x-dx,center.y-dy,center.z-dz),
+        new THREE.Vector3(center.x+dx,center.y+dy,center.z+dz)
+    );
     geometry.boundingSphere=new THREE.Sphere(center,Math.hypot(dx,dy,dz));
 }
 function bindLoftAttributes(geometry,plan,capItems=null){
@@ -494,16 +535,42 @@ function makeLoftLod(mesh,level){
     }
     geometry.instanceCount=mesh.geometry.instanceCount;
     geometry.boundingSphere=mesh.geometry.boundingSphere?.clone()||null;
+    geometry.boundingBox=mesh.geometry.boundingBox?.clone()||null;
     return geometry;
 }
+// Frustum vs object-aligned box, including transformed/rotated meshes.
+// Keep Three.js default culling for every other scene object.
+const defaultIntersectsObject=THREE.Frustum.prototype.intersectsObject;
+const boxCenter=new THREE.Vector3(),boxExtent=new THREE.Vector3();
+const boxWorldCenter=new THREE.Vector3();
+THREE.Frustum.prototype.intersectsObject=function(object){
+    if(!object.userData?.loftBoxCull || !object.geometry?.boundingBox)
+        return defaultIntersectsObject.call(this,object);
+    const box=object.geometry.boundingBox,m=object.matrixWorld.elements;
+    box.getCenter(boxCenter);box.getSize(boxExtent).multiplyScalar(.5);
+    boxWorldCenter.copy(boxCenter).applyMatrix4(object.matrixWorld);
+    for(const plane of this.planes){
+        const n=plane.normal;
+        const radius=boxExtent.x*Math.abs(n.x*m[0]+n.y*m[1]+n.z*m[2])
+            +boxExtent.y*Math.abs(n.x*m[4]+n.y*m[5]+n.z*m[6])
+            +boxExtent.z*Math.abs(n.x*m[8]+n.y*m[9]+n.z*m[10]);
+        if(plane.distanceToPoint(boxWorldCenter)+radius<0)return false;
+    }
+    return true;
+};
+const lodFrustum=new THREE.Frustum(),lodProjection=new THREE.Matrix4();
 function updateLoftLods(){
     if(!model||!data)return;
     const height=renderer.domElement.clientHeight;
     if(!height)return;
     const f=height/(2*Math.tan(camera.fov*Math.PI/360));
+    camera.updateMatrixWorld();
+    lodFrustum.setFromProjectionMatrix(
+        lodProjection.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse));
     for(const group of activeLayers){
         for(const mesh of group.children){
             if(!mesh.userData.lodVariants||!mesh.visible)continue;
+            if(!lodFrustum.intersectsObject(mesh))continue;
             const bounds=mesh.geometry.boundingSphere;
             if(!bounds)continue;
             const distance=Math.max(camera.near,
@@ -544,6 +611,7 @@ function createLayer(index) {
         bindLoftAttributes(geometry,plan);
         const mesh=new THREE.Mesh(geometry,newMaterial(chunk.role,false,vertexShader,info.z));
         mesh.frustumCulled=true;
+        mesh.userData.loftBoxCull=true;
         mesh.userData.role=chunk.role;
         mesh.userData.indices=Uint32Array.from(chunk.indices);
         mesh.userData.lodVariants=[null,geometry,null];
@@ -556,6 +624,7 @@ function createLayer(index) {
             bindLoftAttributes(capGeometry,plan,plan.caps);
             const caps=new THREE.Mesh(capGeometry,newMaterial(chunk.role,false,capVertexShader,info.z));
             caps.frustumCulled=true;
+            caps.userData.loftBoxCull=true;
             caps.userData.role=chunk.role;
             caps.userData.cap=true;
             caps.userData.indices=Uint32Array.from(plan.caps.map(item=>item.index));
@@ -570,6 +639,7 @@ function createLayer(index) {
             const bevel=new THREE.Mesh(bevelGeometry,
                 newMaterial(chunk.role,false,vertexShader,info.z));
             bevel.frustumCulled=true;
+            bevel.userData.loftBoxCull=true;
             bevel.userData.role=chunk.role;
             bevel.userData.bevel=true;
             bevel.userData.indices=plan.bevels.indices;
