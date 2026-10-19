@@ -112,7 +112,8 @@ def filter_showcase_gcode(gcode, bottom_layers=None):
         source_e = source_e + axes["E"] if relative_e else axes["E"]
         delta_e = source_e - before_e
         is_solid = role in _SOLIDS
-        exclude = (role in _WALLS or (is_solid and layer >= bottom_layers))
+        exclude = (role in _WALLS or role == "top solid infill" or
+                   (is_solid and layer >= bottom_layers))
         # Keep E-only unretractions/primes: they may restore pressure after a
         # retract in an earlier, retained feature block.
         skip = (exclude and delta_e > 1e-8 and
