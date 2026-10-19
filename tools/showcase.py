@@ -7,7 +7,7 @@ import re
 
 _ROLE = re.compile(r"^;TYPE:\s*(.+?)\s*$", re.I)
 _LAYER = re.compile(r"^;LAYER:(\d+)", re.I)
-_BOTTOM = re.compile(r"^;\s*bottom_solid_layers\s*=\s*(\d+)\b", re.I)
+_BOTTOM = re.compile(r"^;\s*bottom_solid_layers\s*=\s*(\d+)\b", re.I | re.M)
 _MOTION = re.compile(r"^G0?([0123])(?:\s|$)", re.I)
 _AXIS = re.compile(r"(?<![A-Za-z])([XYZE])\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
 _G92 = re.compile(r"^G92(?:\s|$)", re.I)
