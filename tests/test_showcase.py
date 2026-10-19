@@ -85,19 +85,19 @@ class ShowcaseTests(unittest.TestCase):
             "G1 X3 E1.0", "G1 Y4 E1.5",
             "G90", "M83", ";TYPE:Internal infill",
             "G1 X10 Y10 E0.2",
-            "M82", "G1 X11 Y10 E1.7",
+            "M82", "G1 X11 Y10 E1.9",
         ]) + "\n"
         output, stats = filter_showcase_gcode(source)
         self.assertIn("G0 X3.00000 Y4.00000 F8400", output)
         self.assertNotIn("G1 X3 E1.0", output)
         self.assertNotIn("G1 Y4 E1.5", output)
-        self.assertIn("G92 E1.50000 ; SilkSteel: showcase E sync", output)
+        self.assertIn("G92 E1.70000 ; SilkSteel: showcase E sync", output)
         self.assertEqual(stats["bottom_layers"], 1)
         lines = output.splitlines()
         deltas, _, _ = silk.scan_source_extrusion(lines)
         kept = [
             d for line, d in zip(lines, deltas)
-            if line.startswith("G1 ") and ("E0.2" in line or "E1.7" in line)
+            if line.startswith("G1 ") and ("E0.2" in line or "E1.9" in line)
         ]
         self.assertEqual(len(kept), 2)
         self.assertTrue(all(abs(d - 0.2) < 1e-6 for d in kept))
