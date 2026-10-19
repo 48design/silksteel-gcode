@@ -59,7 +59,8 @@ class ShowcaseTests(unittest.TestCase):
                 self.assertEqual(stats["bottom_extrusions"], 2)
                 self.assertEqual(stats["infill_extrusions"], 4)
                 self.assertEqual(stats["removed_extrusions"], 4 * 4 + 2 + 4)
-                self.assertIn("SilkSteel: showcase travel", result)
+                self.assertGreater(stats["removed_motions"], stats["removed_extrusions"])
+                self.assertNotIn("showcase travel", result)
 
                 lines = result.splitlines()
                 deltas, _, _ = silk.scan_source_extrusion(lines)
@@ -70,7 +71,7 @@ class ShowcaseTests(unittest.TestCase):
                 self.assertEqual(len(positive), 6)
                 self.assertTrue(all(abs(value - 0.3) < 1e-5 for value in positive))
                 for role in ("External perimeter", "Internal perimeter", "Top solid infill"):
-                    self.assertIn(";TYPE:" + role, result)
+                    self.assertNotIn(";TYPE:" + role, result)
                 if relative:
                     self.assertNotIn("showcase E sync", result)
                 else:
@@ -102,6 +103,54 @@ class ShowcaseTests(unittest.TestCase):
         self.assertEqual(len(kept), 2)
         self.assertTrue(all(abs(d - 0.2) < 1e-6 for d in kept))
 
+    def test_prunes_all_removed_wall_and_top_layer_motion(self):
+        source = fixture() + "\n".join([
+            ";LAYER_CHANGE", ";Z:1.00", ";HEIGHT:0.2", ";LAYER:4",
+            ";TYPE:External perimeter",
+            "G0 Z5 ; wall-only hop",
+            "G0 X100 Y100 ; wall-only travel",
+            "G1 X110 Y100 E20",
+            ";LAYER_CHANGE", ";Z:1.20", ";LAYER:5",
+            "G0 Z6 ; empty top hop",
+            "G1 X120 Y120 E21",
+            "; end gcode",
+            "M104 S0",
+            "G0 Z20 ; park",
+            "G0 X0 Y200",
+            "M84",
+        ]) + "\n"
+        output, stats = filter_showcase_gcode(source)
+        self.assertEqual(stats["empty_layers"], 2)
+        self.assertNotIn(";LAYER:4", output)
+        self.assertNotIn(";LAYER:5", output)
+        self.assertNotIn("wall-only", output)
+        self.assertNotIn("empty top hop", output)
+        self.assertIn("G0 Z20 ; park", output)
+        self.assertIn("G0 X0 Y200", output)
+        self.assertIn("M84", output)
+
+    def test_eliminates_wall_hops_and_reconnects_infill(self):
+        source = "\n".join([
+            "; bottom_solid_layers = 1", "G90", "M82", "G92 E0",
+            ";LAYER:0", ";TYPE:Solid infill", "G0 X0 Y0",
+            "G1 X10 Y0 E0.4",
+            ";TYPE:Internal perimeter",
+            "G0 Z1.4 ; deleted wall hop",
+            "G0 X100 Y100 ; deleted wall travel",
+            "G0 Z0.2", "G1 X110 Y100 E0.8",
+            ";TYPE:Internal infill",
+            "G0 Z1.4 ; old infill hop",
+            "G0 X3 Y3", "G0 Z0.2",
+            "G1 X8 Y3 E1.2",
+        ]) + "\n"
+        output, _ = filter_showcase_gcode(source)
+        for unwanted in ("deleted wall hop", "deleted wall travel", "old infill hop", "X100 Y100"):
+            self.assertNotIn(unwanted, output)
+        self.assertIn("G0 X3.00000 Y3.00000", output)
+        self.assertIn("G92 E0.80000", output)
+        deltas, _, _ = silk.scan_source_extrusion(output.splitlines())
+        self.assertEqual([round(d, 3) for d in deltas if d > 1e-8], [0.4, 0.4])
+
     def test_requires_printable_bottom(self):
         with self.assertRaisesRegex(ValueError, "bottom solid"):
             filter_showcase_gcode(
@@ -122,7 +171,7 @@ class ShowcaseTests(unittest.TestCase):
                     frequency=6, segment_length=1.0)
             with open(dst, encoding="utf-8") as file:
                 output = file.read()
-            self.assertIn("SilkSteel: showcase travel", output)
+            self.assertIn("SilkSteel: showcase reconnect", output)
             self.assertIn(";TYPE:Internal infill", output)
             self.assertIn(";TYPE:Solid infill", output)
             self.assertIn("showcase E sync", output)
