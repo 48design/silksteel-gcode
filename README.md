@@ -132,7 +132,12 @@ and all internal infill remain. Wall, roof and slicer travel/Z-hop paths are pru
 The remaining deposition segments are reconnected directly with synchronized
 E coordinates; collision-aware Safe Z-hop runs only on the resulting printable
 geometry. Layers with no retained extrusion are removed, while the start/end
-printer scripts remain intact.
+printer scripts remain intact. Obsolete Smoothificator/Bricklayers E resets,
+retract/prime commands, wipe markers and estimated-time messages are removed
+from the showcase body. The surviving E coordinates are rebased directly
+before printed extrusion. The showcase filter does not currently reconstruct
+retractions for its new direct XY reconnect travels; inspect for possible
+stringing during real prints.
 
 `-showcase` automatically enables non-planar infill unless explicitly disabled.
 The bottom-layer count comes from the slicer's `bottom_solid_layers` metadata
