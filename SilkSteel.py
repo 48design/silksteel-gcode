@@ -33,6 +33,7 @@ import os
 import argparse
 import math
 import numpy as np  # For 3D noise lookup table
+from tools.showcase import filter_showcase_gcode
 from tools.nonplanar_safezone import (
     solid_surfaces, bound_offset, constrain_perlin_vertical_gradient
 )
@@ -1321,6 +1322,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
                  z_hop_retraction=DEFAULT_Z_HOP_RETRACTION,
                  enable_bridge_densifier=DEFAULT_ENABLE_BRIDGE_DENSIFIER,
                  remove_gap_fill=DEFAULT_REMOVE_GAP_FILL,
+                 showcase=False, showcase_bottom_layers=None,
                  debug=False):
     
     # Determine output filename
@@ -1349,6 +1351,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     logging.info(f"  - Safe Z-hop: {enable_safe_z_hop}")
     logging.info(f"  - Bridge Densifier: {enable_bridge_densifier}")
     logging.info(f"  - Remove Gap Fill: {remove_gap_fill}")
+    logging.info(f"  - Showcase: {showcase}")
     
     # Print to console for user visibility
     print("\n" + "=" * 85)
@@ -2479,7 +2482,7 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # Preserve the slicer's feature-type continuity across a layer boundary.
     # This specifically fixes exterior contours that begin immediately after
     # ;LAYER_CHANGE with no repeated ;TYPE:External perimeter marker.
-    if enable_smoothificator:
+    if enable_smoothificator or showcase:
         lines, inherited_outer_types = restore_layer_continued_wall_types(lines)
         logging.info("Restored %d implicit outer-wall TYPE markers at layer boundaries",
                      inherited_outer_types)
@@ -4307,6 +4310,16 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
     # logic during feature processing, which can interfere with carefully crafted
     # feature output (Smoothificator passes, Bricklayers Z-shifts, etc.).
     
+    modified_gcode = output_buffer.getvalue()
+    output_buffer.close()
+    if showcase:
+        print("Applying Showcase filter (retain bottom solid + non-planar infill)...")
+        modified_gcode, showcase_stats = filter_showcase_gcode(
+            modified_gcode, bottom_layers=showcase_bottom_layers)
+        logging.info("Showcase: %s", showcase_stats)
+        print(f"  Retained {showcase_stats['bottom_layers']} bottom layers; "
+              f"removed {showcase_stats['removed_extrusions']} wall/top extrusions")
+
     if enable_safe_z_hop:
         print("Applying Safe Z-hop to travel moves...")
         logging.info("\n" + "="*70)
@@ -4320,8 +4333,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         tracked_relative_e = False
 
         # Get the processed G-code lines
-        modified_gcode = output_buffer.getvalue()
-        output_buffer.close()
         gcode_lines = modified_gcode.splitlines(keepends=True)
         
         # State tracking for Z-hop pass
@@ -4515,10 +4526,6 @@ def process_gcode(input_file, output_file=None, outer_layer_height=None,
         final_output.close()
         logging.info(f"Z-hop pass complete: {zhop_lift_count} lifts, {zhop_drop_count} drops")
         logging.info(f"  Skipped: {zhop_skipped_micro_travel} micro-travels, {zhop_skipped_already_safe} already safe")
-    else:
-        # Z-hop disabled, use output as-is
-        modified_gcode = output_buffer.getvalue()
-        output_buffer.close()
     
     modified_gcode = restore_extrusion_feedrates(modified_gcode)
     print(f"Writing modified G-code to: {os.path.basename(output_file)}...")
@@ -4630,6 +4637,11 @@ if __name__ == "__main__":
     parser.add_argument('-disableRemoveGapFill', '--disable-remove-gap-fill', action='store_const', const=False, dest='enable_remove_gap_fill',
                        help='Disable gap fill removal (overrides -full)')
     
+    parser.add_argument('-showcase', '--showcase', action='store_true',
+                        help='Keep bottom solid layers and non-planar infill; remove walls and top solids after processing')
+    parser.add_argument('-showcaseBottomLayers', '--showcase-bottom-layers', type=int, default=None,
+                        help='Number of bottom solid layers to retain (default: slicer bottom_solid_layers, fallback 3)')
+
     # Debug mode arguments
     debug_group = parser.add_mutually_exclusive_group()
     debug_group.add_argument('-debug', '--debug', dest='debug_level', action='store_const', const=1, default=0,
@@ -4678,6 +4690,9 @@ if __name__ == "__main__":
         # Gap fill removal is too buggy, don't enable it with -full
         # Smoothificator and Safe Z-hop are already enabled by default
     
+    if args.showcase and args.enable_non_planar is None:
+        args.enable_non_planar = True
+
     # Convert None to False for features that default to disabled (if user never specified them)
     if args.enable_bricklayers is None:
         args.enable_bricklayers = False
@@ -4728,6 +4743,8 @@ if __name__ == "__main__":
             safe_z_hop_margin=args.safe_z_hop_margin,
             enable_bridge_densifier=args.enable_bridge_densifier,
             remove_gap_fill=args.enable_remove_gap_fill,
+            showcase=args.showcase,
+            showcase_bottom_layers=args.showcase_bottom_layers,
             debug=debug
         )
         
