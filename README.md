@@ -128,9 +128,11 @@ Slice **normally** with perimeters, bottom solid layers and top layers enabled.
 SilkSteel first computes full non-planar infill using the unmodified wall/solid
 geometry, then removes **all wall/perimeter and gap-fill extrusion**, as well as
 solid/top/bridge infill above the initial bottom layers. The bottom solid layers
-and all internal infill remain. Removed wall paths are changed into consolidated
-non-extruding travels with E-coordinate synchronization; collision-aware Safe
-Z-hop is applied to the resulting printed geometry.
+and all internal infill remain. Wall, roof and slicer travel/Z-hop paths are pruned after non-planar processing.
+The remaining deposition segments are reconnected directly with synchronized
+E coordinates; collision-aware Safe Z-hop runs only on the resulting printable
+geometry. Layers with no retained extrusion are removed, while the start/end
+printer scripts remain intact.
 
 `-showcase` automatically enables non-planar infill unless explicitly disabled.
 The bottom-layer count comes from the slicer's `bottom_solid_layers` metadata
