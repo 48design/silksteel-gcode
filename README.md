@@ -8,47 +8,6 @@ A powerful G-code post-processor that transforms your 3D prints by creating silk
 
 ---
 
-## 🔎 Interactive 3D extrusion preview (`-preview`)
-
-Open a local browser-based **volume** viewer automatically after post-processing:
-
-```powershell
-python SilkSteel.py input.gcode -full -o output.gcode -preview
-```
-
-The separate `silksteel_preview.py` module streams the processed G-code into compact binary data. Each deposited path is rendered as a **real 3D rounded rectangle** with corner radius `0.4 × min(width, height)`. It remains rounded-rectangular when free extrusion becomes taller than it is wide. The top follows the nozzle's programmed Z exactly; only the bottom stretches downward. The material area remains tied to `ΔE`, filament diameter and path length, not cosmetic line width. Colored materials distinguish Smoothificator, Bricklayers base/shifted, non-planar infill, valley filling and bridges.
-
-The viewer has a **vertical layer selector on the right edge** and a **full-width playback dock at the bottom**. Toggle the timeline between **Gesamter Druck** (entire print, with layer-boundary ticks and visible layer labels) and **Aktueller Layer** (fine-grained scrubbing and replay scoped to one layer). Play/pause, playback speed, and a reset-to-range-start button work in both modes. The 3D deposition grows continuously within each G1 move. The Z-hop visibility/color control is located under **Extrusionstypen** rather than **Darstellung**. The sidebar defaults to **current layer plus the layer immediately below** (adjustable). Browsing layers with the right-hand slider, its +/- buttons, or timeline layer markers always shows the **fully completed selected layer** independent of playback time; scrubbing/playing resumes the normal temporal preview. The sidebar controls ghosted lower layers and feature visibility. **SilkSteel Safe Z-hops appear as red lift/travel/drop overlays**. When using `-o`, the model selector can switch between original and processed G-code.
-
-Each feature (including the Z-hop overlay, initially red) now has a clickable color swatch. Colors change instantly without modifying the physical extrusion thickness; they persist through the local preview backend at `%LOCALAPPDATA%\\SilkSteel\\preview-colors.json` on Windows (or `~/.config/SilkSteel/preview-colors.json` on other systems), so they survive the random localhost ports used for each new viewer. A reset button restores the defaults. Browser localStorage is retained as a same-origin fallback.
-
-Playback duration is estimated from commanded G-code feedrates and G4 dwell commands. Firmware acceleration/jerk, thermal waits and other machine-specific delays are not modelled, so elapsed time is an approximation rather than a slicer-accurate print-time estimate.
-
-The preview window opens **immediately** after post-processing; large G-code files are converted asynchronously, with a progress indicator in the browser. If the detached browser launcher fails, inspect `SilkSteel_preview_log.txt` alongside `SilkSteel.py`, or run `python silksteel_preview.py output.gcode` directly to see any traceback and localhost URL.
-
-**SuperSlicer compatibility:** `-preview` preserves an untouched original G-code **before** SilkSteel modifies the input and snapshots the processed result before the slicer deletes its temporary `*.gcode.pp` output. Thus original-versus-processed comparison also works when the postprocessor overwrites SuperSlicer's temporary input without `-o`. The snapshot is cleaned up when the viewer shuts down. The viewer also supports dropping `.gcode` / `.gcode.pp` onto the window or clicking **G-Code-Datei öffnen**; new files are analysed locally without running SilkSteel again. For a standalone empty viewer, run `python silksteel_preview.py` (no input required). It uses a temporary localhost server, which closes after the viewer has been inactive. Three.js is loaded from a version-pinned CDN, so a browser connection to the CDN is required.
-
-**Unified analytic flow profiles (no occupancy raster):** The viewer renders the G-code's programmed material deposit, not a simulated nozzle collision with older lines. **Every extrusion role uses the same speed/flow heuristic**: the extruded filament volume per actual XYZ path length determines the cross-sectional area `A`, while feedrate and volumetric flow estimate a free-strand height. The available distance below the nozzle limits that height; excess volume expands the width instead. Smoothificator and Bricklayers provide known pass-thickness constraints, valley-filling passes provide thin increment constraints, and unsupported bridges use the unconstrained free profile. Lifted non-planar paths are **not** assigned a separate adaptive-only shape: their raised nozzle and any extra E naturally affect the same model. Every path section preserves volume, with the top following commanded Z and `A = width × height − (4 − π) × (0.4 × min(width,height))²`. No XY surface map is built, no 0.4-mm cells are probed, and a G1 is not subdivided purely to guess substrate contact. The speed/flow estimate is a visual heuristic, **not** a prediction of actual melt viscosity, cooling, sagging, nozzle pressure, substrate contact or collisions; it never changes printer G-code.
-
-**Additional diagnostic tools:**
-
-- **Continuous GPU loft (default):** Connected segments of the same extrusion feature share volume-averaged, identical profile rings at their junctions even when neighboring G1 widths/heights differ; the profile ring is stretched by the exact diagonal-cut factor 1/cos(turn/2). When that miter would extend beyond 45% of either adjacent segment, a local rounded sweep of profile rings connects the corner (including U-turns), rather than generating a spike or gap. Rounded G-code endpoints within 0.012 mm are snapped. Only actual path starts and ends receive separately instanced closed caps; the advancing print tip stays closed during playback. There is no CPU-built `LoftGeometry` mesh per G1 and no compute shader requirement. Extrusion mantles are GPU-instanced, spatially batched in 40-mm cells with up to 6,000 sections per batch and have conservative bounding spheres for camera frustum culling. Zoom-based profile LOD uses 2/4/7 corner subdivisions per quarter arc with hysteresis and reuses the same GPU instance attributes. Turning off **GPU-Loft (nahtlos)** switches to independent closed segments for debugging. Continuous extrusion moves (including reversals) stay connected; genuine travel breaks remain separate.
-- **Interactive cross-section:** Enable **Schnittansicht**, select X, Y or Z, and scrub the position slider. Three.js clips the 3D volume and a bounded analytic pass traces intersected bead outlines. The contours are a geometric approximation, not manifold boolean cut caps; processing pauses during animation to preserve playback performance.
-- **Automatic diagnostics:** The optional **Diagnose** panel flags extreme widths, abrupt extrusion Z excursions, potentially unsupported stretched extrusions, sudden neighboring flow changes and likely in-place Z-hops. Click a finding to seek its timestamp and focus the camera. Findings are heuristic warnings, not validated printer collisions.
-- **Original / SilkSteel difference:** With two loaded G-codes, **Differenzansicht** draws original centerline tracks in cyan and shows spatial material differences in green (added) and red (reduced). Per-layer material totals are computed from bead volume; the location heatmap uses approximate 0.65-mm XY and 0.20-mm Z bins, not exact CSG subtraction. Comparison work is bounded to the active layer and deferred while playing.
-
-**Plain slicer G-code compatibility:** Standard G0/G1 extrusion moves and G2/G3 arc-fitting commands are rendered, including relative/absolute extrusion, signed-radius arcs and absolute/relative arc-center modes. If a local bead cross-section is out of the admissible range, the valid neighboring portions are kept and the affected original movement is identified in diagnostics. **SilkSteel is not required** for the standalone viewer.
-
-**G-code inspector and source verification:** Click a deposited track to open the exact numbered G-code line with nearby commands. The inspector highlights **the current played source line** in amber and the **manually selected source line** in blue (both independently, including travel moves and G4 dwell). Pinned indicators keep both source lines visible even when they are outside the scrolling context. The line-number field can jump directly to a timed G-code position. Under **Diagnose → G-Code-Rohbahnen prüfen**, the optional overlay shows extrusions that were skipped in the 3D reconstruction (red), G2/G3 arc endpoints represented by straight reference chords (pink), and Z-only extrusions (purple). Enable **Auch gerenderte Rohbahnen** to overlay *all* G-code positive-E tracks in cyan and directly compare the source paths with the volume renderer. This makes it possible to distinguish a missing G-code move from a preview reconstruction bug. The G-code is not loaded as a huge text blob: only a small numbered source window is read on demand using sparse offsets.
-
-**Collapsible sidebar:** All eight left-hand sections are independently collapsible and their open/closed states persist across launches in `%LOCALAPPDATA%\\SilkSteel\\preview-sidebar.json` (Windows).
-
-**Regression coverage:** `python -m unittest discover -s tests -v` checks the G-code parser and module integration, and `node tests/preview_modules.test.mjs` exercises join continuity, diagnostic heuristics, comparative volumes and clip contours. Both commands are included in the manually triggered GitHub Actions tests workflow.
-
-**Accuracy limits:** This is an idealized geometric flow visualization, not a thermal/material-flow simulation. The active viewer uses an analytic nominal substrate plane or explicitly authored pass heights rather than probing previously deposited paths. Consequently, true support/contact, sparse or partially supported strands, and real sagging, swelling, nozzle pressure and cooling are not simulated. G2/G3 arcs in G17/G18/G19 planes (I/J/K, signed R and helical moves) are tessellated into continuous, volume-preserving extrusion segments. Unsupported/malformed arcs are explicitly counted and shown as marked straight-line approximations where endpoints exist, never silently dropped. Avoid relying on the preview as the only safety check for printing.
-
----
-
 ## 🎯 What is SilkSteel?
 
 SilkSteel is an advanced G-code post-processing tool developed by [48DESIGN](https://www.48design.de) that applies multiple optimization techniques to your sliced files:
@@ -116,48 +75,13 @@ Modulates Z height during infill printing to create 3D wave patterns:
 
 **Best for:** Large flat surfaces, parts with sparse infill, structural components
 
-### 🧪 Infill-only showcase (`-showcase`)
-
-Render and print a fully open infill structure, supported by the bottom solid layers:
-
-```powershell
-python SilkSteel.py input.gcode -showcase -o showcase.gcode -preview
-```
-
-Slice **normally** with perimeters, bottom solid layers and top layers enabled.
-SilkSteel first computes full non-planar infill using the unmodified wall/solid
-geometry, then removes **all wall/perimeter and gap-fill extrusion**, as well as
-solid/top/bridge infill above the initial bottom layers. The bottom solid layers
-and all internal infill remain. Wall, roof and slicer travel/Z-hop paths are pruned after non-planar processing.
-The remaining deposition segments are reconnected directly with synchronized
-E coordinates; collision-aware Safe Z-hop runs only on the resulting printable
-geometry. Layers with no retained extrusion are removed, while the start/end
-printer scripts remain intact. Obsolete Smoothificator/Bricklayers E resets,
-retract/prime commands, wipe markers and estimated-time messages are removed
-from the showcase body. The surviving E coordinates are rebased directly
-before printed extrusion. The showcase filter does not currently reconstruct
-retractions for its new direct XY reconnect travels; inspect for possible
-stringing during real prints.
-
-`-showcase` automatically enables non-planar infill unless explicitly disabled.
-The bottom-layer count comes from the slicer's `bottom_solid_layers` metadata
-(fallback: 3); override it with `-showcaseBottomLayers 4`.
-The command fails if no bottom solid extrusion is available. The first layers
-may have exposed edges because **even bottom perimeters are removed**.
-
-**Important:** This is a deliberately open showcase, not a structural print.
-Check nozzle clearance, bed adhesion, extrusion/travels and first layers in the
-preview before attempting a physical print.
-
-### Experimental: static Safezone envelope (feature branch only)
-
-Branch: `feature/nonplanar-safezone-planar-fallback` — **not merged into main**.
+### Non-planar Safezone Envelope
 
 - The slicer's original Solid-layer Z heights are the only static floor/roof references; no adjusted Non-Planar path is used as the next layer's floor.
 - Instead of pushing several layers onto the same absolute Z clamp, the *signed Noise displacement* fades toward planar with a limited slope near the physical Solid boundaries. Bottom-layer hills and top-layer valleys remain possible; a one-layer Safezone falls back to planar.
 - Both sine and Perlin LUTs receive a one-time Z-gradient limit. The runtime still processes infill segment by segment; there is **no multi-layer planner** or new deposited-material map.
 - The original adaptive first-infill extrusion, XYZ-distance E compensation, and upper Valley Filling remain unchanged.
-- **Experimental limitation:** Static envelope bounds prevent the repeated-Z clamp plateaus, but are not a full collision test for arbitrary crossing/overlapping XY extrusion footprints or abrupt layer-dependent wall taper changes. Verify the result in a G-code viewer and on a sacrificial print before production use.
+- **Limitation:** Static envelope bounds prevent the repeated-Z clamp plateaus, but are not a full collision test for arbitrary crossing/overlapping XY extrusion footprints or abrupt layer-dependent wall taper changes. Verify the result in a G-code viewer and on a sacrificial print before production use.
 
 The feature adds `tests/test_nonplanar_safezone.py` and a G-code processing regression in `tests/test_gcode.py`.
 
@@ -215,6 +139,22 @@ Removes gap fill sections from G-code:
 **Best for:** Prints where gap fill causes artifacts or isn't structurally necessary
 
 **Note:** Gap fill is often useful for sealing small gaps. Only remove it if you're experiencing issues or want faster prints.
+
+### 🔎 Interactive 3D G-code Viewer (Optional, `-preview`)
+
+SilkSteel includes a browser-based **3D extrusion viewer** for inspecting G-code and comparing the original and processed toolpaths. The viewer is an optional diagnostic tool; SilkSteel's primary purpose is G-code post-processing.
+
+- **Volume-based extrusion rendering** with connected paths, rounded profiles, color-coded features and distance-dependent detail
+- **Layer navigation and playback** for the complete print or an individual layer
+- **Original vs. processed comparison**, material difference display and interactive cross-sections
+- **G-code line inspector** and diagnostics for extrusion, travel moves, Z-hops and potentially missing paths
+- **Standalone usage** for inspecting regular slicer G-code without processing it first
+
+```bash
+python SilkSteel.py input.gcode -full -o output.gcode -preview
+```
+
+For standalone use and detailed controls, see the [3D viewer documentation](docs/preview.md).
 
 ---
 
