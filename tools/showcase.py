@@ -160,6 +160,22 @@ def filter_showcase_gcode(gcode, bottom_layers=None):
                                              if item['rel_xyz'] else axes[axis])
                 continue
             if not retained:
+                # Preserve pressure changes in printed layers even when their
+                # wall path is gone. A preceding retained retract may otherwise
+                # be left without its prime, causing infill under-extrusion.
+                if printed_layer and 'E' in axes and not item['depositing']:
+                    if not e_mode_rel and abs(emitted_e - item['e_before']) > 0.00001:
+                        out.append(f'G92 E{item["e_before"]:.5f} ; SilkSteel: showcase E sync\n')
+                        emitted_e = item['e_before']
+                    if any(axis in axes for axis in 'XYZ'):
+                        feed = re.search(r'(?<![A-Za-z])F([-+]?\d+(?:\.\d+)?)', code)
+                        suffix = f' F{feed.group(1)}' if feed else ''
+                        out.append(f'G1 E{axes["E"]:.5f}{suffix} ; SilkSteel: showcase pressure\n')
+                    else:
+                        out.append(line)
+                    emitted_e = emitted_e + axes['E'] if e_mode_rel else axes['E']
+                    removed_motion += 1
+                    continue
                 removed_motion += 1
                 if item['depositing']:
                     removed += 1
