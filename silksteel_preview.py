@@ -684,6 +684,12 @@ def serve(processed: Path | None = None, original: Path | None = None,
             def do_GET(self):
                 parsed = urlsplit(self.path)
                 path = parsed.path
+                if debug and path == "/" and "debug" not in parse_qs(parsed.query, keep_blank_values=True):
+                    self.send_response(302)
+                    self.send_header("Location", "/?debug")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    return
                 if path == "/source":
                     query = parse_qs(parsed.query)
                     source_id = query.get("model", [""])[0]
