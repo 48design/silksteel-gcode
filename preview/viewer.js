@@ -61,7 +61,7 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.localClippingEnabled = true;
 canvasHost.insertBefore(renderer.domElement, canvasHost.firstChild);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
+controls.enableDamping = false;
 controls.dampingFactor = .075;
 const clipPlane = new THREE.Plane(new THREE.Vector3(1,0,0),1e9);
 const clipPlanes=[clipPlane];
@@ -257,13 +257,13 @@ function diamondMesh(mode="mantle"){
     geometry.setIndex(indices);
     return geometry;
 }
-const base=sectionMesh(4,"mantle");
-const capBase=sectionMesh(4,"cap");
+const base=sectionMesh(2,"mantle");
+const capBase=sectionMesh(2,"cap");
 const headBase=sectionMesh(4,"closed");
 // Low/high profile templates only contain shared vertices/indices. Per-instance
 // attributes are reused across LODs: no duplicate path data on the GPU.
-const mantleLods=[diamondMesh("mantle"),sectionMesh(2,"mantle"),base];
-const capLods=[diamondMesh("cap"),sectionMesh(2,"cap"),capBase];
+const mantleLods=[base,base,base];
+const capLods=[capBase,capBase,capBase];
 const vertexShader = `
 precision highp float;
 attribute float aSide, aTop, aCos, aSin, aEnd, aCap;
@@ -560,43 +560,10 @@ THREE.Frustum.prototype.intersectsObject=function(object){
     return true;
 };
 const lodFrustum=new THREE.Frustum(),lodProjection=new THREE.Matrix4();
-function updateLoftLods(){
-    if(!model||!data)return;
-    const height=renderer.domElement.clientHeight;
-    if(!height)return;
-    const f=height/(2*Math.tan(camera.fov*Math.PI/360));
-    camera.updateMatrixWorld();
-    lodFrustum.setFromProjectionMatrix(
-        lodProjection.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse));
-    for(const group of activeLayers){
-        for(const mesh of group.children){
-            if(!mesh.userData.lodVariants||!mesh.visible)continue;
-            if(!lodFrustum.intersectsObject(mesh))continue;
-            const bounds=mesh.geometry.boundingSphere;
-            if(!bounds)continue;
-            const distance=Math.max(camera.near,
-                camera.position.distanceTo(bounds.center));
-            const pixelWidth=f*mesh.userData.lodWidth/distance;
-            // Hysteresis prevents constant buffer/VAO churn at thresholds.
-            const previous=mesh.userData.lodLevel;
-            // Prefer low-profile geometry in distant views. Subpixel toolpaths
-            // gain no useful silhouette from additional cross-section vertices.
-            const next=previous===0
-                ? (pixelWidth>3.2?1:0)
-                : previous===2?(pixelWidth<5.0?1:2)
-                : pixelWidth<2.5?0:pixelWidth>6.3?2:1;
-            if(next===previous)continue;
-            let variant=mesh.userData.lodVariants[next];
-            if(!variant){
-                variant=makeLoftLod(mesh,next);
-                mesh.userData.lodVariants[next]=variant;
-            }
-            variant.instanceCount=mesh.geometry.instanceCount;
-            mesh.geometry=variant;
-            mesh.userData.lodLevel=next;
-        }
-    }
-}
+// Use one stable, smooth-shaded cross-section for all chunks and zoom levels.
+// Changing geometry per chunk introduces apparent defects at LOD boundaries.
+function updateLoftLods(){}
+
 function createLayer(index) {
     const layerStarted=performance.now();
     const info=model.layers[index],group=new THREE.Group();
@@ -2085,11 +2052,6 @@ function renderDebugStats(now){
 let lastLodUpdate=0;
 renderer.setAnimationLoop(()=>{
     const now=performance.now();
-    if(now-lastLodUpdate>200){
-        if(debugEnabled){const started=performance.now();updateLoftLods();debugLodMs=performance.now()-started;}
-        else updateLoftLods();
-        lastLodUpdate=now;
-    }
     if(playing&&model&&data){
         if(previousFrame){
             const [from,to]=activeRange();
@@ -2099,7 +2061,7 @@ renderer.setAnimationLoop(()=>{
         }
         previousFrame=now;
     }
-    controls.update();renderer.render(scene,camera);
+    renderer.render(scene,camera);
     if(debugEnabled)renderDebugStats(now);
 });
 // The detached Python server releases its temporary binary files after inactivity.
