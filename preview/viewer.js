@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
-import {loftBoundary,planLoft,spatialChunks} from "./loft_geometry.js";
+import {loftBoundary,planLoft,spatialBatches} from "./loft_geometry.js";
 
 import {profileArea} from "./bead_profile.js";
 import {nearestSourceRecord,rawClass} from "./gcode_inspector.js";
@@ -605,7 +605,7 @@ function createLayer(index) {
         if(id<first||id>=last)return joinRead(id);
         return recordCache[id-first] ||= readSegment(id);
     };
-    const chunks=spatialChunks(first,last,cachedRead,40,6000);
+    const chunks=spatialBatches(first,last,cachedRead,40,3,6000);
     const seamless=$("seamlessJoins").checked;
     for(const chunk of chunks){
         const plan=planLoft(chunk.indices,cachedRead,first,last,seamless);
