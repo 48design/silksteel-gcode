@@ -336,8 +336,9 @@ void main(){
  float top=max(n.y,0.0);
  // Diffuse relief fades early to suppress moire; restrained specular
  // highlights persist closer to the subpixel threshold.
- float detail=smoothstep(1.5,8.0,vLayerPixels);
- float specDetail=smoothstep(1.0,4.5,vLayerPixels);
+ // Reduce high-frequency shading well before a bead becomes subpixel.
+ float detail=smoothstep(2.5,9.0,vLayerPixels);
+ float specDetail=smoothstep(3.0,7.0,vLayerPixels);
  float lit=0.55+0.27*diffuse+0.12*fill+0.06*top;
  float darkShade=mix(0.78,lit,detail);
  vec3 mutedColor=vec3(0.018,0.026,0.040)*darkShade;
@@ -578,12 +579,12 @@ function updateLoftLods(){
             const pixelWidth=f*mesh.userData.lodWidth/distance;
             // Hysteresis prevents constant buffer/VAO churn at thresholds.
             const previous=mesh.userData.lodLevel;
-            // Diamond is only suitable for near-subpixel strands; keep
-            // rounded cross-sections wherever their silhouette is visible.
+            // Prefer low-profile geometry in distant views. Subpixel toolpaths
+            // gain no useful silhouette from additional cross-section vertices.
             const next=previous===0
-                ? (pixelWidth>1.8?1:0)
-                : previous===2?(pixelWidth<4.5?1:2)
-                : pixelWidth<1.2?0:pixelWidth>5.5?2:1;
+                ? (pixelWidth>3.2?1:0)
+                : previous===2?(pixelWidth<5.0?1:2)
+                : pixelWidth<2.5?0:pixelWidth>6.3?2:1;
             if(next===previous)continue;
             let variant=mesh.userData.lodVariants[next];
             if(!variant){
