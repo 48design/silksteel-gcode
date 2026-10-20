@@ -1698,6 +1698,36 @@ function fit() {
     grid.scale.set(Math.max(1,size/300),1,Math.max(1,size/300));
 }
 let modelLoadGeneration=0;
+const nextPaint=()=>new Promise(resolve=>requestAnimationFrame(resolve));
+function previewProgress(message,percent=null,detail=""){
+    const overlay=$("progress"),bar=$("progressBar");
+    overlay.hidden=false;
+    overlay.textContent=message;
+    overlay.dataset.detail=detail;
+    bar.hidden=percent===null;
+    if(percent!==null)bar.value=Math.max(0,Math.min(100,percent));
+}
+async function prepareInitialLayers(generation){
+    // Never generate an entire print's geometry in a single blocking call.
+    const end=model.layers.length-1;
+    const below=Number($("below").value);
+    const start=below<0?0:Math.max(0,end-below);
+    const count=end-start+1;
+    await nextPaint();
+    for(let i=start;i<=end;i++){
+        if(generation!==modelLoadGeneration)return false;
+        getLayer(i);
+        const completed=i-start+1;
+        if(completed===count||completed%2===0){
+            previewProgress("Erstelle 3D-Extrusionen…",
+                20+completed/count*78,
+                completed.toLocaleString("de-DE")+" / "+count.toLocaleString("de-DE")+" Layer · "+
+                model.count.toLocaleString("de-DE")+" Extrusionssegmente");
+            await nextPaint();
+        }
+    }
+    return generation===modelLoadGeneration;
+}
 async function loadModel(index) {
     const generation=++modelLoadGeneration;
     const loadStarted=performance.now();
@@ -1708,8 +1738,8 @@ async function loadModel(index) {
     hopData=null;
     const requested=layout.models[index];
     if(!requested)throw new Error("Ungültige G-Code-Version");
-    $("progress").hidden=false;
-    $("progress").textContent="Lade "+requested.name+" · "+requested.count.toLocaleString("de-DE")+" Stränge…";
+    previewProgress("Lade G-Code-Daten…",5,
+        requested.name+" · "+requested.count.toLocaleString("de-DE")+" Extrusionssegmente");
     const [response,hopResponse]=await Promise.all([fetch(requested.url),fetch(requested.hopUrl)]);
     if(!response.ok||!hopResponse.ok)throw Error("HTTP "+response.status+" / "+hopResponse.status);
     const buffers=await Promise.all([response.arrayBuffer(),hopResponse.arrayBuffer()]);
@@ -1726,6 +1756,8 @@ async function loadModel(index) {
     model=requested;
     data=nextData;
     hopData=nextHops;
+    previewProgress("Bereite 3D-Vorschau vor…",20,
+        model.layers.length.toLocaleString("de-DE")+" Layer");
     $("fileName").textContent=model.filename;
     $("stats").textContent=model.count.toLocaleString("de-DE")+" Extrusionssegmente · "+model.layers.length+" Layer · Filament Ø "+model.filament.toFixed(2)+" mm"+
         (model.omittedCount?" · "+model.omittedCount+" nicht gerenderte Bewegungen":"")+
@@ -1737,6 +1769,8 @@ async function loadModel(index) {
     selectedLayer=Math.max(0,model.layers.length-1);
     markerKey="";
     fit();
+    // Yield to the browser between layer builds so the loading overlay animates.
+    if(!await prepareInitialLayers(generation))return;
     refreshCut();
     seek(model.duration);
     console.info(`[Viewer] ${model.name}: parse ${model.parseSeconds??"n/a"}s; transfer ${transferMs.toFixed(1)}ms; initial geometry ${(performance.now()-loadStarted-transferMs).toFixed(1)}ms; total ${(performance.now()-loadStarted).toFixed(1)}ms`);
@@ -1744,6 +1778,7 @@ async function loadModel(index) {
     if($("diagnosticsToggle").checked)showDiagnostics();
     if($("compareToggle").checked)enableComparison();
     $("progress").hidden=true;
+    $("progressBar").hidden=true;
 }
 modelSelect.addEventListener("change",()=>{
     setPlaying(false);
@@ -1825,6 +1860,8 @@ $("compareToggle").addEventListener("change",()=>{
     }
 });
 function showError(error) {
+    $("progressBar").hidden=true;
+    $("progress").dataset.detail="Bitte Server und Browserkonsole prüfen.";
     $("progress").hidden=false;
     $("progress").textContent="Vorschaufehler: "+error.message;
     console.error(error);
