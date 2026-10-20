@@ -865,9 +865,21 @@ def serve(processed: Path | None = None, original: Path | None = None,
                 ready.set()
 
         def idle_watchdog():
+            # A closed browser must release this detached process even if
+            # conversion is still running or failed to finish.
+            launched = time.monotonic()
             while True:
-                time.sleep(20)
-                if ready.is_set() and state["status"] != "loading" and time.monotonic() - heartbeat["at"] > 120:
+                time.sleep(10)
+                now = time.monotonic()
+                idle = now - heartbeat["at"]
+                if ready.is_set():
+                    expired = idle > 120
+                else:
+                    # Allow slow first loads without keeping orphaned viewers
+                    # alive indefinitely when parsing never completes.
+                    expired = now - launched > 1800 and idle > 120
+                if expired:
+                    print(f"SilkSteel Preview: idle shutdown after {idle:.0f}s without ping", flush=True)
                     server.shutdown()
                     return
 
