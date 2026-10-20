@@ -19,7 +19,7 @@ async function load(file){
     return import("data:text/javascript;base64,"+Buffer.from(code).toString("base64"));
 }
 const {computeJoin,joinContinuity,buildJoinAttributes,sharedSplitSection}=await load("extrusion_joins.js");
-const {loftBoundary,planLoft,spatialChunks}=await load("loft_geometry.js");
+const {loftBoundary,planLoft,spatialChunks,spatialBatches}=await load("loft_geometry.js");
 const {makeJunctionGeometry,junctionVertexShader}=await load("bead_junctions.js");
 const {analysePrint}=await load("diagnostics.js");
 const {compareLayerVolumes}=await load("comparison.js");
@@ -507,3 +507,25 @@ assert.equal(buildCutContours(ordinary,[layer],"x",30,1).contours,0);
 const limited=buildCutContours(ordinary,[layer],"z",.1,1,{maxSegments:1});
 assert(limited.vertices.length>0 && limited.contours===1);
 console.log("PASS: seamless joins, print diagnostics, spatial comparison and 3D cut contours");
+
+// Spatial super-batching must retain every source segment once, in playback order.
+{
+    const segments=Array.from({length:240},(_,i)=>({
+        a:[(i%24)*5,Math.floor(i/24)*5,1],
+        b:[(i%24)*5+1,Math.floor(i/24)*5+1,1],
+        role:i%3,w:.45,h:.2
+    }));
+    const read=i=>segments[i];
+    const old=spatialChunks(0,segments.length,read,40,6000);
+    const batches=spatialBatches(0,segments.length,read,40,3,6000);
+    assert.ok(batches.length<old.length,"super-batching must reduce mesh count");
+    const ids=batches.flatMap(b=>b.indices);
+    assert.deepEqual([...ids].sort((a,b)=>a-b),
+        segments.map((_,i)=>i),"every extrusion must appear exactly once");
+    for(const batch of batches){
+        assert.ok(batch.indices.length<=6000);
+        assert.ok(batch.indices.every((id,i)=>i===0||batch.indices[i-1]<id),
+            "playback prefix must remain monotonically ordered");
+        assert.ok(batch.indices.every(id=>read(id).role===batch.role));
+    }
+}
