@@ -139,3 +139,23 @@ export function spatialChunks(layerStart,layerEnd,read,cellSize=40,maxItems=6000
         key,role:read(indices[0]).role,indices
     })));
 }
+
+// Merge nearby 40-mm logical cells into spatial GPU batches. Within each
+// batch, source IDs remain ordered so playback prefix counts stay correct.
+export function spatialBatches(first,last,read,cellSize=40,span=3,maxItems=6000){
+    const groups=new Map();
+    for(let id=first;id<last;id++){
+        const p=read(id);
+        const x=(p.a[0]+p.b[0])*.5,y=(p.a[1]+p.b[1])*.5;
+        const cx=Math.floor(x/cellSize),cy=Math.floor(y/cellSize);
+        const key=p.role+":"+Math.floor(cx/span)+":"+Math.floor(cy/span);
+        let bins=groups.get(key);
+        if(!bins){bins=[[]];groups.set(key,bins);}
+        let bucket=bins[bins.length-1];
+        if(bucket.length>=maxItems){bucket=[];bins.push(bucket);}
+        bucket.push(id);
+    }
+    return [...groups.entries()].flatMap(([key,bins])=>bins.map(indices=>({
+        key,role:read(indices[0]).role,indices
+    })));
+}
