@@ -70,7 +70,13 @@ input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}input[typ
 #resetColors{margin-top:10px;padding:4px 9px;font-size:11px;color:var(--muted);background:transparent}
 
 main{position:relative;flex:1;min-width:0}canvas{display:block;width:100%;height:100%}
-#progress{position:absolute;left:18px;top:18px;border:1px solid var(--border);background:#161b24dc;padding:12px 16px;border-radius:9px;max-width:440px}
+#progress{position:absolute;inset:0;z-index:60;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:14px;padding:36px;background:rgba(8,12,20,.9);text-align:center;color:#eaf2ff;font-size:17px;font-weight:600;letter-spacing:.01em}
+#progress[hidden]{display:none}
+#progress::before{content:"";width:50px;height:50px;border:4px solid #3a4b60;border-top-color:#83bcff;border-radius:50%;animation:progressSpin .8s linear infinite}
+#progress::after{content:attr(data-detail);display:block;font-size:12px;font-weight:400;color:#a9b9ca;max-width:550px}
+@keyframes progressSpin{to{transform:rotate(360deg)}}
+#progressBar{position:absolute;z-index:61;left:50%;top:calc(50% + 75px);transform:translateX(-50%);width:min(480px,75%);height:5px;accent-color:#83bcff}
+#progressBar[hidden]{display:none}
 #help{position:absolute;right:16px;bottom:16px;background:#141a23b8;padding:8px 12px;border-radius:7px;color:var(--muted);font-size:12px}
 #pickInfo{position:absolute;left:16px;bottom:16px;max-width:420px;background:#141a23f0;border:1px solid var(--border);padding:12px 16px;border-radius:9px;display:none;font-variant-numeric:tabular-nums}
 #pickInfo strong{display:block;margin-bottom:5px}
@@ -159,7 +165,7 @@ body.dragging #dropOverlay{display:flex}
 </div></details>
 <p class="muted" style="margin-top:auto;font-size:11px">Analytische 3D-Strangprofile aus Layerhöhe, Düsen-Z und Extrusionsmenge; Sonderpässe werden explizit berücksichtigt. Kein Auflageraster, keine Schmelzsimulation. Das extrudierte Materialvolumen bleibt erhalten.</p>
 </aside>
-<main id="viewport"><div id="layerRail" aria-label="Layer auswählen"><span class="layer-title" id="layerText">Layer —</span><button id="layerNext" title="Nächster Layer" aria-label="Nächster Layer">＋</button><input id="layer" type="range" min="0" max="0" value="0" step="1" orient="vertical" aria-label="Aktueller Layer"><button id="layerPrev" title="Vorheriger Layer" aria-label="Vorheriger Layer">−</button><span id="layerZ">Z —</span></div><div id="progress">Initialisierung der 3D-Vorschau…</div><div id="toolbar"><button id="resetView">Ansicht zurücksetzen</button></div><div id="pickInfo"></div>
+<main id="viewport"><div id="layerRail" aria-label="Layer auswählen"><span class="layer-title" id="layerText">Layer —</span><button id="layerNext" title="Nächster Layer" aria-label="Nächster Layer">＋</button><input id="layer" type="range" min="0" max="0" value="0" step="1" orient="vertical" aria-label="Aktueller Layer"><button id="layerPrev" title="Vorheriger Layer" aria-label="Vorheriger Layer">−</button><span id="layerZ">Z —</span></div><div id="progress" role="status" aria-live="polite">Initialisierung der 3D-Vorschau…</div><progress id="progressBar" max="100" value="0" hidden></progress><div id="toolbar"><button id="resetView">Ansicht zurücksetzen</button></div><div id="pickInfo"></div>
 <div id="sourceDrawer" role="dialog" aria-label="G-Code-Inspector" aria-modal="false">
   <div class="source-head"><h3>G-Code-Inspector</h3><button id="sourceClose" title="Schließen" type="button">✕</button></div>
   <div id="sourceStatus">Bahn anklicken, um den G-Code zu öffnen.</div>
