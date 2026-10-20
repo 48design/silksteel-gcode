@@ -578,12 +578,12 @@ function updateLoftLods(){
             const pixelWidth=f*mesh.userData.lodWidth/distance;
             // Hysteresis prevents constant buffer/VAO churn at thresholds.
             const previous=mesh.userData.lodLevel;
-            // Favor the four-vertex diamond at modest projected widths.
-            // Hysteresis avoids LOD oscillation during camera movement.
+            // Diamond is only suitable for near-subpixel strands; keep
+            // rounded cross-sections wherever their silhouette is visible.
             const next=previous===0
-                ? (pixelWidth>4.0?1:0)
-                : previous===2?(pixelWidth<6.2?1:2)
-                : pixelWidth<3.0?0:pixelWidth>8.0?2:1;
+                ? (pixelWidth>1.8?1:0)
+                : previous===2?(pixelWidth<4.5?1:2)
+                : pixelWidth<1.2?0:pixelWidth>5.5?2:1;
             if(next===previous)continue;
             let variant=mesh.userData.lodVariants[next];
             if(!variant){
@@ -605,7 +605,7 @@ function createLayer(index) {
         if(id<first||id>=last)return joinRead(id);
         return recordCache[id-first] ||= readSegment(id);
     };
-    const chunks=spatialBatches(first,last,cachedRead,40,3,6000);
+    const chunks=spatialBatches(first,last,cachedRead,40,2,6000);
     const seamless=$("seamlessJoins").checked;
     for(const chunk of chunks){
         const plan=planLoft(chunk.indices,cachedRead,first,last,seamless);
