@@ -273,6 +273,39 @@ class PreviewGeometryTests(unittest.TestCase):
         self.assertEqual([row[8] for row in rows], [0, 3, 5, 1])
         self.assertAlmostEqual(rows[3][7], .1)  # Explicit Smoothificator pass height
 
+    def test_smoothificator_type_comment_preserves_pass_role_and_dimensions(self):
+        _, rows = self.parse([
+            ";LAYER_CHANGE", ";Z:15.6000", ";HEIGHT:0.2800", ";LAYER:54",
+            "G90", "M82", "G92 E11.70000",
+            "G0 X90.337 Y44.462 Z15.41333 F1200",
+            ";TYPE:External perimeter",
+            "; ====== SMOOTHIFICATOR START: 3 passes at 0.0933mm each ======",
+            "; Smoothificator pass 1/3",
+            "G1 X90.182 Y44.468 E11.70233",
+            ";TYPE:External perimeter",
+            "G1 X89.920 Y44.592 E11.70673",
+            "; Smoothificator pass 2/3",
+            "G1 Z15.50667 ; Smoothificator pass Z 2/3",
+            "G1 X90.277 Y44.464 E11.70673 ; Smoothificator seam continuity",
+            "G1 X90.182 Y44.468 E11.70816",
+            "G1 X89.920 Y44.592 E11.71256",
+            "; Smoothificator pass 3/3",
+            "G1 Z15.60000 ; Smoothificator pass Z 3/3",
+            "G1 X90.277 Y44.464 E11.71256 ; Smoothificator seam continuity",
+            "G1 X90.182 Y44.468 E11.71399",
+            "G1 X89.920 Y44.592 E11.71839",
+            "; ====== SMOOTHIFICATOR END ======",
+            ";TYPE:Internal infill",
+            "G1 X89.420 Y44.592 E11.72596",
+        ])
+        self.assertEqual([row[8] for row in rows], [1] * 6 + [0])
+        for row in rows[:6]:
+            self.assertAlmostEqual(row[7], 0.0933, places=4)
+        # The same physical segment at each pass uses the same profile.
+        self.assertAlmostEqual(rows[1][6], rows[3][6], places=4)
+        self.assertAlmostEqual(rows[3][6], rows[5][6], places=4)
+        self.assertGreater(rows[6][7], rows[5][7])
+
     def test_absolute_reset_and_relative_xy(self):
         _, rows = self.parse([
             "G91", "M82", "G92 E10", "G1 X10 Y0 Z0.2 E10.5",

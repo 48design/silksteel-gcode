@@ -206,8 +206,12 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
                         pass
                 elif up.startswith("TYPE:"):
                     role_type = up[5:].strip()
-                    brick_role, smooth, smooth_height, valley, brick_base_pass = None, False, None, False, False
+                    # Slicer metadata can repeat inside a Smoothificator pass.
+                    # Only SMOOTHIFICATOR END or a layer boundary closes it.
+                    brick_role, valley, brick_base_pass = None, False, False
                     brick_pass_index = 0
+                    if not smooth:
+                        smooth_height = None
                 if "SMOOTHIFICATOR START:" in up:
                     smooth = True
                     m = re.search(r"AT\s+([\d.]+)MM EACH", up)
@@ -464,7 +468,7 @@ def convert(source: Path, destination: Path, hop_destination: Path | None = None
             "ignored_arcs": ignored_arcs}
 
 
-PREVIEW_CACHE_VERSION = 5
+PREVIEW_CACHE_VERSION = 6
 
 
 def convert_cached(source: Path, destination: Path, progress=None,
