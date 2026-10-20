@@ -578,10 +578,12 @@ function updateLoftLods(){
             const pixelWidth=f*mesh.userData.lodWidth/distance;
             // Hysteresis prevents constant buffer/VAO churn at thresholds.
             const previous=mesh.userData.lodLevel;
+            // Favor the four-vertex diamond at modest projected widths.
+            // Hysteresis avoids LOD oscillation during camera movement.
             const next=previous===0
-                ? (pixelWidth>1.7?1:0)
+                ? (pixelWidth>4.0?1:0)
                 : previous===2?(pixelWidth<6.2?1:2)
-                : pixelWidth<1.1?0:pixelWidth>8.0?2:1;
+                : pixelWidth<3.0?0:pixelWidth>8.0?2:1;
             if(next===previous)continue;
             let variant=mesh.userData.lodVariants[next];
             if(!variant){
